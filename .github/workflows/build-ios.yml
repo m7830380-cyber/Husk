@@ -90,11 +90,14 @@ jobs:
           fi
           COMMIT="$(git rev-parse --short HEAD)"
           TITLE="Husk 3.4 (with Telegram/AyuGram Crash Fixes)"
-          NOTES="Build commit $COMMIT
+          NOTES=$(cat <<EOF
+          Build commit $COMMIT
 
-Fixed issues:
-- Fixed NullPointerException in ViewGroup.addView during custom view initialization (e.g. AyuGram UndoView) by using invalidate(true) instead of virtual invalidate()
-- Added missing zlib gz* symbol exports (gzopen, gzread, gzclose, gzseek, etc.) to bionic shim for libtmessages / RLottie in Telegram / AyuGram"
+          Fixed issues:
+          - Fixed NullPointerException in ViewGroup.addView during custom view initialization (e.g. AyuGram UndoView) by using invalidate(true) instead of virtual invalidate()
+          - Added missing zlib gz* symbol exports (gzopen, gzread, gzclose, gzseek, etc.) to bionic shim for libtmessages / RLottie in Telegram / AyuGram
+          EOF
+          )
 
           if gh release view "$TAG" >/dev/null 2>&1; then
             gh release upload "$TAG" build/Husk.ipa build/Husk.tipa --clobber
