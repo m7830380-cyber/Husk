@@ -2,8 +2,34 @@
 # build.sh <out.dex> -- Husk's Java framework (android.* for apps run on Husk's Dalvik runtime): javac, then d8.
 set -e
 HERE="$(cd "$(dirname "$0")" && pwd)"
-JDK="${HUSK_JDK:-/Volumes/GTAV/husk2/tools-dl/jdk/Contents/Home}"
-D8="${HUSK_D8:-/Volumes/GTAV/husk2/tools-dl/r8.jar}"   # R8 8.5+: the d8 in build-tools 34 crashes on these classes
+if [ -n "${HUSK_JDK:-}" ] && [ -d "$HUSK_JDK" ]; then
+    JDK="$HUSK_JDK"
+elif [ -n "${JAVA_HOME:-}" ] && [ -d "$JAVA_HOME" ]; then
+    JDK="$JAVA_HOME"
+elif [ -d "/Volumes/GTAV/husk2/tools-dl/jdk/Contents/Home" ]; then
+    JDK="/Volumes/GTAV/husk2/tools-dl/jdk/Contents/Home"
+else
+    JAVAC_BIN="$(command -v javac || true)"
+    if [ -n "$JAVAC_BIN" ]; then
+        JDK="$(cd "$(dirname "$JAVAC_BIN")/.." && pwd)"
+    else
+        echo "error: javac not found" >&2; exit 1
+    fi
+fi
+
+if [ -n "${HUSK_D8:-}" ] && [ -f "$HUSK_D8" ]; then
+    D8="$HUSK_D8"
+elif [ -f "/Volumes/GTAV/husk2/tools-dl/r8.jar" ]; then
+    D8="/Volumes/GTAV/husk2/tools-dl/r8.jar"
+else
+    D8_DIR="$HERE/../../third_party/tools"
+    mkdir -p "$D8_DIR"
+    D8="$D8_DIR/r8.jar"
+    if [ ! -f "$D8" ]; then
+        echo "==> downloading r8.jar"
+        curl -fL --retry 3 -o "$D8" "https://dl.google.com/dl/android/maven2/com/android/tools/r8/8.5.35/r8-8.5.35.jar"
+    fi
+fi
 OUT="${1:-$HERE/../../build/husk-framework.dex}"
 TMP="$(mktemp -d)"
 python3 "$HERE/gen/gles20.py" "$HERE/src/android/opengl" "$HERE/../translation-layer-next/husk-tl-dvm-gles20.c" >/dev/null

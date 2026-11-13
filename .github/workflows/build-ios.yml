@@ -1,0 +1,104 @@
+name: Build Husk iOS
+
+on:
+  push:
+    branches: [ main ]
+    tags: [ 'v*' ]
+  workflow_dispatch:
+    inputs:
+      create_release:
+        description: 'Publish IPAs to GitHub Releases'
+        type: boolean
+        default: true
+
+permissions:
+  contents: write
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: Build Husk IPA
+    runs-on: macos-15
+    timeout-minutes: 60
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Xcode
+        run: |
+          xcodebuild -version
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-ios
+
+      - name: Set up Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '17'
+
+      - name: Install build tools
+        run: |
+          brew install xcodegen qemu ldid
+
+      - name: Fetch and stage prebuilts
+        run: |
+          chmod +x scripts/*.sh src/java-framework/build.sh
+          ./scripts/fetch_prebuilts.sh
+
+      - name: Build rppairing
+        run: |
+          ./scripts/build_rppairing_ios.sh
+
+      - name: Build updated Java framework
+        run: |
+          ./src/java-framework/build.sh build/java-runtime/husk-framework.dex
+
+      - name: Build Husk IPA (Ad-Hoc / Sideload)
+        run: |
+          ./scripts/package_ipa.sh build/Husk.ipa
+
+      - name: Build Husk TIPA (TrollStore)
+        run: |
+          ./scripts/package_ipa.sh --trollstore build/Husk.tipa
+
+      - name: Upload Artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: Husk-iOS
+          path: |
+            build/Husk.ipa
+            build/Husk.tipa
+          if-no-files-found: error
+
+      - name: Publish Release
+        if: startsWith(github.ref, 'refs/tags/') || (github.event_name == 'workflow_dispatch' && inputs.create_release)
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          TAG="${{ github.ref_name }}"
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ] && ! [[ "$TAG" =~ ^v[0-9] ]]; then
+            TAG="v3.4-fixed-$(date +'%Y%m%d%H%M')"
+          fi
+          COMMIT="$(git rev-parse --short HEAD)"
+          TITLE="Husk 3.4 (with Telegram/AyuGram Crash Fixes)"
+          NOTES="Build commit $COMMIT
+
+Fixed issues:
+- Fixed NullPointerException in ViewGroup.addView during custom view initialization (e.g. AyuGram UndoView) by using invalidate(true) instead of virtual invalidate()
+- Added missing zlib gz* symbol exports (gzopen, gzread, gzclose, gzseek, etc.) to bionic shim for libtmessages / RLottie in Telegram / AyuGram"
+
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release upload "$TAG" build/Husk.ipa build/Husk.tipa --clobber
+            gh release edit "$TAG" --notes "$NOTES"
+          else
+            gh release create "$TAG" build/Husk.ipa build/Husk.tipa --title "$TITLE" --notes "$NOTES"
+          fi

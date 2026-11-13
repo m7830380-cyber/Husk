@@ -1001,6 +1001,17 @@ static void *b_AFontMatcher_match(const tl_afont_matcher *m, const char *family,
     return afont_new(name);
 }
 
+static void *b_gzopen(const char *path, const char *mode)
+{
+    if (!path) return NULL;
+    char buf[1024];
+    const char *real = tl_path_resolve(path, buf, sizeof(buf));
+    TL_ERRNO_BEGIN();
+    gzFile gz = gzopen(real, mode);
+    TL_ERRNO_END();
+    return (void *)gz;
+}
+
 #define MEDIA_NULL(n)  TL_WRAP(n, b_media_null)
 #define MEDIA_ERRF(n)  TL_WRAP(n, b_media_err)
 #define MEDIA_DATA(n)  TL_DATA(#n, &g_##n)
@@ -1011,6 +1022,12 @@ const tl_bionic_entry tl_tab_ndk[] = {
     TL_DIRECT(inflate), TL_DIRECT(inflateEnd), TL_DIRECT(inflateInit2_), TL_DIRECT(inflateInit_), TL_DIRECT(zError),
     TL_DIRECT(compressBound), TL_DIRECT(zlibVersion), TL_DIRECT(compress), TL_DIRECT(compress2), TL_DIRECT(uncompress), TL_DIRECT(crc32), TL_DIRECT(adler32),
     TL_DIRECT(inflateReset), TL_DIRECT(inflateReset2), TL_DIRECT(deflateReset), TL_DIRECT(inflateSync), TL_DIRECT(deflateParams), TL_DIRECT(deflateSetDictionary), TL_DIRECT(inflateSetDictionary),
+    TL_WRAP("gzopen", b_gzopen), TL_WRAP("gzopen64", b_gzopen), TL_DIRECT(gzdopen),
+    TL_DIRECT(gzread), TL_DIRECT(gzwrite), TL_DIRECT(gzclose), TL_DIRECT(gzclose_r), TL_DIRECT(gzclose_w),
+    TL_DIRECT(gzseek), TL_WRAP("gzseek64", gzseek), TL_DIRECT(gztell), TL_WRAP("gztell64", gztell),
+    TL_DIRECT(gzeof), TL_DIRECT(gzrewind), TL_DIRECT(gzerror), TL_DIRECT(gzclearerr), TL_DIRECT(gzflush),
+    TL_DIRECT(gzputs), TL_DIRECT(gzgets), TL_DIRECT(gzputc), TL_DIRECT(gzgetc), TL_DIRECT(gzungetc),
+    TL_DIRECT(gzdirect), TL_DIRECT(gzbuffer), TL_DIRECT(gzsetparams), TL_DIRECT(gzoffset), TL_WRAP("gzoffset64", gzoffset),
     /* system fonts */
     TL_WRAP("ASystemFontIterator_open", b_ASystemFontIterator_open), TL_WRAP("ASystemFontIterator_next", b_ASystemFontIterator_next),
     TL_WRAP("ASystemFontIterator_close", b_ASystemFontIterator_close), TL_WRAP("AFont_close", b_AFont_close),
