@@ -753,99 +753,15 @@ private enum Live {
 }
 #endif
 
-/// The download as a continued processing task (iOS 26): the system keeps Husk running in the background for it and shows its
-/// progress in the Dynamic Island and on the Lock Screen.
+/// Continued processing task stub (BGContinuedProcessingTask is an iOS 26+ API; DownloadKeepAlive handles background downloads on current iOS).
 @available(iOS 26.0, *)
 @MainActor
 enum ContinuedDownload {
-    private static var task: BGContinuedProcessingTask?
-    private static var pending: String?
-    private static var registered: String?
-    private static var lastSubtitle = Date.distantPast
-
-    static var running: Bool { task != nil || pending != nil }
-    /// The system started it: Husk is being kept running.
-    static var active: Bool { task != nil }
-
-    private static var refused = false
-
-    static func begin(title: String) {
-        guard !running, !refused, let bundle = Bundle.main.bundleIdentifier else { return }
-        // The launch handler is registered for a wildcard pattern from Info.plist, and the submitted identifier has to start with the
-        // app's bundle ID. A sideloader renames the bundle (com.husk.app.<team>) but not Info.plist: then the broad com.husk.app.* is
-        // the pattern, and the identifier is made from the bundle ID as it is now.
-        let permitted = Bundle.main.object(forInfoDictionaryKey: "BGTaskSchedulerPermittedIdentifiers") as? [String] ?? []
-        guard let downloads = permitted.first(where: { $0.hasSuffix(".downloads.*") }) else { return }
-        let built = String(downloads.dropLast(".downloads.*".count))      // the bundle ID Husk was built with
-        let pattern: String? = bundle == built ? downloads : (bundle.hasPrefix(built + ".") ? permitted.first { $0 == built + ".*" } : nil)
-        guard let pattern else { refused = true; HuskLog.log("downloads", "background task: no permitted pattern"); return }
-        if registered != pattern {
-            let ok = BGTaskScheduler.shared.register(forTaskWithIdentifier: pattern, using: .main) { t in
-                MainActor.assumeIsolated { started(t) }
-            }
-            guard ok else { refused = true; HuskLog.log("downloads", "background task: \(pattern) not permitted; Husk keeps itself running instead"); return }
-            registered = pattern
-        }
-        let id = "\(bundle).downloads.\(UUID().uuidString.prefix(8))"
-        let request = BGContinuedProcessingTaskRequest(identifier: id, title: "Downloading \(title)", subtitle: "Starting…")
-        request.strategy = .fail
-        do {
-            try BGTaskScheduler.shared.submit(request)
-            pending = id
-            HuskLog.log("downloads", "background task submitted (\(id), handler \(pattern))")
-        } catch {
-            HuskLog.log("downloads", "background task \(id) refused: \(error.localizedDescription); using Husk's Live Activity instead")
-        }
-    }
-
-    private static func started(_ t: BGTask) {
-        guard let t = t as? BGContinuedProcessingTask else { t.setTaskCompleted(success: false); return }
-        task = t
-        pending = nil
-        HuskLog.log("downloads", "background task running")
-        t.expirationHandler = {
-            MainActor.assumeIsolated {
-                HuskLog.log("downloads", "background task ended by the system")
-                task = nil
-                Downloads.shared.continuedEnded()
-            }
-        }
-        _ = update(jobs: Downloads.shared.jobs, speed: Downloads.shared.speed)
-    }
-
-    /// Progress into the task. True while the system's progress is the one showing.
+    static var running: Bool { false }
+    static var active: Bool { false }
+    static func begin(title: String) {}
     @discardableResult
-    static func update(jobs: [Downloads.Job], speed: Double) -> Bool {
-        guard let t = task else { return false }
-        let active = jobs.filter { !$0.complete && !$0.paused }
-        if active.isEmpty {
-            let failed = jobs.contains { $0.failed }
-            t.progress.completedUnitCount = t.progress.totalUnitCount
-            t.updateTitle(failed ? "Download stopped" : "Download finished", subtitle: failed ? "Open Husk to retry" : (jobs.first?.title ?? ""))
-            t.setTaskCompleted(success: !failed)
-            task = nil
-            HuskLog.log("downloads", "background task completed")
-            return false
-        }
-        let received = active.reduce(0) { $0 + $1.received }, total = active.reduce(0) { $0 + $1.total }
-        // In megabytes: Progress counts in Int64 and the system shows a fraction, so the unit only has to be fine enough.
-        t.progress.totalUnitCount = max(1, total / 1_000_000)
-        t.progress.completedUnitCount = min(t.progress.totalUnitCount, received / 1_000_000)
-        if Date().timeIntervalSince(lastSubtitle) > 2 {
-            lastSubtitle = Date()
-            var sub = "\(Downloads.bytes(received)) of \(Downloads.bytes(total))"
-            if speed > 1 { sub += " · \(Downloads.bytes(Int64(speed)))/s" }
-            let files = active.reduce(0) { $0 + $1.files.count }
-            if files > 1 { sub += " · \(active.reduce(0) { $0 + $1.filesDone })/\(files) files" }
-            if speed > 1, total > received {
-                let left = Double(total - received) / speed
-                let f = DateComponentsFormatter(); f.allowedUnits = left > 3600 ? [.hour, .minute] : [.minute, .second]; f.unitsStyle = .abbreviated
-                if let tl = f.string(from: left) { sub += " · \(tl) left" }
-            }
-            t.updateTitle(active.count == 1 ? "Downloading \(active[0].title)" : "Downloading \(active.count) items", subtitle: sub)
-        }
-        return true
-    }
+    static func update(jobs: [Downloads.Job], speed: Double) -> Bool { false }
 }
 
 /// Keeps Husk running in the background while downloads are active, by playing silence: iOS lets an app that is playing audio keep
