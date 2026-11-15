@@ -143,6 +143,22 @@ static void w_glShaderSource(unsigned sh, int count, const char *const *str, con
     cat[k] = 0;
     char *ext = oes_external_rewrite(cat);
     if (ext) { free(cat); cat = ext; k = strlen(cat); }
+    static atomic_int sh_count;
+    int sc = atomic_fetch_add(&sh_count, 1);
+    if (sc < 40) {
+        char preview[201];
+        size_t pl = k < 200 ? k : 200;
+        memcpy(preview, cat, pl);
+        preview[pl] = 0;
+        for (char *p = preview; *p; p++) if (*p == '\n' || *p == '\r') *p = ' ';
+        bool has_mat = strstr(cat, "UnityPerMaterial") != NULL;
+        bool has_draw = strstr(cat, "UnityPerDraw") != NULL;
+        bool has_light = (strstr(cat, "Light") != NULL) || (strstr(cat, "light") != NULL);
+        bool has_shadow = (strstr(cat, "Shadow") != NULL) || (strstr(cat, "shadow") != NULL);
+        bool has_base = (strstr(cat, "_BaseColor") != NULL) || (strstr(cat, "_BaseMap") != NULL);
+        tl_log_line("gl: shader %u (%d bytes, mat=%d draw=%d light=%d shd=%d base=%d): %.160s",
+                    sh, (int)k, has_mat, has_draw, has_light, has_shadow, has_base, preview);
+    }
     if (!g_es31_shim) {
         const char *one = cat; int one_len = (int)k;
         r_glShaderSource(sh, 1, &one, &one_len);
@@ -210,6 +226,27 @@ static void w_glLinkProgram(unsigned prog)
         for (char *q = plog; *q; q++) if (*q == '\n') *q = '|';
         tl_log_line("gl: program %u failed to link: %.380s", prog, plog);
         return;
+    }
+    static atomic_int prog_count;
+    int pc = atomic_fetch_add(&prog_count, 1);
+    if (pc < 30) {
+        static void (*getblockname)(unsigned, unsigned, int, int *, char *);
+        static void (*getblockiv)(unsigned, unsigned, unsigned, int *);
+        if (!getblockname && a_eglGetProcAddress) {
+            getblockname = a_eglGetProcAddress("glGetActiveUniformBlockName");
+            getblockiv = a_eglGetProcAddress("glGetActiveUniformBlockiv");
+        }
+        int nblocks = 0;
+        if (getprogiv) getprogiv(prog, 0x8A36 /* GL_ACTIVE_UNIFORM_BLOCKS */, &nblocks);
+        if (nblocks > 0 && getblockname && getblockiv) {
+            for (int i = 0; i < nblocks; i++) {
+                char bname[96] = ""; int blen = 0, bbinding = -1, bsize = 0;
+                getblockname(prog, (unsigned)i, sizeof(bname) - 1, &blen, bname);
+                getblockiv(prog, (unsigned)i, 0x8A3F /* GL_UNIFORM_BLOCK_BINDING */, &bbinding);
+                getblockiv(prog, (unsigned)i, 0x8A40 /* GL_UNIFORM_BLOCK_DATA_SIZE */, &bsize);
+                tl_log_line("gl: prog %u block %d: '%s' binding=%d size=%d", prog, i, bname, bbinding, bsize);
+            }
+        }
     }
     if (!g_es31_shim) return;
     static int (*getloc)(unsigned, const char *); static unsigned (*getblk)(unsigned, const char *);
@@ -303,6 +340,9 @@ static void (*r_glBindBufferRange)(unsigned, unsigned, unsigned, long, long);
 static void w_glBindBufferRange(unsigned t, unsigned i, unsigned b, long o, long n)
 {
     es31_note_storage("glBindBufferRange", t);
+    static atomic_int count;
+    if (atomic_fetch_add(&count, 1) < 40)
+        tl_log_line("gl: glBindBufferRange(target %#x, idx %u, buf %u, off %ld, sz %ld)", t, i, b, o, n);
     if (g_es31_shim && t == 0x90D2) { w_glBindBufferBase(t, i, b); return; }   /* grows the buffer if need be; the whole buffer is bound */
     r_glBindBufferRange(t, i, b, o, n);
 }

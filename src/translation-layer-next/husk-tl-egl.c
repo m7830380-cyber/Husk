@@ -434,7 +434,13 @@ static EGLBoolean w_eglSwapBuffers(EGLDisplay d, EGLSurface s)
         EGLint w = 0, h = 0;
         const uint8_t *px = read_back(d, s, &w, &h);
         if (px && tl_javaapp_app_pixels) tl_javaapp_app_pixels(px, w, h);
-        if (n <= 3 || n % 600 == 0) tl_log_line("egl: swap #%lu (composited)", n);
+        if (n <= 3 || n % 600 == 0) {
+            static unsigned (*geterr)(void);
+            if (!geterr && a_eglGetProcAddress) geterr = a_eglGetProcAddress("glGetError");
+            unsigned err = geterr ? geterr() : 0;
+            if (err) tl_log_line("gl: swap #%lu (composited) GL error: %#x", n, err);
+            else tl_log_line("egl: swap #%lu (composited)", n);
+        }
         return EGL_TRUE;
     }
     if (n <= 3 || n % 600 == 0) {
@@ -517,6 +523,43 @@ static void w_glUniformMatrix4x3fv(int l, int c, unsigned t, const float *v) { r
 static void (*r_glSampleCoverage)(float, unsigned);
 static void w_glSampleCoverage(float v, unsigned i) { r_glSampleCoverage(v, i & 0xff); }
 
+static void (*r_glTexImage2D)(unsigned, int, int, int, int, int, unsigned, unsigned, const void *);
+static void w_glTexImage2D(unsigned target, int level, int internalformat, int width, int height, int border, unsigned format, unsigned type, const void *pixels)
+{
+    r_glTexImage2D(target, level, internalformat, width, height, border, format, type, pixels);
+    static atomic_int count;
+    int c = atomic_fetch_add(&count, 1);
+    if (c < 30 || (c % 100 == 0)) {
+        static unsigned (*geterr)(void);
+        if (!geterr && a_eglGetProcAddress) geterr = a_eglGetProcAddress("glGetError");
+        unsigned err = geterr ? geterr() : 0;
+        tl_log_line("gl: glTexImage2D(target %#x, lvl %d, intfmt %#x, %dx%d, fmt %#x, type %#x) -> err %#x", target, level, internalformat, width, height, format, type, err);
+    }
+}
+
+static void (*r_glCompressedTexImage2D)(unsigned, int, unsigned, int, int, int, int, const void *);
+static void w_glCompressedTexImage2D(unsigned target, int level, unsigned internalformat, int width, int height, int border, int size, const void *data)
+{
+    r_glCompressedTexImage2D(target, level, internalformat, width, height, border, size, data);
+    static atomic_int count;
+    int c = atomic_fetch_add(&count, 1);
+    if (c < 50 || (c % 100 == 0)) {
+        static unsigned (*geterr)(void);
+        if (!geterr && a_eglGetProcAddress) geterr = a_eglGetProcAddress("glGetError");
+        unsigned err = geterr ? geterr() : 0;
+        tl_log_line("gl: glCompressedTexImage2D(target %#x, lvl %d, intfmt %#x, %dx%d, sz %d) -> err %#x", target, level, internalformat, width, height, size, err);
+    }
+}
+
+static void (*r_glUniformBlockBinding)(unsigned, unsigned, unsigned);
+static void w_glUniformBlockBinding(unsigned prog, unsigned blockIndex, unsigned binding)
+{
+    static atomic_int count;
+    if (atomic_fetch_add(&count, 1) < 40)
+        tl_log_line("gl: glUniformBlockBinding(prog %u, block %u, binding %u)", prog, blockIndex, binding);
+    r_glUniformBlockBinding(prog, blockIndex, binding);
+}
+
 
 /*
  * Extensions ANGLE advertises that do not work well enough to use. EXT_disjoint_timer_query is the one that matters:
@@ -550,6 +593,12 @@ static const unsigned char *w_glGetString(unsigned name)
         static atomic_int said[4];
         int k = name == 0x1F02 ? 0 : name == 0x8B8C ? 1 : name == 0x1F01 ? 2 : 3;
         if (!atomic_exchange(&said[k], 1)) tl_log_line("gl: %s = %.200s", k == 0 ? "GL_VERSION" : k == 1 ? "GL_SHADING_LANGUAGE_VERSION" : k == 2 ? "GL_RENDERER" : "GL_VENDOR", (const char *)s);
+    }
+    if (name == 0x1F03 /* GL_EXTENSIONS */ && s) {
+        static atomic_int said_ext;
+        if (!atomic_exchange(&said_ext, 1)) {
+            tl_log_line("gl: GL_EXTENSIONS = %.400s", (const char *)s);
+        }
     }
     if (name != 0x1F03 /* GL_EXTENSIONS */ || !s) return s;
     static pthread_mutex_t mu = PTHREAD_MUTEX_INITIALIZER;
@@ -644,7 +693,8 @@ static const struct { const char *name; void *wrap; void **real; } k_adapt[] = {
     ADAPT(glUniformMatrix3fv), ADAPT(glUniformMatrix4fv),
     ADAPT(glUniformMatrix2x3fv), ADAPT(glUniformMatrix3x2fv), ADAPT(glUniformMatrix2x4fv), ADAPT(glUniformMatrix4x2fv),
     ADAPT(glUniformMatrix3x4fv), ADAPT(glUniformMatrix4x3fv),
-    ADAPT(glSampleCoverage), ADAPT(glGetString), ADAPT(glGetStringi), ADAPT(glCompileShader), ADAPT(glShaderSource), ADAPT(glAttachShader), ADAPT(glLinkProgram), ADAPT(glGetIntegerv), ADAPT(glBindBufferBase), ADAPT(glBindBuffer), ADAPT(glBufferData), ADAPT(glBufferSubData), ADAPT(glBindBufferRange),
+    ADAPT(glSampleCoverage), ADAPT(glTexImage2D), ADAPT(glCompressedTexImage2D), ADAPT(glUniformBlockBinding),
+    ADAPT(glGetString), ADAPT(glGetStringi), ADAPT(glCompileShader), ADAPT(glShaderSource), ADAPT(glAttachShader), ADAPT(glLinkProgram), ADAPT(glGetIntegerv), ADAPT(glBindBufferBase), ADAPT(glBindBuffer), ADAPT(glBufferData), ADAPT(glBufferSubData), ADAPT(glBindBufferRange),
     ADAPT(glGetProgramInterfaceiv), ADAPT(glGetProgramResourceIndex), ADAPT(glGetProgramResourceName), ADAPT(glGetProgramResourceiv), ADAPT(glGetIntegeri_v),
     ADAPT(eglClientWaitSyncKHR), ADAPT(eglDestroySyncKHR), ADAPT(eglGetSyncAttribKHR), ADAPT(eglClientWaitSync), ADAPT(eglDestroySync),
 };
