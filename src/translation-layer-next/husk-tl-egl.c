@@ -498,13 +498,66 @@ static void (*r_glBlitFramebuffer)(int, int, int, int, int, int, int, int, unsig
 static void w_glBlitFramebuffer(int a0, int a1, int a2, int a3, int a4, int a5, int a6, int a7, uint64_t mask, uint64_t filter)
 { r_glBlitFramebuffer(a0, a1, a2, a3, a4, a5, a6, a7, (unsigned)mask, (unsigned)filter); }
 
+static void (*r_glTexImage3D)(unsigned, int, int, int, int, int, int, unsigned, unsigned, const void *);
+static void w_glTexImage3D(unsigned target, int level, int internalformat, int width, int height, int depth, int border, unsigned format, uint64_t type, const void *pixels)
+{
+    if (!r_glTexImage3D) r_glTexImage3D = gl_proc("glTexImage3D");
+    if (r_glTexImage3D) r_glTexImage3D(target, level, internalformat, width, height, depth, border, format, (unsigned)type, pixels);
+    tl_log_line("gl: glTexImage3D(target %#x, lvl %d, intfmt %#x, %dx%dx%d, fmt %#x, type %#x) -> err %#x",
+                target, level, internalformat, width, height, depth, format, (unsigned)type, gl_proc_get_error());
+}
+
+static void (*r_glCompressedTexImage3D)(unsigned, int, unsigned, int, int, int, int, int, const void *);
+static void w_glCompressedTexImage3D(unsigned target, int level, unsigned internalformat, int width, int height, int depth, int border, int imageSize, const void *data)
+{
+    if (!r_glCompressedTexImage3D) r_glCompressedTexImage3D = gl_proc("glCompressedTexImage3D");
+    if (r_glCompressedTexImage3D) r_glCompressedTexImage3D(target, level, internalformat, width, height, depth, border, imageSize, data);
+    tl_log_line("gl: glCompressedTexImage3D(target %#x, lvl %d, intfmt %#x, %dx%dx%d, sz %d) -> err %#x",
+                target, level, internalformat, width, height, depth, imageSize, gl_proc_get_error());
+}
+
+static void (*r_glTexStorage3D)(unsigned, int, unsigned, int, int, int);
+static void w_glTexStorage3D(unsigned target, int levels, unsigned internalformat, int width, int height, int depth)
+{
+    if (!r_glTexStorage3D) r_glTexStorage3D = gl_proc("glTexStorage3D");
+    if (r_glTexStorage3D) r_glTexStorage3D(target, levels, internalformat, width, height, depth);
+    tl_log_line("gl: glTexStorage3D(target %#x, lvls %d, intfmt %#x, %dx%dx%d) -> err %#x",
+                target, levels, internalformat, width, height, depth, gl_proc_get_error());
+}
+
+static void (*r_glBindTexture)(unsigned, unsigned);
+static void w_glBindTexture(unsigned target, unsigned texture)
+{
+    if (!r_glBindTexture) r_glBindTexture = gl_proc("glBindTexture");
+    if (r_glBindTexture) r_glBindTexture(target, texture);
+    static atomic_int count_3d;
+    if (target == 0x8C1A /* GL_TEXTURE_2D_ARRAY */ || target == 0x806F /* GL_TEXTURE_3D */) {
+        if (atomic_fetch_add(&count_3d, 1) < 50)
+            tl_log_line("gl: glBindTexture(target %#x, tex %u)", target, texture);
+    }
+}
+
 static void (*r_glTexSubImage3D)(unsigned, int, int, int, int, int, int, int, unsigned, unsigned, const void *);
 static void w_glTexSubImage3D(unsigned t, int l, int x, int y, int z, int w, int h, int d, uint64_t fmt, uint64_t type, const void *px)
-{ r_glTexSubImage3D(t, l, x, y, z, w, h, d, (unsigned)fmt, (unsigned)type, px); }
+{
+    if (!r_glTexSubImage3D) r_glTexSubImage3D = gl_proc("glTexSubImage3D");
+    if (r_glTexSubImage3D) r_glTexSubImage3D(t, l, x, y, z, w, h, d, (unsigned)fmt, (unsigned)type, px);
+    static atomic_int count;
+    if (atomic_fetch_add(&count, 1) < 50)
+        tl_log_line("gl: glTexSubImage3D(target %#x, lvl %d, off %d,%d,%d, %dx%dx%d, fmt %#x, type %#x) -> err %#x",
+                    t, l, x, y, z, w, h, d, (unsigned)fmt, (unsigned)type, gl_proc_get_error());
+}
 
 static void (*r_glCompressedTexSubImage3D)(unsigned, int, int, int, int, int, int, int, unsigned, int, const void *);
 static void w_glCompressedTexSubImage3D(unsigned t, int l, int x, int y, int z, int w, int h, int d, uint64_t fmt, uint64_t size, const void *data)
-{ r_glCompressedTexSubImage3D(t, l, x, y, z, w, h, d, (unsigned)fmt, (int)size, data); }
+{
+    if (!r_glCompressedTexSubImage3D) r_glCompressedTexSubImage3D = gl_proc("glCompressedTexSubImage3D");
+    if (r_glCompressedTexSubImage3D) r_glCompressedTexSubImage3D(t, l, x, y, z, w, h, d, (unsigned)fmt, (int)size, data);
+    static atomic_int count;
+    if (atomic_fetch_add(&count, 1) < 50)
+        tl_log_line("gl: glCompressedTexSubImage3D(target %#x, lvl %d, off %d,%d,%d, %dx%dx%d, fmt %#x, sz %d) -> err %#x",
+                    t, l, x, y, z, w, h, d, (unsigned)fmt, (int)size, gl_proc_get_error());
+}
 
 static void (*r_glCopyImageSubData)(unsigned, unsigned, int, int, int, int, unsigned, unsigned, int, int, int, int, int, int, int);
 static void w_glCopyImageSubData(unsigned sn, unsigned st, int sl, int sx, int sy, int sz, unsigned dn, unsigned dt,
@@ -697,10 +750,11 @@ static void dump_prog_reflection(unsigned prog)
 {
     void (*get_prog_iv)(unsigned, unsigned, int *) = gl_proc("glGetProgramiv");
     if (!get_prog_iv) return;
+    while (gl_proc_get_error());
     int link_ok = 0;
     get_prog_iv(prog, 0x8B82 /* GL_LINK_STATUS */, &link_ok);
     int numBlocks = 0, numUniforms = 0, numAttribs = 0;
-    get_prog_iv(prog, 0x8A3A /* GL_ACTIVE_UNIFORM_BLOCKS */, &numBlocks);
+    get_prog_iv(prog, 0x8A36 /* GL_ACTIVE_UNIFORM_BLOCKS */, &numBlocks);
     get_prog_iv(prog, 0x8B86 /* GL_ACTIVE_UNIFORMS */, &numUniforms);
     get_prog_iv(prog, 0x8B89 /* GL_ACTIVE_ATTRIBUTES */, &numAttribs);
     tl_log_line("gl: [REFL] prog %u: link_status=%d, blocks=%d, uniforms=%d, attribs=%d",
@@ -709,11 +763,11 @@ static void dump_prog_reflection(unsigned prog)
     void (*get_block_name)(unsigned, unsigned, int, int *, char *) = gl_proc("glGetActiveUniformBlockName");
     void (*get_block_iv)(unsigned, unsigned, unsigned, int *) = gl_proc("glGetActiveUniformBlockiv");
     if (get_block_name && get_block_iv) {
-        for (int b = 0; b < numBlocks && b < 8; b++) {
+        for (int b = 0; b < numBlocks && b < 16; b++) {
             char bname[64] = ""; int blen = 0, bsize = 0, bbind = 0;
-            get_block_name(prog, b, sizeof(bname) - 1, &blen, bname);
-            get_block_iv(prog, b, 0x8A3C /* GL_UNIFORM_BLOCK_DATA_SIZE */, &bsize);
-            get_block_iv(prog, b, 0x8A3F /* GL_UNIFORM_BLOCK_BINDING */, &bbind);
+            get_block_name(prog, (unsigned)b, sizeof(bname) - 1, &blen, bname);
+            get_block_iv(prog, (unsigned)b, 0x8A40 /* GL_UNIFORM_BLOCK_DATA_SIZE */, &bsize);
+            get_block_iv(prog, (unsigned)b, 0x8A3F /* GL_UNIFORM_BLOCK_BINDING */, &bbind);
             tl_log_line("gl: [REFL]   prog %u block %d '%s': size %d, binding %d", prog, b, bname, bsize, bbind);
         }
     }
@@ -721,19 +775,40 @@ static void dump_prog_reflection(unsigned prog)
     void (*get_active_u)(unsigned, unsigned, int, int *, int *, unsigned *, char *) = gl_proc("glGetActiveUniform");
     int (*get_u_loc)(unsigned, const char *) = gl_proc("glGetUniformLocation");
     void (*get_active_uiv)(unsigned, int, const unsigned *, unsigned, int *) = gl_proc("glGetActiveUniformsiv");
+    void (*get_u_iv)(unsigned, int, int *) = gl_proc("glGetUniformiv");
+    void (*get_u_fv)(unsigned, int, float *) = gl_proc("glGetUniformfv");
+
     if (get_active_u && get_u_loc) {
-        for (int u = 0; u < numUniforms && u < 60; u++) {
+        for (int u = 0; u < numUniforms && u < 128; u++) {
             char uname[64] = ""; int ulen = 0, usize = 0; unsigned utype = 0;
-            get_active_u(prog, u, sizeof(uname) - 1, &ulen, &usize, &utype, uname);
+            get_active_u(prog, (unsigned)u, sizeof(uname) - 1, &ulen, &usize, &utype, uname);
             int loc = get_u_loc(prog, uname);
             int block_idx = -1, offset = -1;
             if (get_active_uiv) {
                 unsigned u_idx = (unsigned)u;
                 get_active_uiv(prog, 1, &u_idx, 0x8A3A /* GL_UNIFORM_BLOCK_INDEX */, &block_idx);
-                get_active_uiv(prog, 1, &u_idx, 0x8A37 /* GL_UNIFORM_OFFSET */, &offset);
+                if (block_idx != -1) {
+                    get_active_uiv(prog, 1, &u_idx, 0x8A37 /* GL_UNIFORM_OFFSET */, &offset);
+                }
             }
-            tl_log_line("gl: [REFL]   prog %u uniform %d '%s': type %#x, loc %d, blk %d, off %d",
-                        prog, u, uname, utype, loc, block_idx, offset);
+            if (loc >= 0 && (utype == 0x8B5E /* 2D */ || utype == 0x8DC1 /* 2D_ARRAY */ || utype == 0x8B60 /* CUBE */ || utype == 0x8B62 /* SHADOW */)) {
+                int smp_unit = -1;
+                if (get_u_iv) get_u_iv(prog, loc, &smp_unit);
+                tl_log_line("gl: [REFL]   prog %u sampler '%s': type %#x, loc %d, unit %d",
+                            prog, uname, utype, loc, smp_unit);
+            } else if (loc >= 0 && utype == 0x8B52 /* FLOAT_VEC4 */) {
+                float v[4] = {0};
+                if (get_u_fv) get_u_fv(prog, loc, v);
+                tl_log_line("gl: [REFL]   prog %u vec4 '%s': loc %d = [%.3f, %.3f, %.3f, %.3f]",
+                            prog, uname, loc, v[0], v[1], v[2], v[3]);
+            } else if (loc >= 0 && utype == 0x1406 /* FLOAT */) {
+                float v = 0;
+                if (get_u_fv) get_u_fv(prog, loc, &v);
+                tl_log_line("gl: [REFL]   prog %u float '%s': loc %d = %.3f", prog, uname, loc, v);
+            } else if (block_idx != -1) {
+                tl_log_line("gl: [REFL]   prog %u uniform %d '%s': type %#x, blk %d, off %d",
+                            prog, u, uname, utype, block_idx, offset);
+            }
         }
     }
 
@@ -742,7 +817,7 @@ static void dump_prog_reflection(unsigned prog)
     if (get_active_a && get_a_loc) {
         for (int a = 0; a < numAttribs && a < 16; a++) {
             char aname[64] = ""; int alen = 0, asize = 0; unsigned atype = 0;
-            get_active_a(prog, a, sizeof(aname) - 1, &alen, &asize, &atype, aname);
+            get_active_a(prog, (unsigned)a, sizeof(aname) - 1, &alen, &asize, &atype, aname);
             int loc = get_a_loc(prog, aname);
             tl_log_line("gl: [REFL]   prog %u attrib %d '%s': type %#x, loc %d", prog, a, aname, atype, loc);
         }
@@ -761,49 +836,97 @@ static void inspect_prog_draw(unsigned prog, int count)
 
     void (*get_int_i)(unsigned, unsigned, int *) = gl_proc("glGetIntegeri_v");
     void (*bind_buf)(unsigned, unsigned) = gl_proc("glBindBuffer");
-    void (*get_buf_sub)(unsigned, long, long, void *) = gl_proc("glGetBufferSubData");
     void (*get_buf_param)(unsigned, unsigned, int *) = gl_proc("glGetBufferParameteriv");
+    void *(*map_buf)(unsigned, long, long, unsigned) = gl_proc("glMapBufferRange");
+    unsigned char (*unmap_buf)(unsigned) = gl_proc("glUnmapBuffer");
 
     int old_ubo = 0;
     a_glGetIntegerv(0x8A28 /* GL_UNIFORM_BUFFER_BINDING */, &old_ubo);
 
     for (int i = 0; i < 4; i++) {
         int ubo = 0;
-        if (get_int_i) get_int_i(0x8A28 /* GL_UNIFORM_BUFFER_BINDING */, i, &ubo);
-        if (ubo > 0 && bind_buf && get_buf_sub && get_buf_param) {
-            bind_buf(0x8A11 /* GL_UNIFORM_BUFFER */, ubo);
+        if (get_int_i) get_int_i(0x8A28 /* GL_UNIFORM_BUFFER_BINDING */, (unsigned)i, &ubo);
+        if (ubo > 0 && bind_buf && get_buf_param) {
+            bind_buf(0x8A11 /* GL_UNIFORM_BUFFER */, (unsigned)ubo);
             int sz = 0;
             get_buf_param(0x8A11, 0x8764 /* GL_BUFFER_SIZE */, &sz);
-            float f[16] = {0};
-            int fetch_sz = sz < (int)sizeof(f) ? sz : (int)sizeof(f);
-            if (fetch_sz > 0) get_buf_sub(0x8A11, 0, fetch_sz, f);
-            tl_log_line("gl:   UBO idx %d: buf %d (sz %d bytes) f[0..7]: [%.3f, %.3f, %.3f, %.3f] [%.3f, %.3f, %.3f, %.3f]",
-                        i, ubo, sz, f[0], f[1], f[2], f[3], f[4], f[5], f[6], f[7]);
-            tl_log_line("gl:   UBO idx %d: buf %d f[8..15]: [%.3f, %.3f, %.3f, %.3f] [%.3f, %.3f, %.3f, %.3f]",
-                        i, ubo, f[8], f[9], f[10], f[11], f[12], f[13], f[14], f[15]);
+            if (map_buf && unmap_buf && sz >= 16) {
+                int read_sz = sz < 64 ? sz : 64;
+                void *ptr = map_buf(0x8A11, 0, read_sz, 0x0001 /* GL_MAP_READ_BIT */);
+                if (ptr) {
+                    float f[16] = {0};
+                    memcpy(f, ptr, (size_t)read_sz);
+                    unmap_buf(0x8A11);
+                    tl_log_line("gl:   UBO idx %d: buf %d (sz %d) f[0..7]: [%.3f, %.3f, %.3f, %.3f] [%.3f, %.3f, %.3f, %.3f]",
+                                i, ubo, sz, f[0], f[1], f[2], f[3], f[4], f[5], f[6], f[7]);
+                    tl_log_line("gl:   UBO idx %d: buf %d f[8..15]: [%.3f, %.3f, %.3f, %.3f] [%.3f, %.3f, %.3f, %.3f]",
+                                i, ubo, f[8], f[9], f[10], f[11], f[12], f[13], f[14], f[15]);
+                } else {
+                    tl_log_line("gl:   UBO idx %d: buf %d (sz %d) map failed", i, ubo, sz);
+                }
+            } else {
+                tl_log_line("gl:   UBO idx %d: buf %d (sz %d)", i, ubo, sz);
+            }
         } else {
             tl_log_line("gl:   UBO idx %d: buf %d", i, ubo);
         }
     }
-    if (bind_buf) bind_buf(0x8A11, old_ubo);
+    if (bind_buf) bind_buf(0x8A11, (unsigned)old_ubo);
 
+    int old_act = 0x84C0;
+    a_glGetIntegerv(0x84E0 /* GL_ACTIVE_TEXTURE */, &old_act);
     void (*active_tex)(unsigned) = gl_proc("glActiveTexture");
-    for (int t = 0; t < 4; t++) {
-        if (active_tex) active_tex(0x84C0 + t);
-        int tex2d = 0;
-        a_glGetIntegerv(0x8069 /* GL_TEXTURE_BINDING_2D */, &tex2d);
-        tl_log_line("gl:   TEX unit %d: 2D tex %d", t, tex2d);
+    void (*get_tex_param)(unsigned, unsigned, int *) = gl_proc("glGetTexParameteriv");
+    void (*get_tex_lvl_param)(unsigned, int, unsigned, int *) = gl_proc("glGetTexLevelParameteriv");
+
+    for (int t = 0; t < 12; t++) {
+        if (active_tex) active_tex(0x84C0 + (unsigned)t);
+        int t2d = 0, t2d_arr = 0, tcube = 0;
+        a_glGetIntegerv(0x8069 /* GL_TEXTURE_BINDING_2D */, &t2d);
+        a_glGetIntegerv(0x8C1D /* GL_TEXTURE_BINDING_2D_ARRAY */, &t2d_arr);
+        a_glGetIntegerv(0x8514 /* GL_TEXTURE_BINDING_CUBE_MAP */, &tcube);
+        if (t2d > 0 || t2d_arr > 0 || tcube > 0) {
+            unsigned target = t2d > 0 ? 0x0DE1 : (t2d_arr > 0 ? 0x8C1A : 0x8513);
+            int tex_id = t2d > 0 ? t2d : (t2d_arr > 0 ? t2d_arr : tcube);
+            const char *ttype = t2d > 0 ? "2D" : (t2d_arr > 0 ? "2D_ARRAY" : "CUBE");
+            int min_f = 0, mag_f = 0, w = 0, h = 0, ifmt = 0;
+            if (get_tex_param) {
+                get_tex_param(target, 0x2801 /* GL_TEXTURE_MIN_FILTER */, &min_f);
+                get_tex_param(target, 0x2800 /* GL_TEXTURE_MAG_FILTER */, &mag_f);
+            }
+            if (get_tex_lvl_param) {
+                get_tex_lvl_param(target, 0, 0x1000 /* GL_TEXTURE_WIDTH */, &w);
+                get_tex_lvl_param(target, 0, 0x1001 /* GL_TEXTURE_HEIGHT */, &h);
+                get_tex_lvl_param(target, 0, 0x1003 /* GL_TEXTURE_INTERNAL_FORMAT */, &ifmt);
+            }
+            tl_log_line("gl:   TEX unit %d: %s tex %d (%dx%d, ifmt %#x, min %#x, mag %#x)",
+                        t, ttype, tex_id, w, h, ifmt, min_f, mag_f);
+        }
     }
-    if (active_tex) active_tex(0x84C0);
+    if (active_tex) active_tex((unsigned)old_act);
+
+    /* Check pipeline states */
+    unsigned char (*is_en)(unsigned) = gl_proc("glIsEnabled");
+    if (is_en) {
+        int blend_en = is_en(0x0BE2 /* GL_BLEND */);
+        int depth_en = is_en(0x0B71 /* GL_DEPTH_TEST */);
+        int cull_en = is_en(0x0B44 /* GL_CULL_FACE */);
+        int dmask = 0, src_rgb = 0, dst_rgb = 0;
+        a_glGetIntegerv(0x0B72 /* GL_DEPTH_WRITEMASK */, &dmask);
+        a_glGetIntegerv(0x80C9 /* GL_BLEND_SRC_RGB */, &src_rgb);
+        a_glGetIntegerv(0x80C8 /* GL_BLEND_DST_RGB */, &dst_rgb);
+        tl_log_line("gl:   STATE prog %u: blend=%d (src=%#x dst=%#x), depth_test=%d, depth_mask=%d, cull=%d",
+                    prog, blend_en, src_rgb, dst_rgb, depth_en, dmask, cull_en);
+    }
 
     void (*get_va_iv)(unsigned, unsigned, int *) = gl_proc("glGetVertexAttribiv");
     if (get_va_iv) {
         for (int a = 0; a < 8; a++) {
             int en = 0, buf = 0, sz = 0, type = 0;
-            get_va_iv(a, 0x8622 /* GL_VERTEX_ATTRIB_ARRAY_ENABLED */, &en);
-            get_va_iv(a, 0x889F /* GL_VERTEX_ATTRIB_ARRAY_BUFFER_BINDING */, &buf);
-            get_va_iv(a, 0x8623 /* GL_VERTEX_ATTRIB_ARRAY_SIZE */, &sz);
-            get_va_iv(a, 0x8625 /* GL_VERTEX_ATTRIB_ARRAY_TYPE */, &type);
+            get_va_iv((unsigned)a, 0x8622 /* GL_VERTEX_ATTRIB_ARRAY_ENABLED */, &en);
+            get_va_iv((unsigned)a, 0x889F /* GL_VERTEX_ATTRIB_ARRAY_BUFFER_BINDING */, &buf);
+            get_va_iv((unsigned)a, 0x8623 /* GL_VERTEX_ATTRIB_ARRAY_SIZE */, &sz);
+            get_va_iv((unsigned)a, 0x8625 /* GL_VERTEX_ATTRIB_ARRAY_TYPE */, &type);
             if (en) {
                 tl_log_line("gl:   ATTRIB %d: buf %d, sz %d, type %#x", a, buf, sz, type);
             }
@@ -823,6 +946,57 @@ static void w_glDrawElements(unsigned mode, int count, unsigned type, const void
     if (curProg >= 40) {
         inspect_prog_draw((unsigned)curProg, count);
     }
+
+    /* Safety lighting & material fallback for dynamic character meshes:
+     * If drawing character shader (prog 44, 45, 47, 60, 61, 62) and _MainLightColor or ambient DC is all zeroes,
+     * inject default directional sunlight and skylight ambient so character geometry is illuminated!
+     */
+    if (curProg == 44 || curProg == 45 || curProg == 47 || curProg == 60 || curProg == 61 || curProg == 62) {
+        static int (*get_u_loc)(unsigned, const char *) = NULL;
+        static void (*get_u_fv)(unsigned, int, float *) = NULL;
+        static void (*set_u_4f)(int, float, float, float, float) = NULL;
+        if (!get_u_loc) {
+            get_u_loc = gl_proc("glGetUniformLocation");
+            get_u_fv = gl_proc("glGetUniformfv");
+            set_u_4f = gl_proc("glUniform4f");
+        }
+        if (get_u_loc && get_u_fv && set_u_4f) {
+            int loc_light = get_u_loc((unsigned)curProg, "_MainLightColor");
+            if (loc_light >= 0) {
+                float col[4] = {0};
+                get_u_fv((unsigned)curProg, loc_light, col);
+                if (col[0] == 0.0f && col[1] == 0.0f && col[2] == 0.0f) {
+                    static atomic_int light_injected;
+                    if (atomic_fetch_add(&light_injected, 1) < 10)
+                        tl_log_line("gl: [FALLBACK] prog %d: _MainLightColor is (0,0,0,0) -> injecting sunlight (1, 1, 0.95, 1)", curProg);
+                    set_u_4f(loc_light, 1.0f, 1.0f, 0.95f, 1.0f);
+                }
+            }
+            int loc_pos = get_u_loc((unsigned)curProg, "_MainLightPosition");
+            if (loc_pos >= 0) {
+                float pos[4] = {0};
+                get_u_fv((unsigned)curProg, loc_pos, pos);
+                if (pos[0] == 0.0f && pos[1] == 0.0f && pos[2] == 0.0f) {
+                    static atomic_int pos_injected;
+                    if (atomic_fetch_add(&pos_injected, 1) < 10)
+                        tl_log_line("gl: [FALLBACK] prog %d: _MainLightPosition is (0,0,0,0) -> injecting sun dir (0.4, 0.8, -0.4, 0)", curProg);
+                    set_u_4f(loc_pos, 0.4f, 0.8f, -0.4f, 0.0f);
+                }
+            }
+            int loc_amb = get_u_loc((unsigned)curProg, "_GB27SceneAmbientDC");
+            if (loc_amb >= 0) {
+                float amb[4] = {0};
+                get_u_fv((unsigned)curProg, loc_amb, amb);
+                if (amb[0] == 0.0f && amb[1] == 0.0f && amb[2] == 0.0f) {
+                    static atomic_int amb_injected;
+                    if (atomic_fetch_add(&amb_injected, 1) < 10)
+                        tl_log_line("gl: [FALLBACK] prog %d: _GB27SceneAmbientDC is (0,0,0,0) -> injecting ambient (0.4, 0.4, 0.45, 1)", curProg);
+                    set_u_4f(loc_amb, 0.4f, 0.4f, 0.45f, 1.0f);
+                }
+            }
+        }
+    }
+
     if (c < 30 || (c % 600 == 0)) {
         int ubo0 = 0, ubo1 = 0;
         void (*get_int_i)(unsigned, unsigned, int *) = gl_proc("glGetIntegeri_v");
@@ -987,7 +1161,8 @@ static EGLBoolean w_eglDestroySync(EGLDisplay d, void *s) { return s ? r_eglDest
 
 #define ADAPT(name) { #name, (void *)w_##name, (void **)&r_##name }
 static const struct { const char *name; void *wrap; void **real; } k_adapt[] = {
-    ADAPT(glBlitFramebuffer), ADAPT(glTexSubImage3D), ADAPT(glCompressedTexSubImage3D), ADAPT(glCopyImageSubData),
+    ADAPT(glBlitFramebuffer), ADAPT(glTexImage3D), ADAPT(glCompressedTexImage3D), ADAPT(glTexStorage3D),
+    ADAPT(glBindTexture), ADAPT(glTexSubImage3D), ADAPT(glCompressedTexSubImage3D), ADAPT(glCopyImageSubData),
     ADAPT(glColorMask), ADAPT(glDepthMask), ADAPT(glVertexAttribPointer), ADAPT(glUniformMatrix2fv),
     ADAPT(glUniformMatrix3fv), ADAPT(glUniformMatrix4fv),
     ADAPT(glUniformMatrix2x3fv), ADAPT(glUniformMatrix3x2fv), ADAPT(glUniformMatrix2x4fv), ADAPT(glUniformMatrix4x2fv),
