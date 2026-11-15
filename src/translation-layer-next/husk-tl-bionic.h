@@ -95,6 +95,20 @@ const char *tl_sysprop(const char *name);
 void tl_set_package_name(const char *pkg);
 const char *tl_package_name(void);
 
+/* Virtual PTY support for terminal emulators (Termux) */
+bool tl_vpty_is_master(int fd);
+int  tl_vpty_open(int flags);
+int  tl_vpty_grantpt(int fd);
+int  tl_vpty_unlockpt(int fd);
+int  tl_vpty_ptsname_r(int fd, char *buf, size_t buflen);
+char *tl_vpty_ptsname(int fd);
+int  tl_vpty_open_slave(const char *path, int flags);
+int  tl_vpty_ioctl(int fd, unsigned long req, void *arg);
+void tl_vpty_close(int fd);
+int  tl_vpty_claim_child(void);
+int  tl_vpty_wait(int pid, int *st, int opt);
+int  tl_vpty_kill(int pid, int sig);
+
 /* The log. */
 void tl_log_line(const char *fmt, ...);
 

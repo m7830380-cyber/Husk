@@ -198,6 +198,8 @@ if [ "$TROLLSTORE" = true ]; then
     for key in "${BANNED_KEYS[@]}"; do
         plutil -remove "$key" "$ENT" 2>/dev/null || true
     done
+    plutil -insert "com.apple.private.security.no-sandbox" -bool YES "$ENT" 2>/dev/null || true
+    plutil -insert "platform-application" -bool YES "$ENT" 2>/dev/null || true
 fi
 SAPP="$STAGE/Payload/$(basename "$APP")"
 sign() { codesign --force --sign - --timestamp=none "$@"; }

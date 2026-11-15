@@ -82,8 +82,14 @@ static uint64_t g_stack_chk_guard = 0x5ab3c17e9d2f4a00ull;
 
 static int b_setid(unsigned id) { (void)id; tl_set_guest_errno(1 /* EPERM */); return -1; }
 static int b_initgroups(const char *user, int group) { (void)user; (void)group; tl_set_guest_errno(1); return -1; }
-static int b_tcattr(int fd, void *t) { (void)fd; (void)t; tl_set_guest_errno(25 /* ENOTTY */); return -1; }
-static int b_tcsetattr(int fd, int act, const void *t) { (void)fd; (void)act; (void)t; tl_set_guest_errno(25); return -1; }
+static int b_tcattr(int fd, void *t) {
+    if (tl_vpty_is_master(fd)) { if (t) memset(t, 0, 64); return 0; }
+    (void)fd; (void)t; tl_set_guest_errno(25 /* ENOTTY */); return -1;
+}
+static int b_tcsetattr(int fd, int act, const void *t) {
+    if (tl_vpty_is_master(fd)) return 0;
+    (void)fd; (void)act; (void)t; tl_set_guest_errno(25); return -1;
+}
 static int b_execl(const char *path) { (void)path; tl_set_guest_errno(38 /* ENOSYS */); return -1; }
 static unsigned b_getgid(void) { return (unsigned)getgid(); }
 static unsigned b_umask(unsigned m) { return (unsigned)umask((mode_t)m); }
@@ -93,6 +99,7 @@ static int b_mlock(const void *a, size_t n) { (void)a; (void)n; return 0; }
 /* The guest's kill() on its own process would take the whole app down; that is the guest asking to quit. */
 static int b_kill(int pid, int sig)
 {
+    if (tl_vpty_kill(pid, sig) == 0) return 0;
     if (pid == getpid() && sig != 0) {
         tl_log_line("cxx: the game raised signal %d on its own process", sig);
         if (tl_guest_exit_hook) tl_guest_exit_hook(128 + sig);

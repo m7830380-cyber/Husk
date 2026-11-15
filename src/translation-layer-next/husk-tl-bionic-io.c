@@ -45,6 +45,8 @@ bool tl_ld_covers(const void *addr, size_t bytes);
 #include <sys/stat.h>
 #include <sys/time.h>
 #include <sys/uio.h>
+#include <sys/socket.h>
+#include <sys/un.h>
 #include <mach/mach.h>
 #include <time.h>
 #include <search.h>
@@ -578,9 +580,456 @@ static void fill_lib_standin_at(int dirfd, const char *name)
     snprintf(full, sizeof(full), "%s/%s", dir, name);
     fill_lib_standin(full);
 }
+
+/* ------------------------------------------------------------ virtual PTY (Termux) */
+
+typedef struct {
+    bool in_use;
+    int master_fd;
+    int slave_fd;
+    int child_pid;
+    bool child_claimed;
+    pthread_t thread;
+    pthread_mutex_t lock;
+    pthread_cond_t cond;
+    bool exited;
+    int exit_code;
+    struct { unsigned short ws_row, ws_col, ws_xpixel, ws_ypixel; } ws;
+} tl_vpty;
+
+#define MAX_VPTY 8
+static tl_vpty g_vptys[MAX_VPTY];
+static pthread_mutex_t g_vpty_lock = PTHREAD_MUTEX_INITIALIZER;
+
+static void *vpty_shell_worker(void *arg);
+
+bool tl_vpty_is_master(int fd)
+{
+    if (fd < 0) return false;
+    pthread_mutex_lock(&g_vpty_lock);
+    for (int i = 0; i < MAX_VPTY; i++) {
+        if (g_vptys[i].in_use && g_vptys[i].master_fd == fd) {
+            pthread_mutex_unlock(&g_vpty_lock);
+            return true;
+        }
+    }
+    pthread_mutex_unlock(&g_vpty_lock);
+    return false;
+}
+
+int tl_vpty_open(int flags)
+{
+    /* 1. Try Darwin posix_openpt / open("/dev/ptmx") first (works if unsandboxed/TrollStore) */
+    TL_ERRNO_BEGIN();
+    int rfd = posix_openpt(oflags_to_darwin(flags));
+    if (rfd < 0) rfd = open("/dev/ptmx", oflags_to_darwin(flags));
+    TL_ERRNO_END();
+    if (rfd >= 0) {
+        tl_log_line("vpty: native /dev/ptmx opened successfully (fd %d)", rfd);
+        return rfd;
+    }
+
+    /* 2. Fallback to virtual socketpair-based PTY (works in strict iOS sandbox) */
+    pthread_mutex_lock(&g_vpty_lock);
+    int slot = -1;
+    for (int i = 0; i < MAX_VPTY; i++) {
+        if (!g_vptys[i].in_use) { slot = i; break; }
+    }
+    if (slot < 0) {
+        pthread_mutex_unlock(&g_vpty_lock);
+        tl_set_guest_errno(24); /* EMFILE */
+        return -1;
+    }
+
+    int sv[2];
+    if (socketpair(AF_UNIX, SOCK_STREAM, 0, sv) != 0) {
+        pthread_mutex_unlock(&g_vpty_lock);
+        TL_ERRNO_END();
+        return -1;
+    }
+
+    tl_vpty *v = &g_vptys[slot];
+    memset(v, 0, sizeof(*v));
+    v->in_use = true;
+    v->master_fd = sv[0];
+    v->slave_fd = sv[1];
+    v->child_pid = 1337 + slot * 10;
+    v->child_claimed = false;
+    v->exited = false;
+    v->exit_code = 0;
+    v->ws.ws_row = 24;
+    v->ws.ws_col = 80;
+    pthread_mutex_init(&v->lock, NULL);
+    pthread_cond_init(&v->cond, NULL);
+
+    pthread_create(&v->thread, NULL, vpty_shell_worker, v);
+    pthread_detach(v->thread);
+
+    pthread_mutex_unlock(&g_vpty_lock);
+    tl_log_line("vpty: allocated virtual PTY slot %d (master %d, slave %d, pid %d)", slot, sv[0], sv[1], v->child_pid);
+    return sv[0];
+}
+
+int tl_vpty_grantpt(int fd)
+{
+    if (tl_vpty_is_master(fd)) return 0;
+    TL_ERRNO_BEGIN(); int r = grantpt(fd); TL_ERRNO_END();
+    return r == 0 ? 0 : 0;
+}
+
+int tl_vpty_unlockpt(int fd)
+{
+    if (tl_vpty_is_master(fd)) return 0;
+    TL_ERRNO_BEGIN(); int r = unlockpt(fd); TL_ERRNO_END();
+    return r == 0 ? 0 : 0;
+}
+
+int tl_vpty_ptsname_r(int fd, char *buf, size_t buflen)
+{
+    if (!buf || buflen == 0) return 22; /* EINVAL */
+    if (tl_vpty_is_master(fd)) {
+        snprintf(buf, buflen, "/dev/pts/%d", fd);
+        return 0;
+    }
+    TL_ERRNO_BEGIN(); int r = ptsname_r(fd, buf, buflen); TL_ERRNO_END();
+    if (r != 0) snprintf(buf, buflen, "/dev/pts/%d", fd);
+    return 0;
+}
+
+char *tl_vpty_ptsname(int fd)
+{
+    static char dev[64];
+    tl_vpty_ptsname_r(fd, dev, sizeof(dev));
+    return dev;
+}
+
+int tl_vpty_open_slave(const char *path, int flags)
+{
+    (void)flags;
+    if (strncmp(path, "/dev/pts/", 9)) return -1;
+    int mfd = atoi(path + 9);
+    pthread_mutex_lock(&g_vpty_lock);
+    for (int i = 0; i < MAX_VPTY; i++) {
+        if (g_vptys[i].in_use && g_vptys[i].master_fd == mfd) {
+            int dup_slave = dup(g_vptys[i].slave_fd);
+            pthread_mutex_unlock(&g_vpty_lock);
+            return dup_slave;
+        }
+    }
+    pthread_mutex_unlock(&g_vpty_lock);
+    return -1;
+}
+
+int tl_vpty_ioctl(int fd, unsigned long req, void *arg)
+{
+    pthread_mutex_lock(&g_vpty_lock);
+    for (int i = 0; i < MAX_VPTY; i++) {
+        if (g_vptys[i].in_use && (g_vptys[i].master_fd == fd || g_vptys[i].slave_fd == fd)) {
+            if (req == 0x5413 && arg) {
+                memcpy(arg, &g_vptys[i].ws, sizeof(g_vptys[i].ws));
+            } else if (req == 0x5414 && arg) {
+                memcpy(&g_vptys[i].ws, arg, sizeof(g_vptys[i].ws));
+            }
+            pthread_mutex_unlock(&g_vpty_lock);
+            return 0;
+        }
+    }
+    pthread_mutex_unlock(&g_vpty_lock);
+
+    if (req == 0x5413 || req == 0x5414 || req == 0x540E || req == 0x540F ||
+        req == 0x5401 || req == 0x5402 || req == 0x5403 || req == 0x5404) {
+        #ifdef TIOCGWINSZ
+        if (req == 0x5413 && arg) { ioctl(fd, TIOCGWINSZ, arg); return 0; }
+        #endif
+        #ifdef TIOCSWINSZ
+        if (req == 0x5414 && arg) { ioctl(fd, TIOCSWINSZ, arg); return 0; }
+        #endif
+        return 0;
+    }
+    return -1;
+}
+
+void tl_vpty_close(int fd)
+{
+    pthread_mutex_lock(&g_vpty_lock);
+    for (int i = 0; i < MAX_VPTY; i++) {
+        if (g_vptys[i].in_use && g_vptys[i].master_fd == fd) {
+            tl_vpty *v = &g_vptys[i];
+            pthread_mutex_lock(&v->lock);
+            v->exited = true;
+            pthread_cond_broadcast(&v->cond);
+            pthread_mutex_unlock(&v->lock);
+            if (v->slave_fd >= 0) {
+                close(v->slave_fd);
+                v->slave_fd = -1;
+            }
+            v->in_use = false;
+            break;
+        }
+    }
+    pthread_mutex_unlock(&g_vpty_lock);
+}
+
+int tl_vpty_claim_child(void)
+{
+    pthread_mutex_lock(&g_vpty_lock);
+    for (int i = 0; i < MAX_VPTY; i++) {
+        if (g_vptys[i].in_use && !g_vptys[i].child_claimed) {
+            g_vptys[i].child_claimed = true;
+            int pid = g_vptys[i].child_pid;
+            pthread_mutex_unlock(&g_vpty_lock);
+            tl_log_line("vpty: fork() claiming virtual child PID %d", pid);
+            return pid;
+        }
+    }
+    pthread_mutex_unlock(&g_vpty_lock);
+    return -1;
+}
+
+int tl_vpty_wait(int pid, int *st, int opt)
+{
+    pthread_mutex_lock(&g_vpty_lock);
+    tl_vpty *v = NULL;
+    for (int i = 0; i < MAX_VPTY; i++) {
+        if (g_vptys[i].in_use && (pid <= 0 || g_vptys[i].child_pid == pid)) {
+            v = &g_vptys[i];
+            break;
+        }
+    }
+    pthread_mutex_unlock(&g_vpty_lock);
+    if (!v) return -1;
+
+    pthread_mutex_lock(&v->lock);
+    if (opt & 1) { /* WNOHANG */
+        if (!v->exited) {
+            pthread_mutex_unlock(&v->lock);
+            return 0;
+        }
+    } else {
+        while (!v->exited) {
+            pthread_cond_wait(&v->cond, &v->lock);
+        }
+    }
+    if (st) *st = (v->exit_code << 8);
+    int ret_pid = v->child_pid;
+    pthread_mutex_unlock(&v->lock);
+    return ret_pid;
+}
+
+int tl_vpty_kill(int pid, int sig)
+{
+    pthread_mutex_lock(&g_vpty_lock);
+    for (int i = 0; i < MAX_VPTY; i++) {
+        if (g_vptys[i].in_use && g_vptys[i].child_pid == pid) {
+            tl_vpty *v = &g_vptys[i];
+            pthread_mutex_lock(&v->lock);
+            v->exited = true;
+            v->exit_code = 128 + sig;
+            pthread_cond_broadcast(&v->cond);
+            pthread_mutex_unlock(&v->lock);
+            if (v->slave_fd >= 0) {
+                close(v->slave_fd);
+                v->slave_fd = -1;
+            }
+            pthread_mutex_unlock(&g_vpty_lock);
+            return 0;
+        }
+    }
+    pthread_mutex_unlock(&g_vpty_lock);
+    return -1;
+}
+
+static void vpty_run_cmd(int fd, const char *cmd_line)
+{
+    while (*cmd_line == ' ' || *cmd_line == '\t') cmd_line++;
+    if (!*cmd_line) return;
+
+    char cmd[64] = "", arg[512] = "";
+    const char *sp = strchr(cmd_line, ' ');
+    if (sp) {
+        size_t l = (size_t)(sp - cmd_line);
+        if (l < sizeof(cmd)) { memcpy(cmd, cmd_line, l); cmd[l] = 0; }
+        while (*sp == ' ') sp++;
+        snprintf(arg, sizeof(arg), "%s", sp);
+    } else {
+        snprintf(cmd, sizeof(cmd), "%s", cmd_line);
+    }
+
+    if (!strcmp(cmd, "help")) {
+        const char *h =
+            "\r\n\033[1;36mHusk Virtual Shell - Built-in Commands:\033[0m\r\n"
+            "  \033[1;32mhelp\033[0m       - Display this list of commands\r\n"
+            "  \033[1;32muname\033[0m      - Print operating system information (try: uname -a)\r\n"
+            "  \033[1;32mid\033[0m         - Print user and group IDs\r\n"
+            "  \033[1;32mwhoami\033[0m     - Print current user identity\r\n"
+            "  \033[1;32mpwd\033[0m        - Print working directory\r\n"
+            "  \033[1;32mls\033[0m [path]  - List directory contents\r\n"
+            "  \033[1;32mcat\033[0m <file> - Print contents of a file\r\n"
+            "  \033[1;32mecho\033[0m [str] - Print text\r\n"
+            "  \033[1;32mgetprop\033[0m    - List Android system properties\r\n"
+            "  \033[1;32mclear\033[0m      - Clear screen\r\n"
+            "  \033[1;32mexit\033[0m       - Close terminal session\r\n\r\n";
+        write(fd, h, strlen(h));
+    } else if (!strcmp(cmd, "uname")) {
+        char buf[256];
+        if (strstr(arg, "-a") || strstr(arg, "-m") || strstr(arg, "-r")) {
+            snprintf(buf, sizeof(buf), "Linux localhost 6.1.75-android14-11 #1 SMP PREEMPT aarch64 Husk/Darwin\r\n");
+        } else {
+            snprintf(buf, sizeof(buf), "Linux\r\n");
+        }
+        write(fd, buf, strlen(buf));
+    } else if (!strcmp(cmd, "id")) {
+        const char *s = "uid=10100(u0_a100) gid=10100(u0_a100) groups=10100(u0_a100),3003(inet),9997(everybody)\r\n";
+        write(fd, s, strlen(s));
+    } else if (!strcmp(cmd, "whoami")) {
+        write(fd, "u0_a100\r\n", 9);
+    } else if (!strcmp(cmd, "pwd")) {
+        write(fd, "/data/data/com.termux/files/home\r\n", 34);
+    } else if (!strcmp(cmd, "clear")) {
+        write(fd, "\033[2J\033[H", 7);
+    } else if (!strcmp(cmd, "echo")) {
+        char buf[600];
+        snprintf(buf, sizeof(buf), "%s\r\n", arg);
+        write(fd, buf, strlen(buf));
+    } else if (!strcmp(cmd, "ls")) {
+        const char *target = arg[0] ? arg : "/data/data/com.termux/files";
+        char b[1024];
+        const char *real = tl_path_resolve(target, b, sizeof(b));
+        DIR *d = opendir(real);
+        if (!d) {
+            char err[256]; snprintf(err, sizeof(err), "ls: cannot access '%s': No such file or directory\r\n", target);
+            write(fd, err, strlen(err));
+        } else {
+            struct dirent *de;
+            char out[1024] = ""; size_t olen = 0;
+            while ((de = readdir(d))) {
+                if (!strcmp(de->d_name, ".") || !strcmp(de->d_name, "..")) continue;
+                olen += snprintf(out + olen, sizeof(out) - olen, "%s  ", de->d_name);
+                if (olen >= sizeof(out) - 64) {
+                    write(fd, out, olen);
+                    olen = 0; out[0] = 0;
+                }
+            }
+            closedir(d);
+            if (olen > 0) { out[olen] = 0; write(fd, out, olen); }
+            write(fd, "\r\n", 2);
+        }
+    } else if (!strcmp(cmd, "cat")) {
+        if (!arg[0]) {
+            write(fd, "cat: missing file operand\r\n", 27);
+        } else {
+            char b[1024];
+            const char *real = tl_path_resolve(arg, b, sizeof(b));
+            FILE *f = fopen(real, "rb");
+            if (!f) {
+                char err[256]; snprintf(err, sizeof(err), "cat: %s: No such file or directory\r\n", arg);
+                write(fd, err, strlen(err));
+            } else {
+                char buf[512];
+                size_t nr;
+                while ((nr = fread(buf, 1, sizeof(buf), f)) > 0) {
+                    for (size_t i = 0; i < nr; i++) {
+                        if (buf[i] == '\n') write(fd, "\r", 1);
+                        write(fd, buf + i, 1);
+                    }
+                }
+                fclose(f);
+                write(fd, "\r\n", 2);
+            }
+        }
+    } else if (!strcmp(cmd, "getprop")) {
+        if (arg[0]) {
+            const char *val = tl_sysprop(arg);
+            char line[256]; snprintf(line, sizeof(line), "%s\r\n", val ? val : "");
+            write(fd, line, strlen(line));
+        } else {
+            char out[4096];
+            extern size_t tl_property_list(char *buf, size_t n);
+            size_t n = tl_property_list(out, sizeof(out));
+            if (n > 0) {
+                for (size_t i = 0; i < n; i++) {
+                    if (out[i] == '\n') write(fd, "\r", 1);
+                    write(fd, out + i, 1);
+                }
+            }
+        }
+    } else if (!strcmp(cmd, "exit")) {
+        /* Handled in caller */
+    } else {
+        char err[256];
+        snprintf(err, sizeof(err), "sh: %s: command not found (iOS Darwin environment)\r\n", cmd);
+        write(fd, err, strlen(err));
+    }
+}
+
+static void *vpty_shell_worker(void *arg)
+{
+    tl_vpty *v = (tl_vpty *)arg;
+    int sfd = v->slave_fd;
+    if (sfd < 0) return NULL;
+
+    const char k_banner[] =
+        "\r\n\033[1;32mWelcome to Termux on Husk (iOS)!\033[0m\r\n\r\n"
+        "\033[1;33m[*] Environment:\033[0m\r\n"
+        "  System  : iOS Darwin / ARM64\r\n"
+        "  Runtime : Husk Dalvik & Bionic Translation Layer\r\n"
+        "  Mode    : Virtual Terminal (App Sandbox)\r\n\r\n"
+        "\033[1;37mType \033[1;36mhelp\033[1;37m for available commands.\033[0m\r\n\r\n$ ";
+    write(sfd, k_banner, strlen(k_banner));
+
+    char line[1024];
+    int pos = 0;
+    char c;
+    while (read(sfd, &c, 1) == 1) {
+        if (c == '\r' || c == '\n') {
+            write(sfd, "\r\n", 2);
+            line[pos] = 0;
+            if (!strcmp(line, "exit")) {
+                write(sfd, "logout\r\n", 8);
+                break;
+            }
+            vpty_run_cmd(sfd, line);
+            pos = 0;
+            write(sfd, "$ ", 2);
+        } else if (c == '\b' || c == 0x7f) {
+            if (pos > 0) {
+                pos--;
+                write(sfd, "\b \b", 3);
+            }
+        } else if (c == 0x03) { /* Ctrl+C */
+            write(sfd, "^C\r\n$ ", 6);
+            pos = 0;
+        } else if (c == 0x04) { /* Ctrl+D */
+            if (pos == 0) {
+                write(sfd, "exit\r\n", 6);
+                break;
+            }
+        } else if ((unsigned char)c >= 0x20 && pos < (int)sizeof(line) - 1) {
+            line[pos++] = c;
+            write(sfd, &c, 1);
+        }
+    }
+
+    pthread_mutex_lock(&v->lock);
+    v->exited = true;
+    v->exit_code = 0;
+    pthread_cond_broadcast(&v->cond);
+    pthread_mutex_unlock(&v->lock);
+
+    close(sfd);
+    v->slave_fd = -1;
+    tl_log_line("vpty: worker thread for PID %d exited cleanly", v->child_pid);
+    return NULL;
+}
+
 static int b_open(const char *path, int flags, unsigned mode)
 {
     if (husk_binder_is_path(path)) return husk_binder_open();
+    if (path && !strcmp(path, "/dev/ptmx")) return tl_vpty_open(flags);
+    if (path && !strncmp(path, "/dev/pts/", 9)) {
+        int s = tl_vpty_open_slave(path, flags);
+        if (s >= 0) return s;
+    }
     char buf[1024]; static __thread char content[32768];
     jar_entry jar;
     if (jar_lookup(path, &jar)) {
@@ -633,6 +1082,7 @@ void tl_eventfd_register(int rd, int wr) { if (rd >= 0 && rd < 1024) g_evfd_peer
 static int evfd_peer(int fd) { return fd >= 0 && fd < 1024 ? g_evfd_peer[fd] - 1 : -1; }
 static int b_close(int fd) {
     if (husk_binder_is_fd(fd)) husk_binder_close(fd);
+    if (tl_vpty_is_master(fd)) tl_vpty_close(fd);
     if (evfd_peer(fd) >= 0) { close(evfd_peer(fd)); g_evfd_peer[fd] = 0; }
     if (vfd_is(fd)) g_vfd[fd].on = false;
     bool sock = net_trace_fd(fd);
@@ -1104,6 +1554,8 @@ static int b_ioctl(int fd, unsigned long req, long arg)
         TL_ERRNO_END();
         return r;
     }
+    int vr = tl_vpty_ioctl(fd, req, (void *)arg);
+    if (vr >= 0) return vr;
     if (req == 0x541B) { int n = 0; int r = ioctl(fd, FIONREAD, &n); if (r == 0) *(int *)arg = n; else TL_ERRNO_END(); return r; }  /* FIONREAD */
     if (req == 0x5421) { int on = *(int *)arg; int fl = fcntl(fd, F_GETFL); fcntl(fd, F_SETFL, on ? fl | O_NONBLOCK : fl & ~O_NONBLOCK); return 0; }   /* FIONBIO */
     if (arg && (req == 0x8913 || req == 0x8915 || req == 0x8917 || req == 0x8919 || req == 0x891b || req == 0x8921 || req == 0x8927 || req == 0x8933))

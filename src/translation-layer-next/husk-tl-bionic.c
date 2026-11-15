@@ -636,12 +636,25 @@ static long bionic_syscall(long num, long a1, long a2, long a3, long a4, long a5
     return r;
 }
 
-static int bionic_fork(void) { tl_set_guest_errno(38); return -1; }
+static int bionic_fork(void)
+{
+    int pid = tl_vpty_claim_child();
+    if (pid > 0) return pid;
+    tl_set_guest_errno(38);
+    return -1;
+}
 static int bionic_execv(const char *p, char *const a[]) { (void)p; (void)a; tl_set_guest_errno(38); return -1; }
 static int bionic_execve(const char *p, char *const a[], char *const e[]) { (void)p; (void)a; (void)e; tl_set_guest_errno(38); return -1; }
 /* posix_spawn reports its error as the return value */
 static int bionic_posix_spawn(void *pid, const char *p, const void *fa, const void *at, char *const a[], char *const e[]) { (void)pid; (void)p; (void)fa; (void)at; (void)a; (void)e; return 38; }
-static int bionic_waitpid(int pid, int *st, int opt) { (void)pid; (void)st; (void)opt; tl_set_guest_errno(10); return -1; }
+static int bionic_waitpid(int pid, int *st, int opt)
+{
+    int r = tl_vpty_wait(pid, st, opt);
+    if (r >= 0) return r;
+    (void)pid; (void)st; (void)opt;
+    tl_set_guest_errno(10);
+    return -1;
+}
 static long bionic_ptrace(int req, int pid, void *addr, void *data) { (void)req; (void)pid; (void)addr; (void)data; tl_set_guest_errno(1); return -1; }
 
 /* A passwd entry like Android's: an app user. */

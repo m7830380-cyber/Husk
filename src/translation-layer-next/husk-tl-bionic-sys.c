@@ -428,7 +428,16 @@ static int b_nice(int inc) { (void)inc; return 0; }
 static void *b___sched_cpualloc(size_t count) { return calloc(1, (count + 63) / 64 * 8); }
 static void b___sched_cpufree(void *set) { free(set); }
 static int b_sched_rr_get_interval(int pid, struct timespec *ts) { (void)pid; if (ts) { ts->tv_sec = 0; ts->tv_nsec = 10000000; } return 0; }
-static char *b_ptsname(int fd) { (void)fd; tl_set_guest_errno(25); return NULL; }
+static int b_grantpt(int fd) { return tl_vpty_grantpt(fd); }
+static int b_unlockpt(int fd) { return tl_vpty_unlockpt(fd); }
+static char *b_ptsname(int fd) { return tl_vpty_ptsname(fd); }
+static int b_ptsname_r(int fd, char *buf, size_t buflen) { return tl_vpty_ptsname_r(fd, buf, buflen); }
+static int b_posix_openpt(int flags) { return tl_vpty_open(flags); }
+static int b_clearenv(void) {
+    extern char **environ;
+    if (environ) environ[0] = NULL;
+    return 0;
+}
 static int *b___get_h_errno(void) { static __thread int e; return &e; }
 static void *b_getservbyname(const char *n, const char *p) { (void)n; (void)p; return NULL; }
 static long b_times(void *buf) { struct tms t; clock_t r = times(&t); if (buf) { long *o = buf; o[0] = (long)t.tms_utime; o[1] = (long)t.tms_stime; o[2] = (long)t.tms_cutime; o[3] = (long)t.tms_cstime; } return (long)r; }
@@ -464,7 +473,10 @@ const tl_bionic_entry tl_tab_sys[] = {
     TL_WRAP("setreuid", b_eperm), TL_WRAP("setregid", b_eperm), TL_WRAP("getgroups", b_getgroups), TL_WRAP("getgrouplist", b_getgrouplist),
     TL_WRAP("getlogin", b_getlogin), TL_WRAP("nice", b_nice), TL_WRAP("sched_setparam", b_ok0), TL_WRAP("sched_setscheduler", b_ok0),
     TL_WRAP("sched_rr_get_interval", b_sched_rr_get_interval), TL_WRAP("__sched_cpualloc", b___sched_cpualloc),
-    TL_WRAP("__sched_cpufree", b___sched_cpufree), TL_WRAP("grantpt", b_eperm), TL_WRAP("unlockpt", b_eperm), TL_WRAP("ptsname", b_ptsname),
+    TL_WRAP("__sched_cpufree", b___sched_cpufree),
+    TL_WRAP("grantpt", b_grantpt), TL_WRAP("unlockpt", b_unlockpt),
+    TL_WRAP("ptsname", b_ptsname), TL_WRAP("ptsname_r", b_ptsname_r),
+    TL_WRAP("posix_openpt", b_posix_openpt), TL_WRAP("clearenv", b_clearenv),
     TL_WRAP("__get_h_errno", b___get_h_errno), TL_WRAP("getservbyname", b_getservbyname), TL_WRAP("times", b_times),
     TL_WRAP("setpgrp", b_ok0), TL_DIRECT(getpgrp), TL_DIRECT(getpgid), TL_DIRECT(killpg), TL_DIRECT(fchdir), TL_DIRECT(abs), TL_DIRECT(wcstok),
     TL_END
