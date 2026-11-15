@@ -89,13 +89,15 @@ jobs:
             TAG="v3.4-fixed-$(date +'%Y%m%d%H%M')"
           fi
           COMMIT="$(git rev-parse --short HEAD)"
-          TITLE="Husk 3.4 (with Telegram/AyuGram Crash Fixes)"
+          TITLE="Husk 3.4 (with AyuGram & Termux Fixes)"
           NOTES=$(cat <<EOF
           Build commit $COMMIT
 
           Fixed issues:
           - Fixed NullPointerException in ViewGroup.addView during custom view initialization (e.g. AyuGram UndoView) by using invalidate(true) instead of virtual invalidate()
           - Added missing zlib gz* symbol exports (gzopen, gzread, gzclose, gzseek, etc.) to bionic shim for libtmessages / RLottie in Telegram / AyuGram
+          - Fixed RecyclerView layout step exception (STEP_ANIMATIONS vs STEP_LAYOUT) via Choreographer, ViewRoot multi-pass layout, and Looper
+          - Fixed Termux bootstrap extraction failure ('Invalid zip entry: bin/') by preserving Android guest canonical paths in b_realpath and stripping trailing slashes in b_mkdir
           EOF
           )
 
