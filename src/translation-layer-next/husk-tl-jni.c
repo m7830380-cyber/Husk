@@ -280,6 +280,11 @@ static tl_jmeth *lookup_method(tl_jclass *cls, const char *name, const char *sig
     /* A class the interpreter runs: its bytecode (or an intrinsic) is the method, wherever up the chain it is declared. */
     if (tl_dvm && cls->dvm) {
         void *dm = tl_dvm->find_method(cls, name, sig, is_static);
+        if (!dm && !strcmp(cls->name, "java/lang/reflect/Array")) {
+            if (!strcmp(name, "getLength")) dm = tl_dvm->find_method(cls, name, "(Ljava/lang/Object;)I", is_static);
+            else if (!strcmp(name, "get")) dm = tl_dvm->find_method(cls, name, "(Ljava/lang/Object;I)Ljava/lang/Object;", is_static);
+            else if (!strcmp(name, "set")) dm = tl_dvm->find_method(cls, name, "(Ljava/lang/Object;ILjava/lang/Object;)V", is_static);
+        }
         if (dm) {
             tl_jmeth *m = calloc(1, sizeof(*m));
             m->cls = cls; m->name = strdup(name); m->sig = strdup(sig); m->is_static = is_static;

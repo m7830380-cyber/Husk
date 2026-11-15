@@ -13,9 +13,9 @@ void tl_egl_es31_shim(bool on) { g_es31_shim = on; }
 void tl_egl_es3_claim(int minor) { if (minor >= 1) { g_es31_shim = true; g_es3_minor = minor > 2 ? 2 : minor; } }
 
 typedef struct { char name[72]; int binding; bool block; } es31_bind;
-#define ES31_SHADERS 1024
-#define ES31_BINDS 32
-#define ES31_ATTACHED 2048
+#define ES31_SHADERS 4096
+#define ES31_BINDS 64
+#define ES31_ATTACHED 8192
 static struct { unsigned shader; int n; es31_bind b[ES31_BINDS]; } g_es31_sh[ES31_SHADERS];
 static struct { unsigned prog, shader; } g_es31_att[ES31_ATTACHED];
 static int g_es31_natt;
@@ -82,7 +82,7 @@ static char *es31_downgrade(const char *src, size_t n, es31_bind *rec, int *nrec
                     size_t e = dl;
                     while (e && (decl[e - 1] == ' ' || decl[e - 1] == '\n' || decl[e - 1] == '\t' || decl[e - 1] == '\r')) e--;
                     while (e && decl[e - 1] == ']') { while (e && decl[e - 1] != '[') e--; if (e) e--; }
-                    size_t st = e; while (st && es31_ident(decl[st - 1])) st--;
+                    size_t st = e; while (st && es31_ident((unsigned char)decl[st - 1])) st--;
                     if (e > st && e - st < sizeof(rec[0].name)) {
                         memcpy(rec[*nrec].name, decl + st, e - st); rec[*nrec].name[e - st] = 0;
                         rec[*nrec].binding = val; rec[*nrec].block = block; (*nrec)++;
@@ -94,7 +94,35 @@ static char *es31_downgrade(const char *src, size_t n, es31_bind *rec, int *nrec
                     const char *comma = strchr(tok, ',');
                     size_t tl = comma ? (size_t)(comma - tok) : strlen(tok);
                     const char *t = tok; size_t tn = tl; while (tn && *t == ' ') { t++; tn--; }
-                    if (!(tn >= 7 && !strncmp(t, "binding", 7)) && tn) { if (kl) keep[kl++] = ','; memcpy(keep + kl, t, tn); kl += tn; }
+                    bool drop = (tn >= 7 && !strncmp(t, "binding", 7));
+                    if (strstr(decl, "uniform") && tn >= 8 && !strncmp(t, "location", 8)) drop = true;
+                    if (!drop && tn) { if (kl) keep[kl++] = ','; memcpy(keep + kl, t, tn); kl += tn; }
+                    tok = comma ? comma + 1 : NULL;
+                }
+                if (kl) { memcpy(out + o, "layout(", 7); o += 7; memcpy(out + o, keep, kl); o += kl; out[o++] = ')'; }
+                i = j; continue;
+            }
+            char *loc = strstr(q, "location");
+            if (loc && !b && !opaque && !ssbo && strstr(decl, "uniform")) {
+                char *eq = strchr(loc, '='); int val = eq ? atoi(eq + 1) : -1;
+                bool block = d < n && src[d] == '{';
+                if (*nrec < ES31_BINDS && val >= 0) {
+                    size_t e = dl;
+                    while (e && (decl[e - 1] == ' ' || decl[e - 1] == '\n' || decl[e - 1] == '\t' || decl[e - 1] == '\r')) e--;
+                    while (e && decl[e - 1] == ']') { while (e && decl[e - 1] != '[') e--; if (e) e--; }
+                    size_t st = e; while (st && es31_ident((unsigned char)decl[st - 1])) st--;
+                    if (e > st && e - st < sizeof(rec[0].name)) {
+                        memcpy(rec[*nrec].name, decl + st, e - st); rec[*nrec].name[e - st] = 0;
+                        rec[*nrec].binding = val; rec[*nrec].block = block; (*nrec)++;
+                    }
+                }
+                char keep[160]; size_t kl = 0; const char *tok = q;
+                while (tok) {
+                    const char *comma = strchr(tok, ',');
+                    size_t tl = comma ? (size_t)(comma - tok) : strlen(tok);
+                    const char *t = tok; size_t tn = tl; while (tn && *t == ' ') { t++; tn--; }
+                    bool drop = (tn >= 8 && !strncmp(t, "location", 8)) || (tn >= 7 && !strncmp(t, "binding", 7));
+                    if (!drop && tn) { if (kl) keep[kl++] = ','; memcpy(keep + kl, t, tn); kl += tn; }
                     tok = comma ? comma + 1 : NULL;
                 }
                 if (kl) { memcpy(out + o, "layout(", 7); o += 7; memcpy(out + o, keep, kl); o += kl; out[o++] = ')'; }
@@ -160,11 +188,11 @@ static void w_glShaderSource(unsigned sh, int count, const char *const *str, con
             const char *d = l + sizeof("UNITY_LOCATION(") - 1;
             if (*d < '0' || *d > '9') continue;
             int unit = atoi(d);
-            const char *eol = strchr(d, '\n'), *semi = strchr(d, ';');
-            if (!semi || (eol && semi > eol) || !strstr(d, "uniform") || strstr(d, "uniform") > semi) continue;
+            const char *semi = strchr(d, ';');
+            if (!semi || (semi - d > 256) || !strstr(d, "uniform") || strstr(d, "uniform") > semi) continue;
             const char *e = semi;                          /* the name: the identifier before ';', past an array size */
-            while (e > d && e[-1] == ' ') e--;
-            if (e > d && e[-1] == ']') { while (e > d && e[-1] != '[') e--; if (e > d) e--; while (e > d && e[-1] == ' ') e--; }
+            while (e > d && (e[-1] == ' ' || e[-1] == '\t' || e[-1] == '\r' || e[-1] == '\n')) e--;
+            if (e > d && e[-1] == ']') { while (e > d && e[-1] != '[') e--; if (e > d) e--; while (e > d && (e[-1] == ' ' || e[-1] == '\t' || e[-1] == '\r' || e[-1] == '\n')) e--; }
             const char *b = e; while (b > d && es31_ident((unsigned char)b[-1])) b--;
             if (e - b <= 0 || e - b >= (long)sizeof(rec[0].name)) continue;
             es31_bind *r = &rec[nrec++];
@@ -205,7 +233,17 @@ static void w_glLinkProgram(unsigned prog)
     }
     if (!getloc || !getblk || !blkbind || !uni1i || !useprog || !getprogiv) return;
     int ok = 0; getprogiv(prog, 0x8B82 /* GL_LINK_STATUS */, &ok);
-    if (!ok) return;
+    if (!ok) {
+        static atomic_int link_err_count;
+        if (atomic_fetch_add(&link_err_count, 1) < 8) {
+            void (*getproglog)(unsigned, int, int *, char *) = a_eglGetProcAddress("glGetProgramInfoLog");
+            char plog[512] = ""; int got = 0;
+            if (getproglog) getproglog(prog, sizeof(plog) - 1, &got, plog);
+            for (char *q = plog; *q; q++) if (*q == '\n') *q = '|';
+            tl_log_line("gl: program %u failed to link: %.380s", prog, plog);
+        }
+        return;
+    }
     int cur = 0; a_glGetIntegerv(0x8B8D /* GL_CURRENT_PROGRAM */, &cur);
     bool used = false;
     pthread_mutex_lock(&g_es31_mu);
