@@ -1202,11 +1202,6 @@ bool tl_javaapp_start(const tl_javaapp_config *cfg)
     husk_aosp_set_session(A.pkg, cfg->width, cfg->height);
     tl_set_package_name(A.pkg);
     tl_log_line("javaapp: %s, launcher %s, application %s", A.pkg, A.activity, A.application[0] ? A.application : "(none)");
-    if (strstr(A.activity, "unity") || strstr(A.activity, "Unity")) {
-        void tl_egl_es3_claim(int);
-        tl_egl_es3_claim(2);
-        tl_log_line("egl: Unity game detected (%s): claiming OpenGL ES 3.2 and enabling ES 3.1 shim", A.activity);
-    }
     tl_nwindow_configure(cfg->width, cfg->height, cfg->metal_layer);
     if (cfg->angle_egl && !tl_egl_init(cfg->angle_egl, cfg->angle_gles, cfg->frame_dir, cfg->frame_every)) return false;
     { void tl_set_data_dir(const char *dir); tl_set_data_dir(A.data); }

@@ -222,33 +222,18 @@ PASS_BOOL(eglReleaseThread, (void), ())
 
 static const char *w_eglQueryString(EGLDisplay d, EGLint name) { return a_eglQueryString(d, name); }
 static bool g_es31_shim;           /* defined with the rest of the shim, below */
-void tl_egl_es3_claim(int minor);
 static EGLContext w_eglCreateContext(EGLDisplay d, EGLConfig c, EGLContext share, const EGLint *at)
 {
-    /* A game that insists on ES 3.1 or 3.2 (Unity, Unreal Engine try 3.2, then 3.1) is given the 3.0 context ANGLE can make: the version it is then told is the shim's. */
+    /* A game that insists on ES 3.1 or 3.2 (Unreal Engine tries 3.2, then 3.1) is given the 3.0 context ANGLE can make: the version it is then told is the shim's. */
     EGLint patched[40];
-    if (at) {
-        int minor = 0;
-        int client = 1;
-        for (int n = 0; at[n] != EGL_NONE && n < 36; n += 2) {
-            if (at[n] == 0x3098 /* EGL_CONTEXT_CLIENT_VERSION */) client = at[n + 1];
-            if (at[n] == 0x30fb /* EGL_CONTEXT_MINOR_VERSION */ && at[n + 1] > 0) {
-                if (at[n + 1] > minor) minor = at[n + 1];
-            }
+    if (g_es31_shim && at) {
+        int n = 0;
+        for (; at[n] != EGL_NONE && n < 36; n += 2) {
+            patched[n] = at[n]; patched[n + 1] = at[n + 1];
+            if (at[n] == 0x30fb /* EGL_CONTEXT_MINOR_VERSION */ && at[n + 1] > 0) patched[n + 1] = 0;
         }
-        if (client == 3 && minor > 0 && !g_es31_shim) {
-            tl_egl_es3_claim(minor);
-            tl_log_line("egl: eglCreateContext asked for OpenGL ES 3.%d: claiming ES 3.%d and enabling ES 3.1 shim", minor, minor > 2 ? 2 : minor);
-        }
-        if (g_es31_shim) {
-            int n = 0;
-            for (; at[n] != EGL_NONE && n < 36; n += 2) {
-                patched[n] = at[n]; patched[n + 1] = at[n + 1];
-                if (at[n] == 0x30fb /* EGL_CONTEXT_MINOR_VERSION */ && at[n + 1] > 0) patched[n + 1] = 0;
-            }
-            patched[n] = EGL_NONE;
-            at = patched;
-        }
+        patched[n] = EGL_NONE;
+        at = patched;
     }
     EGLContext ctx = a_eglCreateContext(d, cfg_real(c), share, at);
     static int trace = -1;
@@ -789,10 +774,7 @@ static const char *const k_noop_names[] = {
 static const char *const k_es31_stub_names[] = {
     "glTexBufferEXT", "glTexBufferOES", "glTexBuffer", "glTexBufferRangeEXT", "glTexBufferRangeOES", "glTexBufferRange",
     "glBindImageTexture", "glDispatchCompute", "glDispatchComputeIndirect", "glMemoryBarrier", "glMemoryBarrierByRegion",
-    "glFramebufferParameteri", "glGetFramebufferParameteriv", "glTexStorage2DMultisample",
-    "glDrawArraysIndirect", "glDrawElementsIndirect", "glMultiDrawArraysIndirect", "glMultiDrawElementsIndirect",
-    "glBlendBarrier", "glBlendBarrierKHR", "glPrimitiveBoundingBox", "glPrimitiveBoundingBoxEXT", "glPrimitiveBoundingBoxOES",
-    "glTexStorage3DMultisample", "glGetMultisamplefv", "glSampleMaski", NULL
+    "glFramebufferParameteri", "glGetFramebufferParameteriv", "glTexStorage2DMultisample", NULL
 };
 
 static void *egl_resolve(const char *name);
