@@ -77,6 +77,20 @@ static void (*a_glGetIntegerv)(unsigned, int *);
 static void (*a_glBindFramebuffer)(unsigned, unsigned);
 static void (*a_glPixelStorei)(unsigned, int);
 
+static void *gl_proc(const char *name)
+{
+    void *p = a_eglGetProcAddress ? a_eglGetProcAddress(name) : NULL;
+    if (!p && E.gles) p = dlsym(E.gles, name);
+    return p;
+}
+
+static unsigned gl_proc_get_error(void)
+{
+    static unsigned (*fn)(void);
+    if (!fn) fn = gl_proc("glGetError");
+    return fn ? fn() : 0;
+}
+
 #define LOAD(lib, name) do { a_##name = dlsym(lib, #name); if (!a_##name) tl_log_line("egl: ANGLE does not export " #name); } while (0)
 
 bool tl_egl_init(const char *egl_path, const char *gles_path, const char *frame_dir, int frame_every)
@@ -435,9 +449,7 @@ static EGLBoolean w_eglSwapBuffers(EGLDisplay d, EGLSurface s)
         const uint8_t *px = read_back(d, s, &w, &h);
         if (px && tl_javaapp_app_pixels) tl_javaapp_app_pixels(px, w, h);
         if (n <= 3 || n % 600 == 0) {
-            static unsigned (*geterr)(void);
-            if (!geterr && a_eglGetProcAddress) geterr = a_eglGetProcAddress("glGetError");
-            unsigned err = geterr ? geterr() : 0;
+            unsigned err = gl_proc_get_error();
             if (err) tl_log_line("gl: swap #%lu (composited) GL error: %#x", n, err);
             else tl_log_line("egl: swap #%lu (composited)", n);
         }
@@ -530,10 +542,32 @@ static void w_glTexImage2D(unsigned target, int level, int internalformat, int w
     static atomic_int count;
     int c = atomic_fetch_add(&count, 1);
     if (c < 30 || (c % 100 == 0)) {
-        static unsigned (*geterr)(void);
-        if (!geterr && a_eglGetProcAddress) geterr = a_eglGetProcAddress("glGetError");
-        unsigned err = geterr ? geterr() : 0;
+        unsigned err = gl_proc_get_error();
         tl_log_line("gl: glTexImage2D(target %#x, lvl %d, intfmt %#x, %dx%d, fmt %#x, type %#x) -> err %#x", target, level, internalformat, width, height, format, type, err);
+    }
+}
+
+static void (*r_glTexStorage2D)(unsigned, int, unsigned, int, int);
+static void w_glTexStorage2D(unsigned target, int levels, unsigned internalformat, int width, int height)
+{
+    r_glTexStorage2D(target, levels, internalformat, width, height);
+    static atomic_int count;
+    int c = atomic_fetch_add(&count, 1);
+    if (c < 30 || (c % 100 == 0)) {
+        unsigned err = gl_proc_get_error();
+        tl_log_line("gl: glTexStorage2D(target %#x, lvls %d, intfmt %#x, %dx%d) -> err %#x", target, levels, internalformat, width, height, err);
+    }
+}
+
+static void (*r_glTexSubImage2D)(unsigned, int, int, int, int, int, unsigned, unsigned, const void *);
+static void w_glTexSubImage2D(unsigned target, int level, int xoffset, int yoffset, int width, int height, unsigned format, unsigned type, const void *pixels)
+{
+    r_glTexSubImage2D(target, level, xoffset, yoffset, width, height, format, type, pixels);
+    static atomic_int count;
+    int c = atomic_fetch_add(&count, 1);
+    if (c < 30 || (c % 100 == 0)) {
+        unsigned err = gl_proc_get_error();
+        tl_log_line("gl: glTexSubImage2D(target %#x, lvl %d, %dx%d, fmt %#x, type %#x) -> err %#x", target, level, width, height, format, type, err);
     }
 }
 
@@ -544,11 +578,76 @@ static void w_glCompressedTexImage2D(unsigned target, int level, unsigned intern
     static atomic_int count;
     int c = atomic_fetch_add(&count, 1);
     if (c < 50 || (c % 100 == 0)) {
-        static unsigned (*geterr)(void);
-        if (!geterr && a_eglGetProcAddress) geterr = a_eglGetProcAddress("glGetError");
-        unsigned err = geterr ? geterr() : 0;
+        unsigned err = gl_proc_get_error();
         tl_log_line("gl: glCompressedTexImage2D(target %#x, lvl %d, intfmt %#x, %dx%d, sz %d) -> err %#x", target, level, internalformat, width, height, size, err);
     }
+}
+
+static void (*r_glCompressedTexSubImage2D)(unsigned, int, int, int, int, int, unsigned, int, const void *);
+static void w_glCompressedTexSubImage2D(unsigned target, int level, int xoffset, int yoffset, int width, int height, unsigned format, int imageSize, const void *data)
+{
+    r_glCompressedTexSubImage2D(target, level, xoffset, yoffset, width, height, format, imageSize, data);
+    static atomic_int count;
+    int c = atomic_fetch_add(&count, 1);
+    if (c < 50 || (c % 100 == 0)) {
+        unsigned err = gl_proc_get_error();
+        tl_log_line("gl: glCompressedTexSubImage2D(target %#x, lvl %d, %dx%d, fmt %#x, sz %d) -> err %#x", target, level, width, height, format, imageSize, err);
+    }
+}
+
+static void (*r_glProgramBinary)(unsigned, unsigned, const void *, int);
+static void w_glProgramBinary(unsigned program, unsigned binaryFormat, const void *binary, int length)
+{
+    r_glProgramBinary(program, binaryFormat, binary, length);
+    static atomic_int count;
+    if (atomic_fetch_add(&count, 1) < 30) {
+        unsigned err = gl_proc_get_error();
+        tl_log_line("gl: glProgramBinary(prog %u, binFmt %#x, len %d) -> err %#x", program, binaryFormat, length, err);
+    }
+}
+
+static void (*r_glShaderBinary)(int, const unsigned *, unsigned, const void *, int);
+static void w_glShaderBinary(int count, const unsigned *shaders, unsigned binaryFormat, const void *binary, int length)
+{
+    r_glShaderBinary(count, shaders, binaryFormat, binary, length);
+    static atomic_int count_sb;
+    if (atomic_fetch_add(&count_sb, 1) < 30) {
+        unsigned err = gl_proc_get_error();
+        tl_log_line("gl: glShaderBinary(n %d, binFmt %#x, len %d) -> err %#x", count, binaryFormat, length, err);
+    }
+}
+
+static unsigned (*r_glCreateShaderProgramv)(unsigned, int, const char *const *);
+static unsigned w_glCreateShaderProgramv(unsigned type, int count, const char *const *strings)
+{
+    unsigned p = r_glCreateShaderProgramv ? r_glCreateShaderProgramv(type, count, strings) : 0;
+    static atomic_int count_sp;
+    int c = atomic_fetch_add(&count_sp, 1);
+    if (c < 20 && count > 0 && strings && strings[0]) {
+        char prev[160] = "";
+        strncpy(prev, strings[0], sizeof(prev) - 1);
+        for (char *q = prev; *q; q++) if (*q == '\n' || *q == '\r') *q = ' ';
+        tl_log_line("gl: glCreateShaderProgramv(type %#x, count %d) -> prog %u: %.150s", type, count, p, prev);
+    }
+    return p;
+}
+
+static unsigned (*r_glCreateProgram)(void);
+static unsigned w_glCreateProgram(void)
+{
+    unsigned p = r_glCreateProgram ? r_glCreateProgram() : 0;
+    static atomic_int count;
+    if (atomic_fetch_add(&count, 1) < 30) tl_log_line("gl: glCreateProgram -> %u", p);
+    return p;
+}
+
+static unsigned (*r_glCreateShader)(unsigned);
+static unsigned w_glCreateShader(unsigned type)
+{
+    unsigned s = r_glCreateShader ? r_glCreateShader(type) : 0;
+    static atomic_int count;
+    if (atomic_fetch_add(&count, 1) < 30) tl_log_line("gl: glCreateShader(type %#x) -> %u", type, s);
+    return s;
 }
 
 static void (*r_glUniformBlockBinding)(unsigned, unsigned, unsigned);
@@ -586,7 +685,7 @@ static bool ext_hidden(const char *name, size_t n)
 static const unsigned char *(*r_glGetString)(unsigned);
 static const unsigned char *w_glGetString(unsigned name)
 {
-    if (!r_glGetString && a_eglGetProcAddress) r_glGetString = a_eglGetProcAddress("glGetString");
+    if (!r_glGetString) r_glGetString = gl_proc("glGetString");
     const unsigned char *s = r_glGetString ? r_glGetString(name) : NULL;
     if (g_es31_shim && s && (name == 0x1F02 || name == 0x8B8C)) s = (const unsigned char *)es31_fix((const char *)s, name == 0x8B8C);
     if (s && (name == 0x1F02 || name == 0x8B8C || name == 0x1F01 || name == 0x1F00)) {
@@ -627,7 +726,13 @@ static const unsigned char *w_glGetString(unsigned name)
 static const unsigned char *(*r_glGetStringi)(unsigned, unsigned);
 static const unsigned char *w_glGetStringi(unsigned name, unsigned index)
 {
+    if (!r_glGetStringi) r_glGetStringi = gl_proc("glGetStringi");
     const unsigned char *s = r_glGetStringi ? r_glGetStringi(name, index) : NULL;
+    if (name == 0x1F03 /* GL_EXTENSIONS */ && s) {
+        static atomic_int ext_count;
+        int idx = atomic_fetch_add(&ext_count, 1);
+        if (idx < 50) tl_log_line("gl: ext[%d]: %s", idx, (const char *)s);
+    }
     if (name == 0x1F03 && s && ext_hidden((const char *)s, strlen((const char *)s))) return (const unsigned char *)"GL_ANGLE_husk_hidden_extension";
     return s;
 }
@@ -639,7 +744,7 @@ static void w_glCompileShader(unsigned sh)
     static void (*getiv)(unsigned, unsigned, int *), (*getlog)(unsigned, int, int *, char *), (*getsrc)(unsigned, int, int *, char *);
     static atomic_int reported;
     r_glCompileShader(sh);
-    if (!getiv && a_eglGetProcAddress) { getiv = a_eglGetProcAddress("glGetShaderiv"); getlog = a_eglGetProcAddress("glGetShaderInfoLog"); getsrc = a_eglGetProcAddress("glGetShaderSource"); }
+    if (!getiv) { getiv = gl_proc("glGetShaderiv"); getlog = gl_proc("glGetShaderInfoLog"); getsrc = gl_proc("glGetShaderSource"); }
     if (!getiv || !getlog || !getsrc) return;
     int ok = 1;
     getiv(sh, 0x8B81 /* GL_COMPILE_STATUS */, &ok);
@@ -693,8 +798,9 @@ static const struct { const char *name; void *wrap; void **real; } k_adapt[] = {
     ADAPT(glUniformMatrix3fv), ADAPT(glUniformMatrix4fv),
     ADAPT(glUniformMatrix2x3fv), ADAPT(glUniformMatrix3x2fv), ADAPT(glUniformMatrix2x4fv), ADAPT(glUniformMatrix4x2fv),
     ADAPT(glUniformMatrix3x4fv), ADAPT(glUniformMatrix4x3fv),
-    ADAPT(glSampleCoverage), ADAPT(glTexImage2D), ADAPT(glCompressedTexImage2D), ADAPT(glUniformBlockBinding),
+    ADAPT(glSampleCoverage), ADAPT(glTexImage2D), ADAPT(glTexStorage2D), ADAPT(glTexSubImage2D), ADAPT(glCompressedTexImage2D), ADAPT(glCompressedTexSubImage2D), ADAPT(glUniformBlockBinding),
     ADAPT(glGetString), ADAPT(glGetStringi), ADAPT(glCompileShader), ADAPT(glShaderSource), ADAPT(glAttachShader), ADAPT(glLinkProgram), ADAPT(glGetIntegerv), ADAPT(glBindBufferBase), ADAPT(glBindBuffer), ADAPT(glBufferData), ADAPT(glBufferSubData), ADAPT(glBindBufferRange),
+    ADAPT(glProgramBinary), ADAPT(glShaderBinary), ADAPT(glCreateShaderProgramv), ADAPT(glCreateProgram), ADAPT(glCreateShader),
     ADAPT(glGetProgramInterfaceiv), ADAPT(glGetProgramResourceIndex), ADAPT(glGetProgramResourceName), ADAPT(glGetProgramResourceiv), ADAPT(glGetIntegeri_v),
     ADAPT(eglClientWaitSyncKHR), ADAPT(eglDestroySyncKHR), ADAPT(eglGetSyncAttribKHR), ADAPT(eglClientWaitSync), ADAPT(eglDestroySync),
 };
@@ -846,9 +952,21 @@ static void *egl_resolve(const char *name);
 void *tl_egl_resolve(const char *name)
 {
     void *r = egl_resolve(name);
-    static int trace = -1;
-    if (trace < 0) trace = getenv("TL_EGL_TRACE") ? 1 : 0;
-    if (trace && name[0] == 'e') tl_log_line("egl: resolve %s -> %p", name, r);
+    if (name) {
+        static char seen[128][48];
+        static int nseen;
+        static pthread_mutex_t smu = PTHREAD_MUTEX_INITIALIZER;
+        pthread_mutex_lock(&smu);
+        bool found = false;
+        for (int i = 0; i < nseen; i++) {
+            if (!strcmp(seen[i], name)) { found = true; break; }
+        }
+        if (!found && nseen < 128) {
+            strncpy(seen[nseen++], name, 47);
+            tl_log_line("gl: resolve %s -> %p", name, r);
+        }
+        pthread_mutex_unlock(&smu);
+    }
     return r;
 }
 static void *egl_resolve(const char *name)

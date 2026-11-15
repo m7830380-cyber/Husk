@@ -211,11 +211,10 @@ static void (*r_glLinkProgram)(unsigned);
 static void w_glLinkProgram(unsigned prog)
 {
     r_glLinkProgram(prog);
-    if (!a_eglGetProcAddress) return;
     static void (*getprogiv)(unsigned, unsigned, int *), (*getproglog)(unsigned, int, int *, char *);
     if (!getprogiv) {
-        getprogiv = a_eglGetProcAddress("glGetProgramiv");
-        getproglog = a_eglGetProcAddress("glGetProgramInfoLog");
+        getprogiv = gl_proc("glGetProgramiv");
+        getproglog = gl_proc("glGetProgramInfoLog");
     }
     int ok = 1;
     if (getprogiv) getprogiv(prog, 0x8B82 /* GL_LINK_STATUS */, &ok);
@@ -229,15 +228,16 @@ static void w_glLinkProgram(unsigned prog)
     }
     static atomic_int prog_count;
     int pc = atomic_fetch_add(&prog_count, 1);
-    if (pc < 30) {
+    if (pc < 35) {
         static void (*getblockname)(unsigned, unsigned, int, int *, char *);
         static void (*getblockiv)(unsigned, unsigned, unsigned, int *);
-        if (!getblockname && a_eglGetProcAddress) {
-            getblockname = a_eglGetProcAddress("glGetActiveUniformBlockName");
-            getblockiv = a_eglGetProcAddress("glGetActiveUniformBlockiv");
+        if (!getblockname) {
+            getblockname = gl_proc("glGetActiveUniformBlockName");
+            getblockiv = gl_proc("glGetActiveUniformBlockiv");
         }
         int nblocks = 0;
         if (getprogiv) getprogiv(prog, 0x8A36 /* GL_ACTIVE_UNIFORM_BLOCKS */, &nblocks);
+        tl_log_line("gl: prog %u linked ok (blocks: %d)", prog, nblocks);
         if (nblocks > 0 && getblockname && getblockiv) {
             for (int i = 0; i < nblocks; i++) {
                 char bname[96] = ""; int blen = 0, bbinding = -1, bsize = 0;
@@ -252,9 +252,9 @@ static void w_glLinkProgram(unsigned prog)
     static int (*getloc)(unsigned, const char *); static unsigned (*getblk)(unsigned, const char *);
     static void (*blkbind)(unsigned, unsigned, unsigned), (*uni1i)(int, int), (*useprog)(unsigned);
     if (!getloc) {
-        getloc = a_eglGetProcAddress("glGetUniformLocation"); getblk = a_eglGetProcAddress("glGetUniformBlockIndex");
-        blkbind = a_eglGetProcAddress("glUniformBlockBinding"); uni1i = a_eglGetProcAddress("glUniform1i");
-        useprog = a_eglGetProcAddress("glUseProgram");
+        getloc = gl_proc("glGetUniformLocation"); getblk = gl_proc("glGetUniformBlockIndex");
+        blkbind = gl_proc("glUniformBlockBinding"); uni1i = gl_proc("glUniform1i");
+        useprog = gl_proc("glUseProgram");
     }
     if (!getloc || !getblk || !blkbind || !uni1i || !useprog) return;
     int cur = 0; a_glGetIntegerv(0x8B8D /* GL_CURRENT_PROGRAM */, &cur);
@@ -296,13 +296,18 @@ static void (*r_glBindBufferBase)(unsigned, unsigned, unsigned);
 static void w_glBindBufferBase(unsigned target, unsigned index, unsigned buffer)
 {
     es31_note_storage("glBindBufferBase", target);
+    if (target == 0x8A11 /* GL_UNIFORM_BUFFER */) {
+        static atomic_int count;
+        if (atomic_fetch_add(&count, 1) < 40)
+            tl_log_line("gl: glBindBufferBase(UNIFORM_BUFFER, idx %u, buf %u)", index, buffer);
+    }
     if (g_es31_shim && target == 0x90D2 /* GL_SHADER_STORAGE_BUFFER */) {
         static void (*getparam)(unsigned, unsigned, int *), (*bindbuf)(unsigned, unsigned), (*bufdata)(unsigned, long, const void *, unsigned),
                     (*copysub)(unsigned, unsigned, long, long, long), (*getsub)(unsigned, long, long, void *), (*subdata)(unsigned, long, long, const void *);
-        if (!getparam && a_eglGetProcAddress) {
-            getparam = a_eglGetProcAddress("glGetBufferParameteriv"); bindbuf = a_eglGetProcAddress("glBindBuffer");
-            bufdata = a_eglGetProcAddress("glBufferData"); getsub = a_eglGetProcAddress("glGetBufferSubData"); subdata = a_eglGetProcAddress("glBufferSubData");
-            copysub = a_eglGetProcAddress("glCopyBufferSubData");
+        if (!getparam) {
+            getparam = gl_proc("glGetBufferParameteriv"); bindbuf = gl_proc("glBindBuffer");
+            bufdata = gl_proc("glBufferData"); getsub = gl_proc("glGetBufferSubData"); subdata = gl_proc("glBufferSubData");
+            copysub = gl_proc("glCopyBufferSubData");
         }
         if (getparam && bindbuf && bufdata && subdata && copysub && buffer) {
             int size = 0, usage = 0x88E4; /* GL_STATIC_DRAW */
@@ -310,7 +315,7 @@ static void w_glBindBufferBase(unsigned target, unsigned index, unsigned buffer)
             getparam(0x8F36, 0x8764 /* GL_BUFFER_SIZE */, &size);
             getparam(0x8F36, 0x8765 /* GL_BUFFER_USAGE */, &usage);
             if (size > 0 && size < ES31_UBO_MIN) {
-                unsigned tmp = 0; void (*gen)(int, unsigned *) = a_eglGetProcAddress("glGenBuffers"); void (*del)(int, const unsigned *) = a_eglGetProcAddress("glDeleteBuffers");
+                unsigned tmp = 0; void (*gen)(int, unsigned *) = gl_proc("glGenBuffers"); void (*del)(int, const unsigned *) = gl_proc("glDeleteBuffers");
                 if (gen && del) {
                     gen(1, &tmp);
                     bindbuf(0x8F37 /* GL_COPY_READ_BUFFER */, tmp);
