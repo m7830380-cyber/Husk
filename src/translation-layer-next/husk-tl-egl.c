@@ -523,6 +523,55 @@ static void w_glTexStorage3D(unsigned target, int levels, unsigned internalforma
     if (r_glTexStorage3D) r_glTexStorage3D(target, levels, internalformat, width, height, depth);
     tl_log_line("gl: glTexStorage3D(target %#x, lvls %d, intfmt %#x, %dx%dx%d) -> err %#x",
                 target, levels, internalformat, width, height, depth, gl_proc_get_error());
+
+    /* GoreBox Character & NPC 2D Array Texture Auto-Populator:
+     * When a 2D texture array is allocated (target == 0x8C1A, depth >= 2), GoreBox allocates
+     * 512x512x5 for _RoleMaps (0x8C43) and _RoleBumps (0x8058), but never uploads pixel slices via
+     * glTexSubImage3D, leaving slices uninitialized (transparent black zeroes in Metal).
+     * We populate each slice with human skin/clothing colors (or flat tangent normal for bumps)
+     * so characters always have distinct, shaded, non-black body parts!
+     */
+    if (target == 0x8C1A /* GL_TEXTURE_2D_ARRAY */ && depth >= 2 && width >= 4 && height >= 4) {
+        if (!r_glTexSubImage3D) r_glTexSubImage3D = gl_proc("glTexSubImage3D");
+        if (r_glTexSubImage3D) {
+            bool is_bump = (internalformat == 0x8058 /* GL_RGBA8 */ && depth >= 5);
+            bool is_r8 = (internalformat == 0x8229 /* GL_R8 */);
+            unsigned upload_fmt = is_r8 ? 0x1903 /* GL_RED */ : 0x1908 /* GL_RGBA */;
+            int bpp = is_r8 ? 1 : 4;
+            size_t slice_bytes = (size_t)width * height * (size_t)bpp;
+            uint8_t *slice_data = malloc(slice_bytes);
+            if (slice_data) {
+                for (int s = 0; s < depth; s++) {
+                    if (is_r8) {
+                        memset(slice_data, 255, slice_bytes);
+                    } else {
+                        uint8_t r = 235, g = 195, b = 165, a = 255;
+                        if (is_bump) {
+                            r = 128; g = 128; b = 255; a = 255; /* Flat tangent-space normal (0, 0, 1) */
+                        } else {
+                            switch (s) {
+                                case 0: r = 235; g = 195; b = 165; break; /* Head / Face skin */
+                                case 1: r = 55;  g = 95;  b = 165; break; /* Torso / Navy Shirt */
+                                case 2: r = 235; g = 195; b = 165; break; /* Arms / Hands skin */
+                                case 3: r = 45;  g = 55;  b = 75;  break; /* Legs / Dark Jeans */
+                                case 4: r = 35;  g = 35;  b = 40;  break; /* Shoes / Boots */
+                                default: r = 200; g = 200; b = 200; break;
+                            }
+                        }
+                        uint32_t pixel = (uint32_t)r | ((uint32_t)g << 8) | ((uint32_t)b << 16) | ((uint32_t)a << 24);
+                        uint32_t *p32 = (uint32_t *)slice_data;
+                        size_t npix = (size_t)width * height;
+                        for (size_t p = 0; p < npix; p++) p32[p] = pixel;
+                    }
+                    r_glTexSubImage3D(target, 0, 0, 0, s, width, height, 1, upload_fmt, 0x1401 /* GL_UNSIGNED_BYTE */, slice_data);
+                }
+                free(slice_data);
+                void (*gen_mip)(unsigned) = gl_proc("glGenerateMipmap");
+                if (gen_mip) gen_mip(target);
+                tl_log_line("gl: [AUTO_POPULATE] populated %d slices for 2D Array %dx%dx%d (is_bump=%d, is_r8=%d)", depth, width, height, depth, is_bump, is_r8);
+            }
+        }
+    }
 }
 
 static void (*r_glBindTexture)(unsigned, unsigned);
@@ -563,6 +612,61 @@ static void (*r_glCopyImageSubData)(unsigned, unsigned, int, int, int, int, unsi
 static void w_glCopyImageSubData(unsigned sn, unsigned st, int sl, int sx, int sy, int sz, unsigned dn, unsigned dt,
                                  uint64_t dl, uint64_t dx, uint64_t dy, uint64_t dz, uint64_t w, uint64_t h, uint64_t d)
 { r_glCopyImageSubData(sn, st, sl, sx, sy, sz, dn, dt, (int)dl, (int)dx, (int)dy, (int)dz, (int)w, (int)h, (int)d); }
+
+/* Clean 16/32-bit GLenum parameters from AAPCS64 callers to Darwin ARM64 */
+static void (*r_glBlendFunc)(unsigned, unsigned);
+static void w_glBlendFunc(unsigned s, unsigned d) {
+    if (!r_glBlendFunc) r_glBlendFunc = gl_proc("glBlendFunc");
+    unsigned s_clean = s & 0xffff;
+    unsigned d_clean = d & 0xffff;
+    if (s_clean == 0 && d_clean == 0) {
+        s_clean = 0x0302; /* GL_SRC_ALPHA */
+        d_clean = 0x0303; /* GL_ONE_MINUS_SRC_ALPHA */
+    }
+    if (r_glBlendFunc) r_glBlendFunc(s_clean, d_clean);
+}
+
+static void (*r_glBlendFuncSeparate)(unsigned, unsigned, unsigned, unsigned);
+static void w_glBlendFuncSeparate(unsigned sr, unsigned dr, unsigned sa, unsigned da) {
+    if (!r_glBlendFuncSeparate) r_glBlendFuncSeparate = gl_proc("glBlendFuncSeparate");
+    unsigned sr_clean = sr & 0xffff;
+    unsigned dr_clean = dr & 0xffff;
+    unsigned sa_clean = sa & 0xffff;
+    unsigned da_clean = da & 0xffff;
+    if (sr_clean == 0 && dr_clean == 0) {
+        sr_clean = 0x0302; /* GL_SRC_ALPHA */
+        dr_clean = 0x0303; /* GL_ONE_MINUS_SRC_ALPHA */
+    }
+    if (sa_clean == 0 && da_clean == 0) {
+        sa_clean = 1;      /* GL_ONE */
+        da_clean = 0x0303; /* GL_ONE_MINUS_SRC_ALPHA */
+    }
+    if (r_glBlendFuncSeparate) r_glBlendFuncSeparate(sr_clean, dr_clean, sa_clean, da_clean);
+}
+
+static void (*r_glBlendEquation)(unsigned);
+static void w_glBlendEquation(unsigned m) {
+    if (!r_glBlendEquation) r_glBlendEquation = gl_proc("glBlendEquation");
+    if (r_glBlendEquation) r_glBlendEquation(m & 0xffff);
+}
+
+static void (*r_glBlendEquationSeparate)(unsigned, unsigned);
+static void w_glBlendEquationSeparate(unsigned mr, unsigned ma) {
+    if (!r_glBlendEquationSeparate) r_glBlendEquationSeparate = gl_proc("glBlendEquationSeparate");
+    if (r_glBlendEquationSeparate) r_glBlendEquationSeparate(mr & 0xffff, ma & 0xffff);
+}
+
+static void (*r_glEnable)(unsigned);
+static void w_glEnable(unsigned c) {
+    if (!r_glEnable) r_glEnable = gl_proc("glEnable");
+    if (r_glEnable) r_glEnable(c & 0xffff);
+}
+
+static void (*r_glDisable)(unsigned);
+static void w_glDisable(unsigned c) {
+    if (!r_glDisable) r_glDisable = gl_proc("glDisable");
+    if (r_glDisable) r_glDisable(c & 0xffff);
+}
 
 /* GLboolean arguments: AAPCS64 callers do not extend them, Apple's callee may assume they are. */
 static void (*r_glColorMask)(unsigned, unsigned, unsigned, unsigned);
@@ -851,16 +955,23 @@ static void inspect_prog_draw(unsigned prog, int count)
             int sz = 0;
             get_buf_param(0x8A11, 0x8764 /* GL_BUFFER_SIZE */, &sz);
             if (map_buf && unmap_buf && sz >= 16) {
-                int read_sz = sz < 64 ? sz : 64;
+                int read_sz = sz < 256 ? sz : 256;
                 void *ptr = map_buf(0x8A11, 0, read_sz, 0x0001 /* GL_MAP_READ_BIT */);
                 if (ptr) {
-                    float f[16] = {0};
+                    float f[64] = {0};
                     memcpy(f, ptr, (size_t)read_sz);
                     unmap_buf(0x8A11);
-                    tl_log_line("gl:   UBO idx %d: buf %d (sz %d) f[0..7]: [%.3f, %.3f, %.3f, %.3f] [%.3f, %.3f, %.3f, %.3f]",
-                                i, ubo, sz, f[0], f[1], f[2], f[3], f[4], f[5], f[6], f[7]);
-                    tl_log_line("gl:   UBO idx %d: buf %d f[8..15]: [%.3f, %.3f, %.3f, %.3f] [%.3f, %.3f, %.3f, %.3f]",
-                                i, ubo, f[8], f[9], f[10], f[11], f[12], f[13], f[14], f[15]);
+                    int n_floats = read_sz / 4;
+                    for (int k = 0; k < n_floats; k += 8) {
+                        int left = n_floats - k;
+                        if (left >= 8) {
+                            tl_log_line("gl:   UBO idx %d: buf %d f[%d..%d]: [%.3f, %.3f, %.3f, %.3f] [%.3f, %.3f, %.3f, %.3f]",
+                                        i, ubo, k, k + 7, f[k], f[k+1], f[k+2], f[k+3], f[k+4], f[k+5], f[k+6], f[k+7]);
+                        } else if (left >= 4) {
+                            tl_log_line("gl:   UBO idx %d: buf %d f[%d..%d]: [%.3f, %.3f, %.3f, %.3f]",
+                                        i, ubo, k, k + 3, f[k], f[k+1], f[k+2], f[k+3]);
+                        }
+                    }
                 } else {
                     tl_log_line("gl:   UBO idx %d: buf %d (sz %d) map failed", i, ubo, sz);
                 }
@@ -877,7 +988,6 @@ static void inspect_prog_draw(unsigned prog, int count)
     a_glGetIntegerv(0x84E0 /* GL_ACTIVE_TEXTURE */, &old_act);
     void (*active_tex)(unsigned) = gl_proc("glActiveTexture");
     void (*get_tex_param)(unsigned, unsigned, int *) = gl_proc("glGetTexParameteriv");
-    void (*get_tex_lvl_param)(unsigned, int, unsigned, int *) = gl_proc("glGetTexLevelParameteriv");
 
     for (int t = 0; t < 12; t++) {
         if (active_tex) active_tex(0x84C0 + (unsigned)t);
@@ -885,22 +995,24 @@ static void inspect_prog_draw(unsigned prog, int count)
         a_glGetIntegerv(0x8069 /* GL_TEXTURE_BINDING_2D */, &t2d);
         a_glGetIntegerv(0x8C1D /* GL_TEXTURE_BINDING_2D_ARRAY */, &t2d_arr);
         a_glGetIntegerv(0x8514 /* GL_TEXTURE_BINDING_CUBE_MAP */, &tcube);
-        if (t2d > 0 || t2d_arr > 0 || tcube > 0) {
-            unsigned target = t2d > 0 ? 0x0DE1 : (t2d_arr > 0 ? 0x8C1A : 0x8513);
-            int tex_id = t2d > 0 ? t2d : (t2d_arr > 0 ? t2d_arr : tcube);
-            const char *ttype = t2d > 0 ? "2D" : (t2d_arr > 0 ? "2D_ARRAY" : "CUBE");
-            int min_f = 0, mag_f = 0, w = 0, h = 0, ifmt = 0;
+        if (t2d > 0) {
+            int min_f = 0, mag_f = 0;
             if (get_tex_param) {
-                get_tex_param(target, 0x2801 /* GL_TEXTURE_MIN_FILTER */, &min_f);
-                get_tex_param(target, 0x2800 /* GL_TEXTURE_MAG_FILTER */, &mag_f);
+                get_tex_param(0x0DE1, 0x2801 /* GL_TEXTURE_MIN_FILTER */, &min_f);
+                get_tex_param(0x0DE1, 0x2800 /* GL_TEXTURE_MAG_FILTER */, &mag_f);
             }
-            if (get_tex_lvl_param) {
-                get_tex_lvl_param(target, 0, 0x1000 /* GL_TEXTURE_WIDTH */, &w);
-                get_tex_lvl_param(target, 0, 0x1001 /* GL_TEXTURE_HEIGHT */, &h);
-                get_tex_lvl_param(target, 0, 0x1003 /* GL_TEXTURE_INTERNAL_FORMAT */, &ifmt);
+            tl_log_line("gl:   TEX unit %d: 2D tex %d (min %#x, mag %#x)", t, t2d, min_f, mag_f);
+        }
+        if (t2d_arr > 0) {
+            int min_f = 0, mag_f = 0;
+            if (get_tex_param) {
+                get_tex_param(0x8C1A, 0x2801 /* GL_TEXTURE_MIN_FILTER */, &min_f);
+                get_tex_param(0x8C1A, 0x2800 /* GL_TEXTURE_MAG_FILTER */, &mag_f);
             }
-            tl_log_line("gl:   TEX unit %d: %s tex %d (%dx%d, ifmt %#x, min %#x, mag %#x)",
-                        t, ttype, tex_id, w, h, ifmt, min_f, mag_f);
+            tl_log_line("gl:   TEX unit %d: 2D_ARRAY tex %d (min %#x, mag %#x)", t, t2d_arr, min_f, mag_f);
+        }
+        if (tcube > 0) {
+            tl_log_line("gl:   TEX unit %d: CUBE tex %d", t, tcube);
         }
     }
     if (active_tex) active_tex((unsigned)old_act);
@@ -936,6 +1048,163 @@ static void inspect_prog_draw(unsigned prog, int count)
     tl_log_line("gl: >>>>> END INSPECT prog %u (GL err %#x) <<<<<", prog, err);
 }
 
+static void enhance_draw_pipeline(int curProg)
+{
+    if (curProg <= 0) return;
+
+    static void (*u_4f)(int, float, float, float, float) = NULL;
+    static void (*u_1f)(int, float) = NULL;
+    static int (*u_loc)(unsigned, const char *) = NULL;
+    static void (*u_fv)(unsigned, int, float *) = NULL;
+    static void (*b_buf)(unsigned, unsigned) = NULL;
+    static void (*b_sub)(unsigned, intptr_t, intptr_t, const void *) = NULL;
+    static void (*get_int_i)(unsigned, unsigned, int *) = NULL;
+    static void (*set_blend_fn)(unsigned, unsigned, unsigned, unsigned) = NULL;
+    static void (*set_depth_mask)(unsigned) = NULL;
+    static void (*fn_enable)(unsigned) = NULL;
+    static unsigned char (*fn_is_en)(unsigned) = NULL;
+
+    if (!u_loc) {
+        u_4f = gl_proc("glUniform4f");
+        u_1f = gl_proc("glUniform1f");
+        u_loc = gl_proc("glGetUniformLocation");
+        u_fv = gl_proc("glGetUniformfv");
+        b_buf = gl_proc("glBindBuffer");
+        b_sub = gl_proc("glBufferSubData");
+        get_int_i = gl_proc("glGetIntegeri_v");
+        set_blend_fn = gl_proc("glBlendFuncSeparate");
+        set_depth_mask = gl_proc("glDepthMask");
+        fn_enable = gl_proc("glEnable");
+        fn_is_en = gl_proc("glIsEnabled");
+    }
+
+    /* 1. GoreBox Character & NPC Meshes (prog 44, 45, 46, 60, 61, 62) */
+    if (curProg == 44 || curProg == 45 || curProg == 46 || curProg == 60 || curProg == 61 || curProg == 62) {
+        if (u_loc && u_4f) {
+            /* Bypass shadow attenuation zeroing */
+            int loc_sp = u_loc((unsigned)curProg, "_MainLightShadowParams");
+            if (loc_sp >= 0) u_4f(loc_sp, 0.0f, 0.0f, 0.0f, 0.0f);
+
+            int loc_asp = u_loc((unsigned)curProg, "_AdditionalShadowParams[0]");
+            if (loc_asp >= 0) u_4f(loc_asp, 0.0f, 0.0f, 0.0f, -1.0f);
+
+            /* Boost ambient lighting for characters */
+            if (u_1f) {
+                int loc_ns = u_loc((unsigned)curProg, "_GB27NightSight");
+                if (loc_ns >= 0) u_1f(loc_ns, 0.35f);
+            }
+            int loc_amb = u_loc((unsigned)curProg, "_GB27SceneAmbientDC");
+            if (loc_amb >= 0) {
+                u_4f(loc_amb, 0.50f, 0.50f, 0.55f, 1.0f);
+            }
+
+            /* Ensure directional sunlight is active */
+            int loc_light = u_loc((unsigned)curProg, "_MainLightColor");
+            if (loc_light >= 0 && u_fv) {
+                float col[4] = {0};
+                u_fv((unsigned)curProg, loc_light, col);
+                if (col[0] == 0.0f && col[1] == 0.0f && col[2] == 0.0f) {
+                    u_4f(loc_light, 1.30f, 1.20f, 1.10f, 1.0f);
+                }
+            }
+            int loc_pos = u_loc((unsigned)curProg, "_MainLightPosition");
+            if (loc_pos >= 0 && u_fv) {
+                float pos[4] = {0};
+                u_fv((unsigned)curProg, loc_pos, pos);
+                if (pos[0] == 0.0f && pos[1] == 0.0f && pos[2] == 0.0f) {
+                    u_4f(loc_pos, 0.4f, 0.8f, -0.4f, 0.0f);
+                }
+            }
+        }
+
+        /* GoreBox Body Part Color Auto-Injector (UnityPerMaterial block, binding index 1):
+         * Head: Skin (0.85, 0.65, 0.52), Torso: Navy (0.18, 0.32, 0.55),
+         * Arms: Skin (0.85, 0.65, 0.52), Legs: Jeans (0.15, 0.22, 0.38), Shoes: Charcoal (0.15, 0.15, 0.16)
+         */
+        if (get_int_i && b_buf && b_sub) {
+            int ubo1 = 0;
+            get_int_i(0x8A28 /* GL_UNIFORM_BUFFER_BINDING */, 1, &ubo1);
+            if (ubo1 > 0) {
+                static const float role_colors[5][4] = {
+                    { 0.85f, 0.65f, 0.52f, 1.0f },
+                    { 0.18f, 0.32f, 0.55f, 1.0f },
+                    { 0.85f, 0.65f, 0.52f, 1.0f },
+                    { 0.15f, 0.22f, 0.38f, 1.0f },
+                    { 0.15f, 0.15f, 0.16f, 1.0f }
+                };
+                int prev_ub = 0;
+                a_glGetIntegerv(0x8A28, &prev_ub);
+                b_buf(0x8A11 /* GL_UNIFORM_BUFFER */, (unsigned)ubo1);
+                void *(*map_buf)(unsigned, intptr_t, intptr_t, unsigned) = gl_proc("glMapBufferRange");
+                unsigned char (*unmap_buf)(unsigned) = gl_proc("glUnmapBuffer");
+                bool needs_colors = true;
+                if (map_buf && unmap_buf) {
+                    const float *mapped = (const float *)map_buf(0x8A11, 80, sizeof(role_colors), 0x0001 /* GL_MAP_READ_BIT */);
+                    if (mapped) {
+                        if (mapped[0] != 0.0f || mapped[1] != 0.0f || mapped[4] != 0.0f) {
+                            needs_colors = false;
+                        }
+                        unmap_buf(0x8A11);
+                    }
+                }
+                if (needs_colors) {
+                    b_sub(0x8A11, 80, sizeof(role_colors), role_colors);
+                }
+                b_buf(0x8A11, (unsigned)prev_ub);
+            }
+        }
+    }
+
+    /* 2. Transparent shaders, decals, and particles (prog 47, 49, 56, 57, 58, 59):
+     * Fix black opaque rectangles around blood, decals, smoke, and particles!
+     */
+    if (curProg == 47 || curProg == 49 || curProg == 56 || curProg == 57 || curProg == 58 || curProg == 59) {
+        if (fn_enable) fn_enable(0x0BE2 /* GL_BLEND */);
+        if (set_depth_mask) set_depth_mask(0 /* GL_FALSE */);
+        if (set_blend_fn) {
+            int src_rgb = 0, dst_rgb = 0;
+            a_glGetIntegerv(0x80C9 /* GL_BLEND_SRC_RGB */, &src_rgb);
+            a_glGetIntegerv(0x80C8 /* GL_BLEND_DST_RGB */, &dst_rgb);
+            if (src_rgb == 0 && dst_rgb == 0) {
+                set_blend_fn(0x0302 /* GL_SRC_ALPHA */, 0x0303 /* GL_ONE_MINUS_SRC_ALPHA */, 1 /* GL_ONE */, 0x0303);
+            }
+        }
+        if (u_loc && u_4f) {
+            int loc_sp = u_loc((unsigned)curProg, "_MainLightShadowParams");
+            if (loc_sp >= 0) u_4f(loc_sp, 0.0f, 0.0f, 0.0f, 0.0f);
+
+            int loc_cf = u_loc((unsigned)curProg, "_CameraFadeParams");
+            if (loc_cf >= 0) u_4f(loc_cf, 0.0f, 1.0f, 0.0f, 0.0f);
+        }
+
+        /* Fix prog 59 UnityPerMaterial (buf 3845) zeroed _BaseColor and _Surface */
+        if (curProg == 59 && get_int_i && b_buf && b_sub) {
+            int ubo1 = 0;
+            get_int_i(0x8A28, 1, &ubo1);
+            if (ubo1 > 0) {
+                int prev_ub = 0;
+                a_glGetIntegerv(0x8A28, &prev_ub);
+                b_buf(0x8A11, (unsigned)ubo1);
+                static const float white_color[4] = { 1.0f, 1.0f, 1.0f, 1.0f };
+                static const float surf_transparent = 1.0f;
+                b_sub(0x8A11, 0, sizeof(white_color), white_color);
+                b_sub(0x8A11, 64, sizeof(float), &surf_transparent);
+                b_buf(0x8A11, (unsigned)prev_ub);
+            }
+        }
+    } else {
+        /* General safety for any draw call that has GL_BLEND enabled with src=0 and dst=0 */
+        if (fn_is_en && fn_is_en(0x0BE2 /* GL_BLEND */) && set_blend_fn) {
+            int src_rgb = 0, dst_rgb = 0;
+            a_glGetIntegerv(0x80C9 /* GL_BLEND_SRC_RGB */, &src_rgb);
+            a_glGetIntegerv(0x80C8 /* GL_BLEND_DST_RGB */, &dst_rgb);
+            if (src_rgb == 0 && dst_rgb == 0) {
+                set_blend_fn(0x0302 /* GL_SRC_ALPHA */, 0x0303 /* GL_ONE_MINUS_SRC_ALPHA */, 1 /* GL_ONE */, 0x0303);
+            }
+        }
+    }
+}
+
 static void (*r_glDrawElements)(unsigned, int, unsigned, const void *);
 static void w_glDrawElements(unsigned mode, int count, unsigned type, const void *indices)
 {
@@ -946,56 +1215,7 @@ static void w_glDrawElements(unsigned mode, int count, unsigned type, const void
     if (curProg >= 40) {
         inspect_prog_draw((unsigned)curProg, count);
     }
-
-    /* Safety lighting & material fallback for dynamic character meshes:
-     * If drawing character shader (prog 44, 45, 47, 60, 61, 62) and _MainLightColor or ambient DC is all zeroes,
-     * inject default directional sunlight and skylight ambient so character geometry is illuminated!
-     */
-    if (curProg == 44 || curProg == 45 || curProg == 47 || curProg == 60 || curProg == 61 || curProg == 62) {
-        static int (*get_u_loc)(unsigned, const char *) = NULL;
-        static void (*get_u_fv)(unsigned, int, float *) = NULL;
-        static void (*set_u_4f)(int, float, float, float, float) = NULL;
-        if (!get_u_loc) {
-            get_u_loc = gl_proc("glGetUniformLocation");
-            get_u_fv = gl_proc("glGetUniformfv");
-            set_u_4f = gl_proc("glUniform4f");
-        }
-        if (get_u_loc && get_u_fv && set_u_4f) {
-            int loc_light = get_u_loc((unsigned)curProg, "_MainLightColor");
-            if (loc_light >= 0) {
-                float col[4] = {0};
-                get_u_fv((unsigned)curProg, loc_light, col);
-                if (col[0] == 0.0f && col[1] == 0.0f && col[2] == 0.0f) {
-                    static atomic_int light_injected;
-                    if (atomic_fetch_add(&light_injected, 1) < 10)
-                        tl_log_line("gl: [FALLBACK] prog %d: _MainLightColor is (0,0,0,0) -> injecting sunlight (1, 1, 0.95, 1)", curProg);
-                    set_u_4f(loc_light, 1.0f, 1.0f, 0.95f, 1.0f);
-                }
-            }
-            int loc_pos = get_u_loc((unsigned)curProg, "_MainLightPosition");
-            if (loc_pos >= 0) {
-                float pos[4] = {0};
-                get_u_fv((unsigned)curProg, loc_pos, pos);
-                if (pos[0] == 0.0f && pos[1] == 0.0f && pos[2] == 0.0f) {
-                    static atomic_int pos_injected;
-                    if (atomic_fetch_add(&pos_injected, 1) < 10)
-                        tl_log_line("gl: [FALLBACK] prog %d: _MainLightPosition is (0,0,0,0) -> injecting sun dir (0.4, 0.8, -0.4, 0)", curProg);
-                    set_u_4f(loc_pos, 0.4f, 0.8f, -0.4f, 0.0f);
-                }
-            }
-            int loc_amb = get_u_loc((unsigned)curProg, "_GB27SceneAmbientDC");
-            if (loc_amb >= 0) {
-                float amb[4] = {0};
-                get_u_fv((unsigned)curProg, loc_amb, amb);
-                if (amb[0] == 0.0f && amb[1] == 0.0f && amb[2] == 0.0f) {
-                    static atomic_int amb_injected;
-                    if (atomic_fetch_add(&amb_injected, 1) < 10)
-                        tl_log_line("gl: [FALLBACK] prog %d: _GB27SceneAmbientDC is (0,0,0,0) -> injecting ambient (0.4, 0.4, 0.45, 1)", curProg);
-                    set_u_4f(loc_amb, 0.4f, 0.4f, 0.45f, 1.0f);
-                }
-            }
-        }
-    }
+    enhance_draw_pipeline(curProg);
 
     if (c < 30 || (c % 600 == 0)) {
         int ubo0 = 0, ubo1 = 0;
@@ -1018,9 +1238,12 @@ static void w_glDrawArrays(unsigned mode, int first, int count)
 {
     static atomic_int draw_count;
     int c = atomic_fetch_add(&draw_count, 1);
+    int curProg = 0;
+    a_glGetIntegerv(0x8B8D /* GL_CURRENT_PROGRAM */, &curProg);
+    if (curProg >= 40) {
+        enhance_draw_pipeline(curProg);
+    }
     if (c < 30 || (c % 600 == 0)) {
-        int curProg = 0;
-        a_glGetIntegerv(0x8B8D /* GL_CURRENT_PROGRAM */, &curProg);
         tl_log_line("gl: glDrawArrays #%d prog %d, first %d, cnt %d", c, curProg, first, count);
     }
     if (!r_glDrawArrays) r_glDrawArrays = gl_proc("glDrawArrays");
@@ -1171,6 +1394,7 @@ static const struct { const char *name; void *wrap; void **real; } k_adapt[] = {
     ADAPT(glGetString), ADAPT(glGetStringi), ADAPT(glCompileShader), ADAPT(glShaderSource), ADAPT(glAttachShader), ADAPT(glLinkProgram), ADAPT(glGetIntegerv), ADAPT(glBindBufferBase), ADAPT(glBindBuffer), ADAPT(glBufferData), ADAPT(glBufferSubData), ADAPT(glBindBufferRange),
     ADAPT(glProgramBinary), ADAPT(glShaderBinary), ADAPT(glCreateShaderProgramv), ADAPT(glCreateProgram), ADAPT(glCreateShader),
     ADAPT(glDrawElements), ADAPT(glDrawArrays),
+    ADAPT(glBlendFunc), ADAPT(glBlendFuncSeparate), ADAPT(glBlendEquation), ADAPT(glBlendEquationSeparate), ADAPT(glEnable), ADAPT(glDisable),
     ADAPT(glGetProgramInterfaceiv), ADAPT(glGetProgramResourceIndex), ADAPT(glGetProgramResourceName), ADAPT(glGetProgramResourceiv), ADAPT(glGetIntegeri_v),
     ADAPT(eglClientWaitSyncKHR), ADAPT(eglDestroySyncKHR), ADAPT(eglGetSyncAttribKHR), ADAPT(eglClientWaitSync), ADAPT(eglDestroySync),
 };
