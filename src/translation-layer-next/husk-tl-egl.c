@@ -516,6 +516,7 @@ static void w_glCompressedTexImage3D(unsigned target, int level, unsigned intern
                 target, level, internalformat, width, height, depth, imageSize, gl_proc_get_error());
 }
 
+static void (*r_glTexSubImage3D)(unsigned, int, int, int, int, int, int, int, unsigned, unsigned, const void *);
 static void (*r_glTexStorage3D)(unsigned, int, unsigned, int, int, int);
 static void w_glTexStorage3D(unsigned target, int levels, unsigned internalformat, int width, int height, int depth)
 {
@@ -586,7 +587,6 @@ static void w_glBindTexture(unsigned target, unsigned texture)
     }
 }
 
-static void (*r_glTexSubImage3D)(unsigned, int, int, int, int, int, int, int, unsigned, unsigned, const void *);
 static void w_glTexSubImage3D(unsigned t, int l, int x, int y, int z, int w, int h, int d, uint64_t fmt, uint64_t type, const void *px)
 {
     if (!r_glTexSubImage3D) r_glTexSubImage3D = gl_proc("glTexSubImage3D");
