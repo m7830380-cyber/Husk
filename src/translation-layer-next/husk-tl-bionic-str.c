@@ -340,7 +340,20 @@ static int b_remove(const char *p) { char buf[1024]; TL_ERRNO_BEGIN(); int r = r
 static int b_rename(const char *a, const char *b)
 {
     char x[1024], y[1024];
-    TL_ERRNO_BEGIN(); int r = rename(tl_path_resolve(a, x, sizeof(x)), tl_path_resolve(b, y, sizeof(y))); TL_ERRNO_END(); return r;
+    const char *rx = tl_path_resolve(a, x, sizeof(x));
+    const char *ry = tl_path_resolve(b, y, sizeof(y));
+    if (rx != x) { strncpy(x, rx, sizeof(x) - 1); x[sizeof(x) - 1] = 0; }
+    if (ry != y) { strncpy(y, ry, sizeof(y) - 1); y[sizeof(y) - 1] = 0; }
+    size_t lx = strlen(x);
+    while (lx > 1 && x[lx - 1] == '/') x[--lx] = 0;
+    size_t ly = strlen(y);
+    while (ly > 1 && y[ly - 1] == '/') y[--ly] = 0;
+    TL_ERRNO_BEGIN(); int r = rename(x, y); TL_ERRNO_END();
+    if (strstr(a ? a : "", "usr") || strstr(a ? a : "", "termux") || strstr(a ? a : "", "staging") ||
+        strstr(b ? b : "", "usr") || strstr(b ? b : "", "termux") || strstr(b ? b : "", "staging")) {
+        tl_log_line("b_rename: '%s' -> '%s' (resolved '%s' -> '%s', result %d, errno %d)", a, b, x, y, r, r ? errno : 0);
+    }
+    return r;
 }
 
 /* ----------------------------------------------------------- _chk variants */

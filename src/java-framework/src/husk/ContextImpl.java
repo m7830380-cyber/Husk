@@ -70,15 +70,24 @@ public final class ContextImpl extends Context {
     @Override public ApplicationInfo getApplicationInfo() { return ApplicationInfo.self(); }
     @Override public String getPackageResourcePath() { return getApplicationInfo().sourceDir; }
     @Override public String getPackageCodePath() { return getApplicationInfo().sourceDir; }
-    private static File dir(String sub) { File f = new File(Native.dataDir(), sub); f.mkdirs(); return f; }
+    private static File dir(String sub) {
+        File host = new File(Native.dataDir(), sub);
+        host.mkdirs();
+        return new File("/data/data/" + Native.packageName(), sub);
+    }
     @Override public File getFilesDir() { return dir("files"); }
     @Override public File getCacheDir() { return dir("cache"); }
-    @Override public File getDataDir() { return new File(Native.dataDir()); }
+    @Override public File getCodeCacheDir() { return dir("code_cache"); }
+    @Override public File getNoBackupFilesDir() { return dir("no_backup"); }
+    @Override public File getDataDir() {
+        new File(Native.dataDir()).mkdirs();
+        return new File("/data/data/" + Native.packageName());
+    }
     @Override public File getDir(String name, int mode) { return dir("app_" + name); }
     @Override public File getExternalFilesDir(String type) {
-        File f = new File(Native.externalDir(), "Android/data/" + getPackageName() + "/files" + (type == null ? "" : "/" + type));
-        f.mkdirs();
-        return f;
+        File host = new File(Native.externalDir(), "Android/data/" + getPackageName() + "/files" + (type == null ? "" : "/" + type));
+        host.mkdirs();
+        return new File("/sdcard/Android/data/" + getPackageName() + "/files" + (type == null ? "" : "/" + type));
     }
     @Override public SharedPreferences getSharedPreferences(String name, int mode) {
         if (name == null) name = "null";

@@ -258,6 +258,8 @@ const char *tl_path_resolve(const char *path, char *buf, size_t n)
             const char *rest = strchr(path + l, '/');
             if (rest && rest > path + l && (size_t)(rest - (path + l)) < sizeof(g_tl_pkg)) {
                 snprintf(g_tl_pkg, sizeof(g_tl_pkg), "%.*s", (int)(rest - (path + l)), path + l);
+            } else if (!rest && strlen(path + l) < sizeof(g_tl_pkg)) {
+                snprintf(g_tl_pkg, sizeof(g_tl_pkg), "%s", path + l);
             }
             snprintf(buf, n, "%s%s", tl_data_dir(), rest ? rest : "");
             return buf;
@@ -270,21 +272,11 @@ const char *tl_path_resolve(const char *path, char *buf, size_t n)
         snprintf(buf, n, "%s/cache/local-tmp%s", tl_data_dir(), path + 15);
         return buf;
     }
-    const char *pkg = "/data/data/";
-    if (!strncmp(path, pkg, strlen(pkg))) {
-        const char *rest = strchr(path + strlen(pkg), '/');
-        if (rest && rest > path + strlen(pkg) && (size_t)(rest - (path + strlen(pkg))) < sizeof(g_tl_pkg)) {
-            snprintf(g_tl_pkg, sizeof(g_tl_pkg), "%.*s", (int)(rest - (path + strlen(pkg))), path + strlen(pkg));
-        }
-        snprintf(buf, n, "%s%s", tl_data_dir(), rest ? rest : "");
-        return buf;
-    }
-    if (!strncmp(path, "/data/user/0/", 13)) {
-        const char *rest = strchr(path + 13, '/');
-        if (rest && rest > path + 13 && (size_t)(rest - (path + 13)) < sizeof(g_tl_pkg)) {
-            snprintf(g_tl_pkg, sizeof(g_tl_pkg), "%.*s", (int)(rest - (path + 13)), path + 13);
-        }
-        snprintf(buf, n, "%s%s", tl_data_dir(), rest ? rest : "");
+    /* /cache: Android download cache dir */
+    if (!strncmp(path, "/cache", 6) && (path[6] == 0 || path[6] == '/')) {
+        snprintf(buf, n, "%s/cache", tl_data_dir());
+        mkdir(buf, 0777);
+        snprintf(buf, n, "%s/cache%s", tl_data_dir(), path + 6);
         return buf;
     }
     if (!strncmp(path, "/sdcard", 7) || !strncmp(path, "/storage/emulated/0", 19)) {
@@ -816,7 +808,24 @@ static long b_readlink(const char *p, char *buf, size_t n)
         memcpy(buf, exe, l);
         return (long)l;
     }
-    char b[1024]; TL_ERRNO_BEGIN(); long r = readlink(tl_path_resolve(p, b, sizeof(b)), buf, n); TL_ERRNO_END(); return r;
+    char b[1024]; TL_ERRNO_BEGIN(); long r = readlink(tl_path_resolve(p, b, sizeof(b)), buf, n); TL_ERRNO_END();
+    if (r > 0 && (size_t)r < n && buf[0] == '/') {
+        char link_target[PATH_MAX];
+        memcpy(link_target, buf, (size_t)r);
+        link_target[r] = 0;
+        const char *data = tl_data_dir();
+        size_t dlen = strlen(data);
+        if (dlen > 0 && !strncmp(link_target, data, dlen) && (link_target[dlen] == 0 || link_target[dlen] == '/')) {
+            char remapped[PATH_MAX];
+            snprintf(remapped, sizeof(remapped), "/data/data/%s%s", tl_package_name(), link_target + dlen);
+            size_t rlen = strlen(remapped);
+            if (rlen < n) {
+                memcpy(buf, remapped, rlen);
+                r = (long)rlen;
+            }
+        }
+    }
+    return r;
 }
 static char *b_realpath(const char *p, char *out)
 {
@@ -827,82 +836,73 @@ static char *b_realpath(const char *p, char *out)
     TL_ERRNO_END();
     if (!r) return NULL;
 
-    /* If the input path was an Android guest path (/data/data, /data/user/0, /sdcard, etc.),
-     * the canonical path must remain in the Android guest namespace so that prefix and
-     * ZipSlip checks against guest paths (like Termux's TERMUX_STAGING_PREFIX_DIR_PATH) succeed. */
-    bool is_guest_path = false;
-    const char *guest_prefix = NULL;
+    /* If the input path was an Android guest path (/data/data, /data/user/0, etc.),
+     * record the guest package if specified. */
     char guest_pkg[128] = "";
-
     if (p) {
         if (!strncmp(p, "/data/data/", 11)) {
-            is_guest_path = true;
-            guest_prefix = "/data/data/";
             const char *slash = strchr(p + 11, '/');
             size_t plen = slash ? (size_t)(slash - (p + 11)) : strlen(p + 11);
             if (plen < sizeof(guest_pkg)) { memcpy(guest_pkg, p + 11, plen); guest_pkg[plen] = 0; }
         } else if (!strncmp(p, "/data/user/0/", 13)) {
-            is_guest_path = true;
-            guest_prefix = "/data/user/0/";
             const char *slash = strchr(p + 13, '/');
             size_t plen = slash ? (size_t)(slash - (p + 13)) : strlen(p + 13);
             if (plen < sizeof(guest_pkg)) { memcpy(guest_pkg, p + 13, plen); guest_pkg[plen] = 0; }
-        } else if (!strncmp(p, "/data/local/tmp", 15) && (p[15] == 0 || p[15] == '/')) {
-            is_guest_path = true;
-            guest_prefix = "/data/local/tmp";
-        } else if (!strncmp(p, "/sdcard", 7) && (p[7] == 0 || p[7] == '/')) {
-            is_guest_path = true;
-            guest_prefix = "/sdcard";
-        } else if (!strncmp(p, "/storage/emulated/0", 19) && (p[19] == 0 || p[19] == '/')) {
-            is_guest_path = true;
-            guest_prefix = "/storage/emulated/0";
         }
     }
 
-    if (is_guest_path) {
-        const char *data = tl_data_dir();
-        char canon_data[PATH_MAX];
-        if (!realpath(data, canon_data)) snprintf(canon_data, sizeof(canon_data), "%s", data);
+    const char *data = tl_data_dir();
+    char canon_data[PATH_MAX];
+    if (!realpath(data, canon_data)) snprintf(canon_data, sizeof(canon_data), "%s", data);
 
-        size_t dlen = 0;
-        if (canon_data[0] && !strncmp(r, canon_data, strlen(canon_data)) && (r[strlen(canon_data)] == 0 || r[strlen(canon_data)] == '/'))
-            dlen = strlen(canon_data);
-        else if (data[0] && !strncmp(r, data, strlen(data)) && (r[strlen(data)] == 0 || r[strlen(data)] == '/'))
-            dlen = strlen(data);
+    size_t dlen = 0;
+    if (canon_data[0] && !strncmp(r, canon_data, strlen(canon_data)) && (r[strlen(canon_data)] == 0 || r[strlen(canon_data)] == '/'))
+        dlen = strlen(canon_data);
+    else if (data[0] && !strncmp(r, data, strlen(data)) && (r[strlen(data)] == 0 || r[strlen(data)] == '/'))
+        dlen = strlen(data);
 
-        if (dlen > 0) {
-            const char *rest = r + dlen;
-            char remapped[PATH_MAX];
-            if (!strncmp(rest, "/sdcard", 7) && (rest[7] == 0 || rest[7] == '/')) {
-                snprintf(remapped, sizeof(remapped), "/sdcard%s", rest + 7);
-            } else if (!strncmp(rest, "/cache/local-tmp", 16) && (rest[16] == 0 || rest[16] == '/')) {
-                snprintf(remapped, sizeof(remapped), "/data/local/tmp%s", rest + 16);
-            } else {
-                const char *pkg = guest_pkg[0] ? guest_pkg : tl_package_name();
-                snprintf(remapped, sizeof(remapped), "%s%s%s", guest_prefix ? guest_prefix : "/data/data/", pkg, rest);
-            }
-            if (out) {
-                strncpy(out, remapped, PATH_MAX - 1);
-                out[PATH_MAX - 1] = 0;
-                return out;
-            } else {
-                free(r);
-                return strdup(remapped);
-            }
-        } else if (g_shared_storage[0] && !strncmp(r, g_shared_storage, strlen(g_shared_storage)) &&
-                   (r[strlen(g_shared_storage)] == 0 || r[strlen(g_shared_storage)] == '/')) {
-            size_t slen = strlen(g_shared_storage);
-            char remapped[PATH_MAX];
-            snprintf(remapped, sizeof(remapped), "/sdcard%s", r + slen);
-            if (out) {
-                strncpy(out, remapped, PATH_MAX - 1);
-                out[PATH_MAX - 1] = 0;
-                return out;
-            } else {
-                free(r);
-                return strdup(remapped);
-            }
+    if (dlen > 0) {
+        const char *rest = r + dlen;
+        char remapped[PATH_MAX];
+        if (!strncmp(rest, "/sdcard", 7) && (rest[7] == 0 || rest[7] == '/')) {
+            snprintf(remapped, sizeof(remapped), "/sdcard%s", rest + 7);
+        } else if (!strncmp(rest, "/cache/local-tmp", 16) && (rest[16] == 0 || rest[16] == '/')) {
+            snprintf(remapped, sizeof(remapped), "/data/local/tmp%s", rest + 16);
+        } else {
+            const char *pkg = guest_pkg[0] ? guest_pkg : tl_package_name();
+            snprintf(remapped, sizeof(remapped), "/data/data/%s%s", pkg, rest);
         }
+        if (strstr(p ? p : "", "usr") || strstr(p ? p : "", "termux") || strstr(p ? p : "", "bin") || strstr(p ? p : "", "staging")) {
+            tl_log_line("b_realpath: p='%s' -> r='%s' remapped='%s'", p ? p : "(null)", r, remapped);
+        }
+        if (out) {
+            strncpy(out, remapped, PATH_MAX - 1);
+            out[PATH_MAX - 1] = 0;
+            return out;
+        } else {
+            free(r);
+            return strdup(remapped);
+        }
+    } else if (g_shared_storage[0] && !strncmp(r, g_shared_storage, strlen(g_shared_storage)) &&
+               (r[strlen(g_shared_storage)] == 0 || r[strlen(g_shared_storage)] == '/')) {
+        size_t slen = strlen(g_shared_storage);
+        char remapped[PATH_MAX];
+        snprintf(remapped, sizeof(remapped), "/sdcard%s", r + slen);
+        if (strstr(p ? p : "", "usr") || strstr(p ? p : "", "termux") || strstr(p ? p : "", "bin") || strstr(p ? p : "", "staging")) {
+            tl_log_line("b_realpath: p='%s' -> r='%s' remapped='%s'", p ? p : "(null)", r, remapped);
+        }
+        if (out) {
+            strncpy(out, remapped, PATH_MAX - 1);
+            out[PATH_MAX - 1] = 0;
+            return out;
+        } else {
+            free(r);
+            return strdup(remapped);
+        }
+    }
+
+    if (strstr(p ? p : "", "usr") || strstr(p ? p : "", "termux") || strstr(p ? p : "", "bin") || strstr(p ? p : "", "staging")) {
+        tl_log_line("b_realpath: p='%s' -> r='%s' (no remap)", p ? p : "(null)", r);
     }
     return r;
 }

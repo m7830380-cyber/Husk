@@ -38,7 +38,8 @@ public class ApplicationInfo extends PackageItemInfo implements android.os.Parce
             husk.Manifest.read();
             ApplicationInfo a = new ApplicationInfo();
             a.packageName = a.processName = husk.Native.packageName();
-            a.dataDir = a.deviceProtectedDataDir = husk.Native.dataDir();
+            try { new java.io.File(husk.Native.dataDir()).mkdirs(); } catch (Throwable ignored) {}
+            a.dataDir = a.deviceProtectedDataDir = "/data/data/" + a.packageName;
             a.sourceDir = a.publicSourceDir = husk.Native.apkPath();
             // the splits, as Android lists them: SoLoader and Play's libraries look for native code and assets in them
             String[] sp = husk.Native.splitPaths();

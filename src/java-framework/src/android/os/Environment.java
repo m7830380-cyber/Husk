@@ -8,13 +8,25 @@ public class Environment {
     public static String DIRECTORY_ALARMS = "Alarms", DIRECTORY_AUDIOBOOKS = "Audiobooks", DIRECTORY_DCIM = "DCIM", DIRECTORY_MOVIES = "Movies",
         DIRECTORY_NOTIFICATIONS = "Notifications", DIRECTORY_PODCASTS = "Podcasts", DIRECTORY_RECORDINGS = "Recordings", DIRECTORY_RINGTONES = "Ringtones",
         DIRECTORY_SCREENSHOTS = "Screenshots";
-    public static File getExternalStorageDirectory() { return new File(husk.Native.externalDir()); }
-    public static File getExternalStoragePublicDirectory(String type) { return new File(husk.Native.externalDir(), type); }
+    public static File getExternalStorageDirectory() {
+        try { new File(husk.Native.externalDir()).mkdirs(); } catch (Throwable ignored) {}
+        return new File("/sdcard");
+    }
+    public static File getExternalStoragePublicDirectory(String type) {
+        try { new File(husk.Native.externalDir(), type).mkdirs(); } catch (Throwable ignored) {}
+        return new File("/sdcard", type);
+    }
     public static String getExternalStorageState() { return MEDIA_MOUNTED; }
     public static String getExternalStorageState(File f) { return MEDIA_MOUNTED; }
-    public static File getDataDirectory() { return new File(husk.Native.dataDir()); }
+    public static File getDataDirectory() {
+        try { new File(husk.Native.dataDir()).mkdirs(); } catch (Throwable ignored) {}
+        return new File("/data");
+    }
     public static File getRootDirectory() { return new File("/system"); }
-    public static File getDownloadCacheDirectory() { return new File(husk.Native.dataDir(), "cache"); }
+    public static File getDownloadCacheDirectory() {
+        try { new File(husk.Native.dataDir(), "cache").mkdirs(); } catch (Throwable ignored) {}
+        return new File("/cache");
+    }
     public static boolean isExternalStorageEmulated() { return true; }
     public static boolean isExternalStorageRemovable() { return false; }
     public static boolean isExternalStorageManager() { return true; }
