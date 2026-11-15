@@ -297,9 +297,11 @@ static void w_glBindBufferBase(unsigned target, unsigned index, unsigned buffer)
 {
     es31_note_storage("glBindBufferBase", target);
     if (target == 0x8A11 /* GL_UNIFORM_BUFFER */) {
-        static atomic_int count;
-        if (atomic_fetch_add(&count, 1) < 40)
-            tl_log_line("gl: glBindBufferBase(UNIFORM_BUFFER, idx %u, buf %u)", index, buffer);
+        static atomic_int count_z, count_nz;
+        if (buffer == 0 && atomic_fetch_add(&count_z, 1) < 10)
+            tl_log_line("gl: glBindBufferBase(UNIFORM_BUFFER, idx %u, buf 0)", index);
+        else if (buffer != 0 && atomic_fetch_add(&count_nz, 1) < 100)
+            tl_log_line("gl: glBindBufferBase(UNIFORM_BUFFER, idx %u, buf %u NONZERO)", index, buffer);
     }
     if (g_es31_shim && target == 0x90D2 /* GL_SHADER_STORAGE_BUFFER */) {
         static void (*getparam)(unsigned, unsigned, int *), (*bindbuf)(unsigned, unsigned), (*bufdata)(unsigned, long, const void *, unsigned),
@@ -330,26 +332,30 @@ static void w_glBindBufferBase(unsigned target, unsigned index, unsigned buffer)
         }
         target = 0x8A11; /* GL_UNIFORM_BUFFER */
     }
-    r_glBindBufferBase(target, index, buffer);
+    if (!r_glBindBufferBase) r_glBindBufferBase = gl_proc("glBindBufferBase");
+    if (r_glBindBufferBase) r_glBindBufferBase(target, index, buffer);
 }
 
 /* The other calls that name the storage target: it is the uniform one here. */
 #define ES31_STORAGE(t) ((t) == 0x90D2 ? 0x8A11u : (t))
 static void (*r_glBindBuffer)(unsigned, unsigned);
-static void w_glBindBuffer(unsigned t, unsigned b) { es31_note_storage("glBindBuffer", t); r_glBindBuffer(g_es31_shim ? ES31_STORAGE(t) : t, b); }
+static void w_glBindBuffer(unsigned t, unsigned b) { es31_note_storage("glBindBuffer", t); if (!r_glBindBuffer) r_glBindBuffer = gl_proc("glBindBuffer"); if (r_glBindBuffer) r_glBindBuffer(g_es31_shim ? ES31_STORAGE(t) : t, b); }
 static void (*r_glBufferData)(unsigned, long, const void *, unsigned);
-static void w_glBufferData(unsigned t, long n, const void *d, unsigned u) { es31_note_storage("glBufferData", t); r_glBufferData(g_es31_shim ? ES31_STORAGE(t) : t, n, d, u); }
+static void w_glBufferData(unsigned t, long n, const void *d, unsigned u) { es31_note_storage("glBufferData", t); if (!r_glBufferData) r_glBufferData = gl_proc("glBufferData"); if (r_glBufferData) r_glBufferData(g_es31_shim ? ES31_STORAGE(t) : t, n, d, u); }
 static void (*r_glBufferSubData)(unsigned, long, long, const void *);
-static void w_glBufferSubData(unsigned t, long o, long n, const void *d) { es31_note_storage("glBufferSubData", t); r_glBufferSubData(g_es31_shim ? ES31_STORAGE(t) : t, o, n, d); }
+static void w_glBufferSubData(unsigned t, long o, long n, const void *d) { es31_note_storage("glBufferSubData", t); if (!r_glBufferSubData) r_glBufferSubData = gl_proc("glBufferSubData"); if (r_glBufferSubData) r_glBufferSubData(g_es31_shim ? ES31_STORAGE(t) : t, o, n, d); }
 static void (*r_glBindBufferRange)(unsigned, unsigned, unsigned, long, long);
 static void w_glBindBufferRange(unsigned t, unsigned i, unsigned b, long o, long n)
 {
     es31_note_storage("glBindBufferRange", t);
-    static atomic_int count;
-    if (atomic_fetch_add(&count, 1) < 40)
-        tl_log_line("gl: glBindBufferRange(target %#x, idx %u, buf %u, off %ld, sz %ld)", t, i, b, o, n);
+    static atomic_int count_z, count_nz;
+    if (b == 0 && atomic_fetch_add(&count_z, 1) < 10)
+        tl_log_line("gl: glBindBufferRange(target %#x, idx %u, buf 0, off %ld, sz %ld)", t, i, o, n);
+    else if (b != 0 && atomic_fetch_add(&count_nz, 1) < 100)
+        tl_log_line("gl: glBindBufferRange(target %#x, idx %u, buf %u NONZERO, off %ld, sz %ld)", t, i, b, o, n);
     if (g_es31_shim && t == 0x90D2) { w_glBindBufferBase(t, i, b); return; }   /* grows the buffer if need be; the whole buffer is bound */
-    r_glBindBufferRange(t, i, b, o, n);
+    if (!r_glBindBufferRange) r_glBindBufferRange = gl_proc("glBindBufferRange");
+    if (r_glBindBufferRange) r_glBindBufferRange(t, i, b, o, n);
 }
 
 /*

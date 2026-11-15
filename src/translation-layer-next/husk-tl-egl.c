@@ -91,6 +91,7 @@ static unsigned gl_proc_get_error(void)
     return fn ? fn() : 0;
 }
 
+static void adapt_init(void);
 #define LOAD(lib, name) do { a_##name = dlsym(lib, #name); if (!a_##name) tl_log_line("egl: ANGLE does not export " #name); } while (0)
 
 bool tl_egl_init(const char *egl_path, const char *gles_path, const char *frame_dir, int frame_every)
@@ -119,8 +120,11 @@ bool tl_egl_init(const char *egl_path, const char *gles_path, const char *frame_
     a_glPixelStorei = a_eglGetProcAddress("glPixelStorei");
     if (frame_dir) { snprintf(E.frame_dir, sizeof(E.frame_dir), "%s", frame_dir); E.latest_only = frame_every < 0; E.frame_every = frame_every != 0 ? (frame_every < 0 ? -frame_every : frame_every) : 60; }
     E.ready = true;
+    adapt_init();
     pthread_mutex_unlock(&E.lock);
-    tl_log_line("egl: ANGLE loaded%s%s", frame_dir ? ", off-screen, frames to " : "", frame_dir ? frame_dir : "");
+    tl_log_line("egl: ANGLE loaded%s%s (core UBO: range=%p, base=%p, blockbind=%p)",
+                frame_dir ? ", off-screen, frames to " : "", frame_dir ? frame_dir : "",
+                gl_proc("glBindBufferRange"), gl_proc("glBindBufferBase"), gl_proc("glUniformBlockBinding"));
     return true;
 }
 
@@ -598,18 +602,36 @@ static void w_glCompressedTexSubImage2D(unsigned target, int level, int xoffset,
 static void (*r_glProgramBinary)(unsigned, unsigned, const void *, int);
 static void w_glProgramBinary(unsigned program, unsigned binaryFormat, const void *binary, int length)
 {
-    r_glProgramBinary(program, binaryFormat, binary, length);
+    if (!r_glProgramBinary) r_glProgramBinary = gl_proc("glProgramBinary");
+    if (r_glProgramBinary) r_glProgramBinary(program, binaryFormat, binary, length);
     static atomic_int count;
-    if (atomic_fetch_add(&count, 1) < 30) {
-        unsigned err = gl_proc_get_error();
+    int c = atomic_fetch_add(&count, 1);
+    unsigned err = gl_proc_get_error();
+    if (c < 50) {
         tl_log_line("gl: glProgramBinary(prog %u, binFmt %#x, len %d) -> err %#x", program, binaryFormat, length, err);
+        int numBlocks = 0, numUniforms = 0;
+        void (*get_prog_iv)(unsigned, unsigned, int *) = gl_proc("glGetProgramiv");
+        void (*get_block_name)(unsigned, unsigned, int, int *, char *) = gl_proc("glGetActiveUniformBlockName");
+        void (*get_block_iv)(unsigned, unsigned, unsigned, int *) = gl_proc("glGetActiveUniformBlockiv");
+        if (get_prog_iv && get_block_name && get_block_iv) {
+            get_prog_iv(program, 0x8A3A /* GL_ACTIVE_UNIFORM_BLOCKS */, &numBlocks);
+            get_prog_iv(program, 0x8B86 /* GL_ACTIVE_UNIFORMS */, &numUniforms);
+            for (int b = 0; b < numBlocks && b < 6; b++) {
+                char bname[64] = ""; int blen = 0, bsize = 0, bbind = 0;
+                get_block_name(program, b, sizeof(bname) - 1, &blen, bname);
+                get_block_iv(program, b, 0x8A3C /* GL_UNIFORM_BLOCK_DATA_SIZE */, &bsize);
+                get_block_iv(program, b, 0x8A3F /* GL_UNIFORM_BLOCK_BINDING */, &bbind);
+                tl_log_line("gl:   prog %u block %d '%s': sz %d, bind %d", program, b, bname, bsize, bbind);
+            }
+        }
     }
 }
 
 static void (*r_glShaderBinary)(int, const unsigned *, unsigned, const void *, int);
 static void w_glShaderBinary(int count, const unsigned *shaders, unsigned binaryFormat, const void *binary, int length)
 {
-    r_glShaderBinary(count, shaders, binaryFormat, binary, length);
+    if (!r_glShaderBinary) r_glShaderBinary = gl_proc("glShaderBinary");
+    if (r_glShaderBinary) r_glShaderBinary(count, shaders, binaryFormat, binary, length);
     static atomic_int count_sb;
     if (atomic_fetch_add(&count_sb, 1) < 30) {
         unsigned err = gl_proc_get_error();
@@ -620,6 +642,7 @@ static void w_glShaderBinary(int count, const unsigned *shaders, unsigned binary
 static unsigned (*r_glCreateShaderProgramv)(unsigned, int, const char *const *);
 static unsigned w_glCreateShaderProgramv(unsigned type, int count, const char *const *strings)
 {
+    if (!r_glCreateShaderProgramv) r_glCreateShaderProgramv = gl_proc("glCreateShaderProgramv");
     unsigned p = r_glCreateShaderProgramv ? r_glCreateShaderProgramv(type, count, strings) : 0;
     static atomic_int count_sp;
     int c = atomic_fetch_add(&count_sp, 1);
@@ -635,6 +658,7 @@ static unsigned w_glCreateShaderProgramv(unsigned type, int count, const char *c
 static unsigned (*r_glCreateProgram)(void);
 static unsigned w_glCreateProgram(void)
 {
+    if (!r_glCreateProgram) r_glCreateProgram = gl_proc("glCreateProgram");
     unsigned p = r_glCreateProgram ? r_glCreateProgram() : 0;
     static atomic_int count;
     if (atomic_fetch_add(&count, 1) < 30) tl_log_line("gl: glCreateProgram -> %u", p);
@@ -644,6 +668,7 @@ static unsigned w_glCreateProgram(void)
 static unsigned (*r_glCreateShader)(unsigned);
 static unsigned w_glCreateShader(unsigned type)
 {
+    if (!r_glCreateShader) r_glCreateShader = gl_proc("glCreateShader");
     unsigned s = r_glCreateShader ? r_glCreateShader(type) : 0;
     static atomic_int count;
     if (atomic_fetch_add(&count, 1) < 30) tl_log_line("gl: glCreateShader(type %#x) -> %u", type, s);
@@ -654,9 +679,47 @@ static void (*r_glUniformBlockBinding)(unsigned, unsigned, unsigned);
 static void w_glUniformBlockBinding(unsigned prog, unsigned blockIndex, unsigned binding)
 {
     static atomic_int count;
-    if (atomic_fetch_add(&count, 1) < 40)
+    if (atomic_fetch_add(&count, 1) < 100)
         tl_log_line("gl: glUniformBlockBinding(prog %u, block %u, binding %u)", prog, blockIndex, binding);
-    r_glUniformBlockBinding(prog, blockIndex, binding);
+    if (!r_glUniformBlockBinding) r_glUniformBlockBinding = gl_proc("glUniformBlockBinding");
+    if (r_glUniformBlockBinding) r_glUniformBlockBinding(prog, blockIndex, binding);
+}
+
+static void (*r_glDrawElements)(unsigned, int, unsigned, const void *);
+static void w_glDrawElements(unsigned mode, int count, unsigned type, const void *indices)
+{
+    static atomic_int draw_count;
+    int c = atomic_fetch_add(&draw_count, 1);
+    if (c < 30 || (c % 600 == 0)) {
+        int curProg = 0;
+        a_glGetIntegerv(0x8B8D /* GL_CURRENT_PROGRAM */, &curProg);
+        int ubo0 = 0, ubo1 = 0;
+        void (*get_int_i)(unsigned, unsigned, int *) = gl_proc("glGetIntegeri_v");
+        if (get_int_i) {
+            get_int_i(0x8A28 /* GL_UNIFORM_BUFFER_BINDING */, 0, &ubo0);
+            get_int_i(0x8A28 /* GL_UNIFORM_BUFFER_BINDING */, 1, &ubo1);
+        }
+        int vao = 0;
+        a_glGetIntegerv(0x85B5 /* GL_VERTEX_ARRAY_BINDING */, &vao);
+        tl_log_line("gl: glDrawElements #%d prog %d, vao %d, ubo0 %d, ubo1 %d, cnt %d",
+                    c, curProg, vao, ubo0, ubo1, count);
+    }
+    if (!r_glDrawElements) r_glDrawElements = gl_proc("glDrawElements");
+    if (r_glDrawElements) r_glDrawElements(mode, count, type, indices);
+}
+
+static void (*r_glDrawArrays)(unsigned, int, int);
+static void w_glDrawArrays(unsigned mode, int first, int count)
+{
+    static atomic_int draw_count;
+    int c = atomic_fetch_add(&draw_count, 1);
+    if (c < 30 || (c % 600 == 0)) {
+        int curProg = 0;
+        a_glGetIntegerv(0x8B8D /* GL_CURRENT_PROGRAM */, &curProg);
+        tl_log_line("gl: glDrawArrays #%d prog %d, first %d, cnt %d", c, curProg, first, count);
+    }
+    if (!r_glDrawArrays) r_glDrawArrays = gl_proc("glDrawArrays");
+    if (r_glDrawArrays) r_glDrawArrays(mode, first, count);
 }
 
 
@@ -801,9 +864,18 @@ static const struct { const char *name; void *wrap; void **real; } k_adapt[] = {
     ADAPT(glSampleCoverage), ADAPT(glTexImage2D), ADAPT(glTexStorage2D), ADAPT(glTexSubImage2D), ADAPT(glCompressedTexImage2D), ADAPT(glCompressedTexSubImage2D), ADAPT(glUniformBlockBinding),
     ADAPT(glGetString), ADAPT(glGetStringi), ADAPT(glCompileShader), ADAPT(glShaderSource), ADAPT(glAttachShader), ADAPT(glLinkProgram), ADAPT(glGetIntegerv), ADAPT(glBindBufferBase), ADAPT(glBindBuffer), ADAPT(glBufferData), ADAPT(glBufferSubData), ADAPT(glBindBufferRange),
     ADAPT(glProgramBinary), ADAPT(glShaderBinary), ADAPT(glCreateShaderProgramv), ADAPT(glCreateProgram), ADAPT(glCreateShader),
+    ADAPT(glDrawElements), ADAPT(glDrawArrays),
     ADAPT(glGetProgramInterfaceiv), ADAPT(glGetProgramResourceIndex), ADAPT(glGetProgramResourceName), ADAPT(glGetProgramResourceiv), ADAPT(glGetIntegeri_v),
     ADAPT(eglClientWaitSyncKHR), ADAPT(eglDestroySyncKHR), ADAPT(eglGetSyncAttribKHR), ADAPT(eglClientWaitSync), ADAPT(eglDestroySync),
 };
+
+static void adapt_init(void)
+{
+    for (size_t i = 0; i < sizeof(k_adapt) / sizeof(k_adapt[0]); i++) {
+        void *p = gl_proc(k_adapt[i].name);
+        if (p) *k_adapt[i].real = p;
+    }
+}
 
 /* Labels are never kept (setting one is a no-op above), so every label read back is empty. ANGLE's own getter raises an error for
  * an object type its context does not have (a 3.1 one, under the shim) and then writes nothing, not even the length, which a game
@@ -953,7 +1025,7 @@ void *tl_egl_resolve(const char *name)
 {
     void *r = egl_resolve(name);
     if (name) {
-        static char seen[128][48];
+        static char seen[512][48];
         static int nseen;
         static pthread_mutex_t smu = PTHREAD_MUTEX_INITIALIZER;
         pthread_mutex_lock(&smu);
@@ -961,7 +1033,7 @@ void *tl_egl_resolve(const char *name)
         for (int i = 0; i < nseen; i++) {
             if (!strcmp(seen[i], name)) { found = true; break; }
         }
-        if (!found && nseen < 128) {
+        if (!found && nseen < 512) {
             strncpy(seen[nseen++], name, 47);
             tl_log_line("gl: resolve %s -> %p", name, r);
         }
@@ -973,21 +1045,14 @@ static void *egl_resolve(const char *name)
 {
     for (int i = 0; k_noop_names[i]; i++) if (!strcmp(k_noop_names[i], name)) return (void *)w_gl_noop;
     if (g_es31_shim) for (int i = 0; k_es31_stub_names[i]; i++) if (!strcmp(k_es31_stub_names[i], name)) {
-        void *real = E.ready && a_eglGetProcAddress ? a_eglGetProcAddress(name) : NULL;
+        void *real = gl_proc(name);
         if (real) break;
         static int said; if (!said++) tl_log_line("gl: stubbing ES 3.1 entry points ANGLE lacks (first: %s)", name);
         return (void *)w_gl_noop;
     }
     for (size_t i = 0; i < sizeof(k_egl) / sizeof(k_egl[0]); i++) if (!strcmp(k_egl[i].name, name)) return k_egl[i].fn;
-    if (!E.ready || !a_eglGetProcAddress) return NULL;
-    void *real = a_eglGetProcAddress(name);
-    if (!real && E.gles) {
-        /* dlsym on the handle also searches what ANGLE links against, and on a Mac that is the system's desktop OpenGL:
-         * glPolygonMode and its kin would resolve there, and a GLES guest that calls one must not reach them. */
-        real = dlsym(E.gles, name);
-        Dl_info di;
-        if (real && dladdr(real, &di) && di.dli_fname && strcmp(di.dli_fname, E.gles_path) != 0 && strcmp(di.dli_fname, E.egl_path) != 0) real = NULL;
-    }
+    if (!E.ready) return NULL;
+    void *real = gl_proc(name);
     if (!real) return NULL;
     static int trace = -1;
     if (trace < 0) trace = getenv("TL_GL_TRACE") ? 1 : 0;
