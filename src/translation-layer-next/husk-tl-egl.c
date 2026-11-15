@@ -502,6 +502,18 @@ static void (*r_glUniformMatrix3fv)(int, int, unsigned, const float *);
 static void w_glUniformMatrix3fv(int l, int c, unsigned t, const float *v) { r_glUniformMatrix3fv(l, c, t & 0xff, v); }
 static void (*r_glUniformMatrix4fv)(int, int, unsigned, const float *);
 static void w_glUniformMatrix4fv(int l, int c, unsigned t, const float *v) { r_glUniformMatrix4fv(l, c, t & 0xff, v); }
+static void (*r_glUniformMatrix2x3fv)(int, int, unsigned, const float *);
+static void w_glUniformMatrix2x3fv(int l, int c, unsigned t, const float *v) { r_glUniformMatrix2x3fv(l, c, t & 0xff, v); }
+static void (*r_glUniformMatrix3x2fv)(int, int, unsigned, const float *);
+static void w_glUniformMatrix3x2fv(int l, int c, unsigned t, const float *v) { r_glUniformMatrix3x2fv(l, c, t & 0xff, v); }
+static void (*r_glUniformMatrix2x4fv)(int, int, unsigned, const float *);
+static void w_glUniformMatrix2x4fv(int l, int c, unsigned t, const float *v) { r_glUniformMatrix2x4fv(l, c, t & 0xff, v); }
+static void (*r_glUniformMatrix4x2fv)(int, int, unsigned, const float *);
+static void w_glUniformMatrix4x2fv(int l, int c, unsigned t, const float *v) { r_glUniformMatrix4x2fv(l, c, t & 0xff, v); }
+static void (*r_glUniformMatrix3x4fv)(int, int, unsigned, const float *);
+static void w_glUniformMatrix3x4fv(int l, int c, unsigned t, const float *v) { r_glUniformMatrix3x4fv(l, c, t & 0xff, v); }
+static void (*r_glUniformMatrix4x3fv)(int, int, unsigned, const float *);
+static void w_glUniformMatrix4x3fv(int l, int c, unsigned t, const float *v) { r_glUniformMatrix4x3fv(l, c, t & 0xff, v); }
 static void (*r_glSampleCoverage)(float, unsigned);
 static void w_glSampleCoverage(float v, unsigned i) { r_glSampleCoverage(v, i & 0xff); }
 
@@ -629,7 +641,10 @@ static EGLBoolean w_eglDestroySync(EGLDisplay d, void *s) { return s ? r_eglDest
 static const struct { const char *name; void *wrap; void **real; } k_adapt[] = {
     ADAPT(glBlitFramebuffer), ADAPT(glTexSubImage3D), ADAPT(glCompressedTexSubImage3D), ADAPT(glCopyImageSubData),
     ADAPT(glColorMask), ADAPT(glDepthMask), ADAPT(glVertexAttribPointer), ADAPT(glUniformMatrix2fv),
-    ADAPT(glUniformMatrix3fv), ADAPT(glUniformMatrix4fv), ADAPT(glSampleCoverage), ADAPT(glGetString), ADAPT(glGetStringi), ADAPT(glCompileShader), ADAPT(glShaderSource), ADAPT(glAttachShader), ADAPT(glLinkProgram), ADAPT(glGetIntegerv), ADAPT(glBindBufferBase), ADAPT(glBindBuffer), ADAPT(glBufferData), ADAPT(glBufferSubData), ADAPT(glBindBufferRange),
+    ADAPT(glUniformMatrix3fv), ADAPT(glUniformMatrix4fv),
+    ADAPT(glUniformMatrix2x3fv), ADAPT(glUniformMatrix3x2fv), ADAPT(glUniformMatrix2x4fv), ADAPT(glUniformMatrix4x2fv),
+    ADAPT(glUniformMatrix3x4fv), ADAPT(glUniformMatrix4x3fv),
+    ADAPT(glSampleCoverage), ADAPT(glGetString), ADAPT(glGetStringi), ADAPT(glCompileShader), ADAPT(glShaderSource), ADAPT(glAttachShader), ADAPT(glLinkProgram), ADAPT(glGetIntegerv), ADAPT(glBindBufferBase), ADAPT(glBindBuffer), ADAPT(glBufferData), ADAPT(glBufferSubData), ADAPT(glBindBufferRange),
     ADAPT(glGetProgramInterfaceiv), ADAPT(glGetProgramResourceIndex), ADAPT(glGetProgramResourceName), ADAPT(glGetProgramResourceiv), ADAPT(glGetIntegeri_v),
     ADAPT(eglClientWaitSyncKHR), ADAPT(eglDestroySyncKHR), ADAPT(eglGetSyncAttribKHR), ADAPT(eglClientWaitSync), ADAPT(eglDestroySync),
 };

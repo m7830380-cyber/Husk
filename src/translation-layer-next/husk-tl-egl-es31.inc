@@ -195,17 +195,31 @@ static void (*r_glLinkProgram)(unsigned);
 static void w_glLinkProgram(unsigned prog)
 {
     r_glLinkProgram(prog);
-    if (!g_es31_shim || !a_eglGetProcAddress) return;
+    if (!a_eglGetProcAddress) return;
+    static void (*getprogiv)(unsigned, unsigned, int *), (*getproglog)(unsigned, int, int *, char *);
+    if (!getprogiv) {
+        getprogiv = a_eglGetProcAddress("glGetProgramiv");
+        getproglog = a_eglGetProcAddress("glGetProgramInfoLog");
+    }
+    int ok = 1;
+    if (getprogiv) getprogiv(prog, 0x8B82 /* GL_LINK_STATUS */, &ok);
+    if (!ok) {
+        int len = 0; if (getprogiv) getprogiv(prog, 0x8B84 /* GL_INFO_LOG_LENGTH */, &len);
+        char plog[400] = ""; int got = 0;
+        if (getproglog && len > 0) getproglog(prog, sizeof(plog) - 1, &got, plog);
+        for (char *q = plog; *q; q++) if (*q == '\n') *q = '|';
+        tl_log_line("gl: program %u failed to link: %.380s", prog, plog);
+        return;
+    }
+    if (!g_es31_shim) return;
     static int (*getloc)(unsigned, const char *); static unsigned (*getblk)(unsigned, const char *);
-    static void (*blkbind)(unsigned, unsigned, unsigned), (*uni1i)(int, int), (*useprog)(unsigned), (*getprogiv)(unsigned, unsigned, int *);
+    static void (*blkbind)(unsigned, unsigned, unsigned), (*uni1i)(int, int), (*useprog)(unsigned);
     if (!getloc) {
         getloc = a_eglGetProcAddress("glGetUniformLocation"); getblk = a_eglGetProcAddress("glGetUniformBlockIndex");
         blkbind = a_eglGetProcAddress("glUniformBlockBinding"); uni1i = a_eglGetProcAddress("glUniform1i");
-        useprog = a_eglGetProcAddress("glUseProgram"); getprogiv = a_eglGetProcAddress("glGetProgramiv");
+        useprog = a_eglGetProcAddress("glUseProgram");
     }
-    if (!getloc || !getblk || !blkbind || !uni1i || !useprog || !getprogiv) return;
-    int ok = 0; getprogiv(prog, 0x8B82 /* GL_LINK_STATUS */, &ok);
-    if (!ok) return;
+    if (!getloc || !getblk || !blkbind || !uni1i || !useprog) return;
     int cur = 0; a_glGetIntegerv(0x8B8D /* GL_CURRENT_PROGRAM */, &cur);
     bool used = false;
     pthread_mutex_lock(&g_es31_mu);
@@ -333,7 +347,8 @@ static bool es31_q(void)
 static void (*r_glGetProgramInterfaceiv)(unsigned, unsigned, unsigned, int *);
 static void w_glGetProgramInterfaceiv(unsigned prog, unsigned iface, unsigned pname, int *params)
 {
-    if (!g_es31_shim) { r_glGetProgramInterfaceiv(prog, iface, pname, params); return; }
+    static atomic_int said;
+    if (atomic_fetch_add(&said, 1) < 8) tl_log_line("gl: glGetProgramInterfaceiv(prog %u, iface %#x, pname %#x)", prog, iface, pname);
     if (!params) return;
     *params = 0;
     if (!es31_q()) return;
@@ -356,7 +371,6 @@ static void w_glGetProgramInterfaceiv(unsigned prog, unsigned iface, unsigned pn
 static unsigned (*r_glGetProgramResourceIndex)(unsigned, unsigned, const char *);
 static unsigned w_glGetProgramResourceIndex(unsigned prog, unsigned iface, const char *name)
 {
-    if (!g_es31_shim) return r_glGetProgramResourceIndex(prog, iface, name);
     if (!name || !es31_q()) return 0xFFFFFFFFu;
     if (iface == ES31_UNIFORM) { unsigned i = 0xFFFFFFFFu; Q.uniform_indices(prog, 1, &name, &i); return i; }
     if (iface == ES31_UNIFORM_BLOCK) return Q.block_index(prog, name);
@@ -374,7 +388,6 @@ static unsigned w_glGetProgramResourceIndex(unsigned prog, unsigned iface, const
 static void (*r_glGetProgramResourceName)(unsigned, unsigned, unsigned, int, int *, char *);
 static void w_glGetProgramResourceName(unsigned prog, unsigned iface, unsigned index, int bufsize, int *length, char *name)
 {
-    if (!g_es31_shim) { r_glGetProgramResourceName(prog, iface, index, bufsize, length, name); return; }
     if (length) *length = 0;
     if (name && bufsize > 0) name[0] = 0;
     if (!es31_q()) return;
@@ -388,7 +401,8 @@ static void (*r_glGetProgramResourceiv)(unsigned, unsigned, unsigned, int, const
 static void w_glGetProgramResourceiv(unsigned prog, unsigned iface, unsigned index, int nprops, const unsigned *props, int bufsize,
                                      int *length, int *params)
 {
-    if (!g_es31_shim) { r_glGetProgramResourceiv(prog, iface, index, nprops, props, bufsize, length, params); return; }
+    static atomic_int said;
+    if (atomic_fetch_add(&said, 1) < 8) tl_log_line("gl: glGetProgramResourceiv(prog %u, iface %#x, index %u, nprops %d)", prog, iface, index, nprops);
     int k = 0;
     bool q = es31_q();
     char nm[256]; nm[0] = 0;
@@ -431,4 +445,4 @@ static void w_glGetProgramResourceiv(unsigned prog, unsigned iface, unsigned ind
 }
 /* 3.1's indexed limits (compute work-group counts and sizes) are errors on the 3.0 context, which writes nothing: they read as zero. */
 static void (*r_glGetIntegeri_v)(unsigned, unsigned, int *);
-static void w_glGetIntegeri_v(unsigned p, unsigned i, int *d) { if (g_es31_shim && d) *d = 0; r_glGetIntegeri_v(p, i, d); }
+static void w_glGetIntegeri_v(unsigned p, unsigned i, int *d) { if (d) *d = 0; r_glGetIntegeri_v(p, i, d); }
