@@ -1457,6 +1457,7 @@ static const tl_jhle k_hle[] = {
 
 void tl_hle_configure(const char *pkg, const char *apk, const char *data, int w, int h)
 {
+    tl_set_package_name(pkg);
     snprintf(H.pkg, sizeof(H.pkg), "%s", pkg);
     snprintf(H.apk, sizeof(H.apk), "%s", apk);
     snprintf(H.data, sizeof(H.data), "%s", data);

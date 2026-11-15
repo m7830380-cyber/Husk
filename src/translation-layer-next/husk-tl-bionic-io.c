@@ -84,6 +84,13 @@ void tl_set_data_dir(const char *dir)
 }
 const char *tl_data_dir(void) { return g_data_dir[0] ? g_data_dir : "/tmp"; }
 
+static char g_tl_pkg[128] = "app";
+void tl_set_package_name(const char *pkg)
+{
+    if (pkg && pkg[0]) snprintf(g_tl_pkg, sizeof(g_tl_pkg), "%s", pkg);
+}
+const char *tl_package_name(void) { return g_tl_pkg[0] ? g_tl_pkg : "app"; }
+
 /* A file holding `content`, already unlinked. Where it can be made depends on the host: iOS gives an app no /tmp. */
 static int synth_file_n(const void *content, size_t n);
 static int synth_file(const char *content) { return synth_file_n(content, strlen(content)); }
@@ -249,6 +256,9 @@ const char *tl_path_resolve(const char *path, char *buf, size_t n)
             size_t l = strlen(roots[i]);
             if (strncmp(path, roots[i], l) || !path[l] || path[l] == '/') continue;
             const char *rest = strchr(path + l, '/');
+            if (rest && rest > path + l && (size_t)(rest - (path + l)) < sizeof(g_tl_pkg)) {
+                snprintf(g_tl_pkg, sizeof(g_tl_pkg), "%.*s", (int)(rest - (path + l)), path + l);
+            }
             snprintf(buf, n, "%s%s", tl_data_dir(), rest ? rest : "");
             return buf;
         }
@@ -263,11 +273,17 @@ const char *tl_path_resolve(const char *path, char *buf, size_t n)
     const char *pkg = "/data/data/";
     if (!strncmp(path, pkg, strlen(pkg))) {
         const char *rest = strchr(path + strlen(pkg), '/');
+        if (rest && rest > path + strlen(pkg) && (size_t)(rest - (path + strlen(pkg))) < sizeof(g_tl_pkg)) {
+            snprintf(g_tl_pkg, sizeof(g_tl_pkg), "%.*s", (int)(rest - (path + strlen(pkg))), path + strlen(pkg));
+        }
         snprintf(buf, n, "%s%s", tl_data_dir(), rest ? rest : "");
         return buf;
     }
     if (!strncmp(path, "/data/user/0/", 13)) {
         const char *rest = strchr(path + 13, '/');
+        if (rest && rest > path + 13 && (size_t)(rest - (path + 13)) < sizeof(g_tl_pkg)) {
+            snprintf(g_tl_pkg, sizeof(g_tl_pkg), "%.*s", (int)(rest - (path + 13)), path + 13);
+        }
         snprintf(buf, n, "%s%s", tl_data_dir(), rest ? rest : "");
         return buf;
     }
@@ -742,7 +758,25 @@ static int b_flock(int fd, int op) { TL_ERRNO_BEGIN(); int r = flock(fd, op); TL
     static rt b_##name(const char *p) { char b[1024]; TL_ERRNO_BEGIN(); rt r = call(tl_path_resolve(p, b, sizeof(b))); TL_ERRNO_END(); return r; }
 PATH1(int, unlink, unlink)
 PATH1(int, rmdir, rmdir)
-static int b_mkdir(const char *p, unsigned mode) { char b[1024]; TL_ERRNO_BEGIN(); int r = mkdir(tl_path_resolve(p, b, sizeof(b)), (mode_t)mode); TL_ERRNO_END(); return r; }
+static int b_mkdir(const char *p, unsigned mode)
+{
+    char b[1024];
+    TL_ERRNO_BEGIN();
+    const char *res = tl_path_resolve(p, b, sizeof(b));
+    char clean[1024];
+    if (res) {
+        size_t l = strlen(res);
+        while (l > 1 && res[l - 1] == '/') l--;
+        if (l < sizeof(clean)) {
+            memcpy(clean, res, l);
+            clean[l] = 0;
+            res = clean;
+        }
+    }
+    int r = mkdir(res, (mode_t)mode);
+    TL_ERRNO_END();
+    return r;
+}
 /* FIFOs (Realm signals between its threads through one in its .realm.temp folder); other device nodes are refused, as for an app */
 static int b_mkfifo(const char *p, unsigned mode) { char b[1024]; TL_ERRNO_BEGIN(); int r = mkfifo(tl_path_resolve(p, b, sizeof(b)), (mode_t)(mode & 0777)); TL_ERRNO_END(); return r; }
 static int b_mknod(const char *p, unsigned mode, unsigned long dev)
@@ -784,7 +818,94 @@ static long b_readlink(const char *p, char *buf, size_t n)
     }
     char b[1024]; TL_ERRNO_BEGIN(); long r = readlink(tl_path_resolve(p, b, sizeof(b)), buf, n); TL_ERRNO_END(); return r;
 }
-static char *b_realpath(const char *p, char *out) { char b[1024]; TL_ERRNO_BEGIN(); char *r = realpath(tl_path_resolve(p, b, sizeof(b)), out); TL_ERRNO_END(); return r; }
+static char *b_realpath(const char *p, char *out)
+{
+    char b[1024];
+    TL_ERRNO_BEGIN();
+    const char *resolved = tl_path_resolve(p, b, sizeof(b));
+    char *r = realpath(resolved, out);
+    TL_ERRNO_END();
+    if (!r) return NULL;
+
+    /* If the input path was an Android guest path (/data/data, /data/user/0, /sdcard, etc.),
+     * the canonical path must remain in the Android guest namespace so that prefix and
+     * ZipSlip checks against guest paths (like Termux's TERMUX_STAGING_PREFIX_DIR_PATH) succeed. */
+    bool is_guest_path = false;
+    const char *guest_prefix = NULL;
+    char guest_pkg[128] = "";
+
+    if (p) {
+        if (!strncmp(p, "/data/data/", 11)) {
+            is_guest_path = true;
+            guest_prefix = "/data/data/";
+            const char *slash = strchr(p + 11, '/');
+            size_t plen = slash ? (size_t)(slash - (p + 11)) : strlen(p + 11);
+            if (plen < sizeof(guest_pkg)) { memcpy(guest_pkg, p + 11, plen); guest_pkg[plen] = 0; }
+        } else if (!strncmp(p, "/data/user/0/", 13)) {
+            is_guest_path = true;
+            guest_prefix = "/data/user/0/";
+            const char *slash = strchr(p + 13, '/');
+            size_t plen = slash ? (size_t)(slash - (p + 13)) : strlen(p + 13);
+            if (plen < sizeof(guest_pkg)) { memcpy(guest_pkg, p + 13, plen); guest_pkg[plen] = 0; }
+        } else if (!strncmp(p, "/data/local/tmp", 15) && (p[15] == 0 || p[15] == '/')) {
+            is_guest_path = true;
+            guest_prefix = "/data/local/tmp";
+        } else if (!strncmp(p, "/sdcard", 7) && (p[7] == 0 || p[7] == '/')) {
+            is_guest_path = true;
+            guest_prefix = "/sdcard";
+        } else if (!strncmp(p, "/storage/emulated/0", 19) && (p[19] == 0 || p[19] == '/')) {
+            is_guest_path = true;
+            guest_prefix = "/storage/emulated/0";
+        }
+    }
+
+    if (is_guest_path) {
+        const char *data = tl_data_dir();
+        char canon_data[PATH_MAX];
+        if (!realpath(data, canon_data)) snprintf(canon_data, sizeof(canon_data), "%s", data);
+
+        size_t dlen = 0;
+        if (canon_data[0] && !strncmp(r, canon_data, strlen(canon_data)) && (r[strlen(canon_data)] == 0 || r[strlen(canon_data)] == '/'))
+            dlen = strlen(canon_data);
+        else if (data[0] && !strncmp(r, data, strlen(data)) && (r[strlen(data)] == 0 || r[strlen(data)] == '/'))
+            dlen = strlen(data);
+
+        if (dlen > 0) {
+            const char *rest = r + dlen;
+            char remapped[PATH_MAX];
+            if (!strncmp(rest, "/sdcard", 7) && (rest[7] == 0 || rest[7] == '/')) {
+                snprintf(remapped, sizeof(remapped), "/sdcard%s", rest + 7);
+            } else if (!strncmp(rest, "/cache/local-tmp", 16) && (rest[16] == 0 || rest[16] == '/')) {
+                snprintf(remapped, sizeof(remapped), "/data/local/tmp%s", rest + 16);
+            } else {
+                const char *pkg = guest_pkg[0] ? guest_pkg : tl_package_name();
+                snprintf(remapped, sizeof(remapped), "%s%s%s", guest_prefix ? guest_prefix : "/data/data/", pkg, rest);
+            }
+            if (out) {
+                strncpy(out, remapped, PATH_MAX - 1);
+                out[PATH_MAX - 1] = 0;
+                return out;
+            } else {
+                free(r);
+                return strdup(remapped);
+            }
+        } else if (g_shared_storage[0] && !strncmp(r, g_shared_storage, strlen(g_shared_storage)) &&
+                   (r[strlen(g_shared_storage)] == 0 || r[strlen(g_shared_storage)] == '/')) {
+            size_t slen = strlen(g_shared_storage);
+            char remapped[PATH_MAX];
+            snprintf(remapped, sizeof(remapped), "/sdcard%s", r + slen);
+            if (out) {
+                strncpy(out, remapped, PATH_MAX - 1);
+                out[PATH_MAX - 1] = 0;
+                return out;
+            } else {
+                free(r);
+                return strdup(remapped);
+            }
+        }
+    }
+    return r;
+}
 static char *b_getcwd(char *buf, size_t n) { TL_ERRNO_BEGIN(); char *r = getcwd(buf, n); TL_ERRNO_END(); return r; }
 static char *b___getcwd_chk(char *buf, size_t n, size_t bl) { (void)bl; return b_getcwd(buf, n); }
 static int b_utimes(const char *p, const struct timeval tv[2]) { char b[1024]; TL_ERRNO_BEGIN(); int r = utimes(tl_path_resolve(p, b, sizeof(b)), tv); TL_ERRNO_END(); return r; }
@@ -2144,6 +2265,16 @@ static int b_faccessat(int dirfd, const char *path, int mode, int flags)
 static int b_mkdirat(int dirfd, const char *path, unsigned mode)
 {
     if (at_plain(dirfd, path)) return b_mkdir(path, mode);
+    char clean[1024];
+    if (path) {
+        size_t l = strlen(path);
+        while (l > 1 && path[l - 1] == '/') l--;
+        if (l < sizeof(clean)) {
+            memcpy(clean, path, l);
+            clean[l] = 0;
+            path = clean;
+        }
+    }
     TL_ERRNO_BEGIN(); int r = mkdirat(dirfd, path, (mode_t)mode); TL_ERRNO_END();
     return r;
 }

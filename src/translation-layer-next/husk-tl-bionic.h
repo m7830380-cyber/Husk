@@ -91,6 +91,10 @@ int tl_signal_from_darwin(int darwin_sig);
 /* Android system properties, for __system_property_get and Java's Build. */
 const char *tl_sysprop(const char *name);
 
+/* Package name of the running guest application. */
+void tl_set_package_name(const char *pkg);
+const char *tl_package_name(void);
+
 /* The log. */
 void tl_log_line(const char *fmt, ...);
 

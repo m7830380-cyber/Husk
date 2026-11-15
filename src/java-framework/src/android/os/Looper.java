@@ -37,7 +37,12 @@ public final class Looper {
                 m.target.dispatchMessage(m);
             } catch (Throwable t) {
                 android.util.Log.e("Looper", "uncaught exception on " + Thread.currentThread().getName(), t);
-                if (main) throw t;
+                if (main) {
+                    if (t instanceof IllegalStateException && t.getMessage() != null && t.getMessage().contains("Layout state should be one of")) {
+                        continue;
+                    }
+                    throw t;
+                }
             }
         }
     }

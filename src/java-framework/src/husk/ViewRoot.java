@@ -263,31 +263,36 @@ public final class ViewRoot implements ViewParent {
         mLayoutRequested = false;
         mInLayout = true;
         try {
-            int ws, hs;
-            int lw = mLp.width, lh = mLp.height;
-            int maxW = sw, maxH = sh;
-            if (lw == ViewGroup.LayoutParams.MATCH_PARENT) ws = View.MeasureSpec.makeMeasureSpec(maxW, View.MeasureSpec.EXACTLY);
-            else if (lw == ViewGroup.LayoutParams.WRAP_CONTENT) ws = View.MeasureSpec.makeMeasureSpec(maxW, View.MeasureSpec.AT_MOST);
-            else ws = View.MeasureSpec.makeMeasureSpec(lw, View.MeasureSpec.EXACTLY);
-            if (lh == ViewGroup.LayoutParams.MATCH_PARENT) hs = View.MeasureSpec.makeMeasureSpec(maxH, View.MeasureSpec.EXACTLY);
-            else if (lh == ViewGroup.LayoutParams.WRAP_CONTENT) hs = View.MeasureSpec.makeMeasureSpec(maxH, View.MeasureSpec.AT_MOST);
-            else hs = View.MeasureSpec.makeMeasureSpec(lh, View.MeasureSpec.EXACTLY);
-            mView.measure(ws, hs);
-            int w = mView.getMeasuredWidth(), h = mView.getMeasuredHeight();
-            // where the window goes: gravity and offsets for windows that do not fill the screen (dialogs, popups, toasts)
-            int g = mLp.gravity;
-            Rect out = new Rect();
-            if (g == 0 && (lw != ViewGroup.LayoutParams.MATCH_PARENT || lh != ViewGroup.LayoutParams.MATCH_PARENT)) g = Gravity.TOP | Gravity.LEFT;
-            if (g == 0) out.set(0, 0, w, h);
-            else {
-                Rect area = new Rect(0, 0, sw, sh);
-                if (mLp.type >= 1000 || (mLp.flags & WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS) == 0 && mLp.type != WindowManager.LayoutParams.TYPE_BASE_APPLICATION)
-                    area.set(sInsets[0], sInsets[1], sw - sInsets[2], sh - Math.max(sInsets[3], sImeBottom));
-                Gravity.apply(g, w, h, area, mLp.x, mLp.y, out);
+            for (int loop = 0; loop < 3; loop++) {
+                int ws, hs;
+                int lw = mLp.width, lh = mLp.height;
+                int maxW = sw, maxH = sh;
+                if (lw == ViewGroup.LayoutParams.MATCH_PARENT) ws = View.MeasureSpec.makeMeasureSpec(maxW, View.MeasureSpec.EXACTLY);
+                else if (lw == ViewGroup.LayoutParams.WRAP_CONTENT) ws = View.MeasureSpec.makeMeasureSpec(maxW, View.MeasureSpec.AT_MOST);
+                else ws = View.MeasureSpec.makeMeasureSpec(lw, View.MeasureSpec.EXACTLY);
+                if (lh == ViewGroup.LayoutParams.MATCH_PARENT) hs = View.MeasureSpec.makeMeasureSpec(maxH, View.MeasureSpec.EXACTLY);
+                else if (lh == ViewGroup.LayoutParams.WRAP_CONTENT) hs = View.MeasureSpec.makeMeasureSpec(maxH, View.MeasureSpec.AT_MOST);
+                else hs = View.MeasureSpec.makeMeasureSpec(lh, View.MeasureSpec.EXACTLY);
+                mView.measure(ws, hs);
+                int w = mView.getMeasuredWidth(), h = mView.getMeasuredHeight();
+                // where the window goes: gravity and offsets for windows that do not fill the screen (dialogs, popups, toasts)
+                int g = mLp.gravity;
+                Rect out = new Rect();
+                if (g == 0 && (lw != ViewGroup.LayoutParams.MATCH_PARENT || lh != ViewGroup.LayoutParams.MATCH_PARENT)) g = Gravity.TOP | Gravity.LEFT;
+                if (g == 0) out.set(0, 0, w, h);
+                else {
+                    Rect area = new Rect(0, 0, sw, sh);
+                    if (mLp.type >= 1000 || (mLp.flags & WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS) == 0 && mLp.type != WindowManager.LayoutParams.TYPE_BASE_APPLICATION)
+                        area.set(sInsets[0], sInsets[1], sw - sInsets[2], sh - Math.max(sInsets[3], sImeBottom));
+                    Gravity.apply(g, w, h, area, mLp.x, mLp.y, out);
+                }
+                mX = out.left; mY = out.top; mW = w; mH = h;
+                mView.layout(0, 0, w, h);
+                if (!mLayoutRequested && !mView.isLayoutRequested()) break;
+                mLayoutRequested = false;
             }
-            mX = out.left; mY = out.top; mW = w; mH = h;
-            mView.layout(0, 0, w, h);
         } finally { mInLayout = false; }
+        if (mLayoutRequested || mView.isLayoutRequested()) scheduleFrame();
         mObserver.dispatchOnGlobalLayout();
         if (sDump == null) sDump = System.getenv("TL_VIEW_DUMP") != null;
         if (sDump) {

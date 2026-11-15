@@ -70,8 +70,12 @@ public final class Choreographer {
                 for (int i = 0; i < q.size(); ) { Object[] e = q.get(i); if ((Long) e[2] <= now) { run.add(e); q.remove(i); } else { i++; later = true; } }
             }
             for (Object[] e : run) {
-                if (e[0] instanceof FrameCallback) ((FrameCallback) e[0]).doFrame(now);
-                else ((Runnable) e[0]).run();
+                try {
+                    if (e[0] instanceof FrameCallback) ((FrameCallback) e[0]).doFrame(now);
+                    else ((Runnable) e[0]).run();
+                } catch (Throwable t) {
+                    android.util.Log.e("Choreographer", "Exception in Choreographer callback", t);
+                }
             }
         }
         synchronized (this) {
