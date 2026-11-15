@@ -300,7 +300,7 @@ static void w_glBindBufferBase(unsigned target, unsigned index, unsigned buffer)
         static atomic_int count_z, count_nz;
         if (buffer == 0 && atomic_fetch_add(&count_z, 1) < 10)
             tl_log_line("gl: glBindBufferBase(UNIFORM_BUFFER, idx %u, buf 0)", index);
-        else if (buffer != 0 && atomic_fetch_add(&count_nz, 1) < 100)
+        else if (buffer != 0 && atomic_fetch_add(&count_nz, 1) < 500)
             tl_log_line("gl: glBindBufferBase(UNIFORM_BUFFER, idx %u, buf %u NONZERO)", index, buffer);
     }
     if (g_es31_shim && target == 0x90D2 /* GL_SHADER_STORAGE_BUFFER */) {
@@ -351,7 +351,7 @@ static void w_glBindBufferRange(unsigned t, unsigned i, unsigned b, long o, long
     static atomic_int count_z, count_nz;
     if (b == 0 && atomic_fetch_add(&count_z, 1) < 10)
         tl_log_line("gl: glBindBufferRange(target %#x, idx %u, buf 0, off %ld, sz %ld)", t, i, o, n);
-    else if (b != 0 && atomic_fetch_add(&count_nz, 1) < 100)
+    else if (b != 0 && atomic_fetch_add(&count_nz, 1) < 500)
         tl_log_line("gl: glBindBufferRange(target %#x, idx %u, buf %u NONZERO, off %ld, sz %ld)", t, i, b, o, n);
     if (g_es31_shim && t == 0x90D2) { w_glBindBufferBase(t, i, b); return; }   /* grows the buffer if need be; the whole buffer is bound */
     if (!r_glBindBufferRange) r_glBindBufferRange = gl_proc("glBindBufferRange");

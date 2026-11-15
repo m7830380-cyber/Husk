@@ -603,25 +603,33 @@ static void (*r_glProgramBinary)(unsigned, unsigned, const void *, int);
 static void w_glProgramBinary(unsigned program, unsigned binaryFormat, const void *binary, int length)
 {
     if (!r_glProgramBinary) r_glProgramBinary = gl_proc("glProgramBinary");
+    while (gl_proc_get_error());
     if (r_glProgramBinary) r_glProgramBinary(program, binaryFormat, binary, length);
     static atomic_int count;
     int c = atomic_fetch_add(&count, 1);
     unsigned err = gl_proc_get_error();
-    if (c < 50) {
-        tl_log_line("gl: glProgramBinary(prog %u, binFmt %#x, len %d) -> err %#x", program, binaryFormat, length, err);
-        int numBlocks = 0, numUniforms = 0;
-        void (*get_prog_iv)(unsigned, unsigned, int *) = gl_proc("glGetProgramiv");
-        void (*get_block_name)(unsigned, unsigned, int, int *, char *) = gl_proc("glGetActiveUniformBlockName");
-        void (*get_block_iv)(unsigned, unsigned, unsigned, int *) = gl_proc("glGetActiveUniformBlockiv");
-        if (get_prog_iv && get_block_name && get_block_iv) {
-            get_prog_iv(program, 0x8A3A /* GL_ACTIVE_UNIFORM_BLOCKS */, &numBlocks);
-            get_prog_iv(program, 0x8B86 /* GL_ACTIVE_UNIFORMS */, &numUniforms);
-            for (int b = 0; b < numBlocks && b < 6; b++) {
-                char bname[64] = ""; int blen = 0, bsize = 0, bbind = 0;
-                get_block_name(program, b, sizeof(bname) - 1, &blen, bname);
-                get_block_iv(program, b, 0x8A3C /* GL_UNIFORM_BLOCK_DATA_SIZE */, &bsize);
-                get_block_iv(program, b, 0x8A3F /* GL_UNIFORM_BLOCK_BINDING */, &bbind);
-                tl_log_line("gl:   prog %u block %d '%s': sz %d, bind %d", program, b, bname, bsize, bbind);
+    int link_ok = 0;
+    void (*get_prog_iv)(unsigned, unsigned, int *) = gl_proc("glGetProgramiv");
+    if (get_prog_iv) get_prog_iv(program, 0x8B82 /* GL_LINK_STATUS */, &link_ok);
+    if (c < 80 || program >= 40) {
+        tl_log_line("gl: glProgramBinary(prog %u, binFmt %#x, len %d) -> err %#x, link_status %d",
+                    program, binaryFormat, length, err, link_ok);
+        if (program >= 40 && binary && length > 32) {
+            const char *p = (const char *)binary;
+            int found = 0;
+            for (int i = 0; i < length - 8 && found < 25; i++) {
+                if (!strncmp(p + i, "_Base", 5) || !strncmp(p + i, "_MainLight", 10) || 
+                    !strncmp(p + i, "unity_SH", 8) || !strncmp(p + i, "_Bone", 5) ||
+                    !strncmp(p + i, "_Color", 6) || !strncmp(p + i, "UnityPer", 8) ||
+                    !strncmp(p + i, "_Shadow", 7) || !strncmp(p + i, "unity_ObjectToWorld", 19) ||
+                    !strncmp(p + i, "_Metallic", 9) || !strncmp(p + i, "_Smoothness", 11)) {
+                    char str[64] = {0};
+                    int k = 0;
+                    while (k < 63 && p[i+k] >= 32 && p[i+k] <= 126) { str[k] = p[i+k]; k++; }
+                    tl_log_line("gl:   prog %u bin str: %s", program, str);
+                    found++;
+                    i += k;
+                }
             }
         }
     }
@@ -685,14 +693,137 @@ static void w_glUniformBlockBinding(unsigned prog, unsigned blockIndex, unsigned
     if (r_glUniformBlockBinding) r_glUniformBlockBinding(prog, blockIndex, binding);
 }
 
+static void dump_prog_reflection(unsigned prog)
+{
+    void (*get_prog_iv)(unsigned, unsigned, int *) = gl_proc("glGetProgramiv");
+    if (!get_prog_iv) return;
+    int link_ok = 0;
+    get_prog_iv(prog, 0x8B82 /* GL_LINK_STATUS */, &link_ok);
+    int numBlocks = 0, numUniforms = 0, numAttribs = 0;
+    get_prog_iv(prog, 0x8A3A /* GL_ACTIVE_UNIFORM_BLOCKS */, &numBlocks);
+    get_prog_iv(prog, 0x8B86 /* GL_ACTIVE_UNIFORMS */, &numUniforms);
+    get_prog_iv(prog, 0x8B89 /* GL_ACTIVE_ATTRIBUTES */, &numAttribs);
+    tl_log_line("gl: [REFL] prog %u: link_status=%d, blocks=%d, uniforms=%d, attribs=%d",
+                prog, link_ok, numBlocks, numUniforms, numAttribs);
+
+    void (*get_block_name)(unsigned, unsigned, int, int *, char *) = gl_proc("glGetActiveUniformBlockName");
+    void (*get_block_iv)(unsigned, unsigned, unsigned, int *) = gl_proc("glGetActiveUniformBlockiv");
+    if (get_block_name && get_block_iv) {
+        for (int b = 0; b < numBlocks && b < 8; b++) {
+            char bname[64] = ""; int blen = 0, bsize = 0, bbind = 0;
+            get_block_name(prog, b, sizeof(bname) - 1, &blen, bname);
+            get_block_iv(prog, b, 0x8A3C /* GL_UNIFORM_BLOCK_DATA_SIZE */, &bsize);
+            get_block_iv(prog, b, 0x8A3F /* GL_UNIFORM_BLOCK_BINDING */, &bbind);
+            tl_log_line("gl: [REFL]   prog %u block %d '%s': size %d, binding %d", prog, b, bname, bsize, bbind);
+        }
+    }
+
+    void (*get_active_u)(unsigned, unsigned, int, int *, int *, unsigned *, char *) = gl_proc("glGetActiveUniform");
+    int (*get_u_loc)(unsigned, const char *) = gl_proc("glGetUniformLocation");
+    void (*get_active_uiv)(unsigned, int, const unsigned *, unsigned, int *) = gl_proc("glGetActiveUniformsiv");
+    if (get_active_u && get_u_loc) {
+        for (int u = 0; u < numUniforms && u < 60; u++) {
+            char uname[64] = ""; int ulen = 0, usize = 0; unsigned utype = 0;
+            get_active_u(prog, u, sizeof(uname) - 1, &ulen, &usize, &utype, uname);
+            int loc = get_u_loc(prog, uname);
+            int block_idx = -1, offset = -1;
+            if (get_active_uiv) {
+                unsigned u_idx = (unsigned)u;
+                get_active_uiv(prog, 1, &u_idx, 0x8A3A /* GL_UNIFORM_BLOCK_INDEX */, &block_idx);
+                get_active_uiv(prog, 1, &u_idx, 0x8A37 /* GL_UNIFORM_OFFSET */, &offset);
+            }
+            tl_log_line("gl: [REFL]   prog %u uniform %d '%s': type %#x, loc %d, blk %d, off %d",
+                        prog, u, uname, utype, loc, block_idx, offset);
+        }
+    }
+
+    void (*get_active_a)(unsigned, unsigned, int, int *, int *, unsigned *, char *) = gl_proc("glGetActiveAttrib");
+    int (*get_a_loc)(unsigned, const char *) = gl_proc("glGetAttribLocation");
+    if (get_active_a && get_a_loc) {
+        for (int a = 0; a < numAttribs && a < 16; a++) {
+            char aname[64] = ""; int alen = 0, asize = 0; unsigned atype = 0;
+            get_active_a(prog, a, sizeof(aname) - 1, &alen, &asize, &atype, aname);
+            int loc = get_a_loc(prog, aname);
+            tl_log_line("gl: [REFL]   prog %u attrib %d '%s': type %#x, loc %d", prog, a, aname, atype, loc);
+        }
+    }
+}
+
+static void inspect_prog_draw(unsigned prog, int count)
+{
+    static uint8_t s_inspected[128];
+    if (prog >= 128) return;
+    int n = s_inspected[prog]++;
+    if (n >= 2) return;
+
+    tl_log_line("gl: >>>>> INSPECT DRAW #%d for prog %u (indices %d) <<<<<", n, prog, count);
+    dump_prog_reflection(prog);
+
+    void (*get_int_i)(unsigned, unsigned, int *) = gl_proc("glGetIntegeri_v");
+    void (*bind_buf)(unsigned, unsigned) = gl_proc("glBindBuffer");
+    void (*get_buf_sub)(unsigned, long, long, void *) = gl_proc("glGetBufferSubData");
+    void (*get_buf_param)(unsigned, unsigned, int *) = gl_proc("glGetBufferParameteriv");
+
+    int old_ubo = 0;
+    a_glGetIntegerv(0x8A28 /* GL_UNIFORM_BUFFER_BINDING */, &old_ubo);
+
+    for (int i = 0; i < 4; i++) {
+        int ubo = 0;
+        if (get_int_i) get_int_i(0x8A28 /* GL_UNIFORM_BUFFER_BINDING */, i, &ubo);
+        if (ubo > 0 && bind_buf && get_buf_sub && get_buf_param) {
+            bind_buf(0x8A11 /* GL_UNIFORM_BUFFER */, ubo);
+            int sz = 0;
+            get_buf_param(0x8A11, 0x8764 /* GL_BUFFER_SIZE */, &sz);
+            float f[16] = {0};
+            int fetch_sz = sz < (int)sizeof(f) ? sz : (int)sizeof(f);
+            if (fetch_sz > 0) get_buf_sub(0x8A11, 0, fetch_sz, f);
+            tl_log_line("gl:   UBO idx %d: buf %d (sz %d bytes) f[0..7]: [%.3f, %.3f, %.3f, %.3f] [%.3f, %.3f, %.3f, %.3f]",
+                        i, ubo, sz, f[0], f[1], f[2], f[3], f[4], f[5], f[6], f[7]);
+            tl_log_line("gl:   UBO idx %d: buf %d f[8..15]: [%.3f, %.3f, %.3f, %.3f] [%.3f, %.3f, %.3f, %.3f]",
+                        i, ubo, f[8], f[9], f[10], f[11], f[12], f[13], f[14], f[15]);
+        } else {
+            tl_log_line("gl:   UBO idx %d: buf %d", i, ubo);
+        }
+    }
+    if (bind_buf) bind_buf(0x8A11, old_ubo);
+
+    void (*active_tex)(unsigned) = gl_proc("glActiveTexture");
+    for (int t = 0; t < 4; t++) {
+        if (active_tex) active_tex(0x84C0 + t);
+        int tex2d = 0;
+        a_glGetIntegerv(0x8069 /* GL_TEXTURE_BINDING_2D */, &tex2d);
+        tl_log_line("gl:   TEX unit %d: 2D tex %d", t, tex2d);
+    }
+    if (active_tex) active_tex(0x84C0);
+
+    void (*get_va_iv)(unsigned, unsigned, int *) = gl_proc("glGetVertexAttribiv");
+    if (get_va_iv) {
+        for (int a = 0; a < 8; a++) {
+            int en = 0, buf = 0, sz = 0, type = 0;
+            get_va_iv(a, 0x8622 /* GL_VERTEX_ATTRIB_ARRAY_ENABLED */, &en);
+            get_va_iv(a, 0x889F /* GL_VERTEX_ATTRIB_ARRAY_BUFFER_BINDING */, &buf);
+            get_va_iv(a, 0x8623 /* GL_VERTEX_ATTRIB_ARRAY_SIZE */, &sz);
+            get_va_iv(a, 0x8625 /* GL_VERTEX_ATTRIB_ARRAY_TYPE */, &type);
+            if (en) {
+                tl_log_line("gl:   ATTRIB %d: buf %d, sz %d, type %#x", a, buf, sz, type);
+            }
+        }
+    }
+    unsigned err = gl_proc_get_error();
+    tl_log_line("gl: >>>>> END INSPECT prog %u (GL err %#x) <<<<<", prog, err);
+}
+
 static void (*r_glDrawElements)(unsigned, int, unsigned, const void *);
 static void w_glDrawElements(unsigned mode, int count, unsigned type, const void *indices)
 {
     static atomic_int draw_count;
     int c = atomic_fetch_add(&draw_count, 1);
+    int curProg = 0;
+    a_glGetIntegerv(0x8B8D /* GL_CURRENT_PROGRAM */, &curProg);
+    if (curProg >= 40) {
+        inspect_prog_draw((unsigned)curProg, count);
+    }
     if (c < 30 || (c % 600 == 0)) {
-        int curProg = 0;
-        a_glGetIntegerv(0x8B8D /* GL_CURRENT_PROGRAM */, &curProg);
         int ubo0 = 0, ubo1 = 0;
         void (*get_int_i)(unsigned, unsigned, int *) = gl_proc("glGetIntegeri_v");
         if (get_int_i) {
