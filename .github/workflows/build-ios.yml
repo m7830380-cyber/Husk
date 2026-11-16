@@ -21,7 +21,7 @@ concurrency:
 jobs:
   build:
     name: Build Husk IPA
-    runs-on: macos-15
+    runs-on: macos-14
     timeout-minutes: 60
 
     steps:
@@ -89,15 +89,18 @@ jobs:
             TAG="v3.4-fixed-$(date +'%Y%m%d%H%M')"
           fi
           COMMIT="$(git rev-parse --short HEAD)"
-          TITLE="Husk 3.4 (with AyuGram & Termux Fixes)"
+          TITLE="Husk 3.4 (Android APK & GLES Translation Layer Overhaul)"
           NOTES=$(cat <<EOF
           Build commit $COMMIT
 
-          Fixed issues:
-          - Fixed NullPointerException in ViewGroup.addView during custom view initialization (e.g. AyuGram UndoView) by using invalidate(true) instead of virtual invalidate()
-          - Added missing zlib gz* symbol exports (gzopen, gzread, gzclose, gzseek, etc.) to bionic shim for libtmessages / RLottie in Telegram / AyuGram
-          - Fixed RecyclerView layout step exception (STEP_ANIMATIONS vs STEP_LAYOUT) via Choreographer, ViewRoot multi-pass layout, and Looper
-          - Fixed Termux bootstrap extraction failure ('Invalid zip entry: bin/') by preserving Android guest canonical paths in b_realpath and stripping trailing slashes in b_mkdir
+          Clean Android APK Translation Layer & GLES Overhaul:
+          - Implemented spec-compliant GPU texture copy via glCopyImageSubData with GLES 3.0 FBO layer-blit fallback for 2D array, 3D, cubemap, and depth textures
+          - Exposed GL_EXT_copy_image, GL_OES_copy_image, GL_EXT_draw_elements_base_vertex, GL_OES_draw_elements_base_vertex, and GL_EXT_texture_filter_anisotropic
+          - Handled 64-bit parameter stack marshaling between AAPCS64 (8-byte alignment) and Darwin ARM64 (4-byte packing)
+          - Added resilient EGL context fallback: automatically clamps unsupported minor versions (e.g. ES 3.1/3.2) to ES 3.0 on ANGLE
+          - Advertised Swappy hardware presentation timestamps and damage region extensions in EGL_EXTENSIONS
+          - Added pthread_getname_np to bionic pthread table and supported EGL_FRAMEBUFFER_TARGET_ANDROID
+          - Stripped all game-specific hacks, artificial procedural textures, blend hijacking, and shader reflection overrides
           EOF
           )
 
