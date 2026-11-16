@@ -555,9 +555,9 @@ static void w_glTexStorage3D(unsigned target, int levels, unsigned internalforma
                             r = 128; g = 128; b = 255; a = 128;
                         } else {
                             switch (s) {
-                                case 0: r = 235; g = 195; b = 165; break; /* Head / Face skin */
+                                case 0: r = 215; g = 185; b = 165; break; /* Head / Face skin */
                                 case 1: r = 55;  g = 95;  b = 165; break; /* Torso / Navy Shirt */
-                                case 2: r = 235; g = 195; b = 165; break; /* Arms / Hands skin */
+                                case 2: r = 215; g = 185; b = 165; break; /* Arms / Hands skin */
                                 case 3: r = 45;  g = 55;  b = 75;  break; /* Legs / Dark Jeans */
                                 case 4: r = 35;  g = 35;  b = 40;  break; /* Shoes / Boots */
                                 default: r = 200; g = 200; b = 200; break;
@@ -590,12 +590,12 @@ static void w_glTexStorage3D(unsigned target, int levels, unsigned internalforma
                             }
                         } else {
                             /* _TerrainAlbedo / _TerrainEmission (0x8C43):
-                             * Slice 0: Natural earthy dirt road brown (140, 115, 85, 255)
-                             * Slice 1: Natural ground earthy green/brown (110, 130, 85, 255)
+                             * Slice 0: Natural earthy dirt road brown - neutral, no reddish clay tint under warm sunlight
+                             * Slice 1: Natural ground earthy green/brown
                              */
-                            uint8_t r = (s == 0) ? 140 : 110;
-                            uint8_t g = (s == 0) ? 115 : 130;
-                            uint8_t b = (s == 0) ? 85  : 85;
+                            uint8_t r = (s == 0) ? 85  : 70;
+                            uint8_t g = (s == 0) ? 90  : 95;
+                            uint8_t b = (s == 0) ? 82  : 65;
                             uint32_t pixel = (uint32_t)r | ((uint32_t)g << 8) | ((uint32_t)b << 16) | (255u << 24);
                             uint32_t *p32 = (uint32_t *)slice_data;
                             size_t npix = (size_t)width * height;
@@ -1086,6 +1086,82 @@ static void inspect_prog_draw(unsigned prog, int count)
     tl_log_line("gl: >>>>> END INSPECT prog %u (GL err %#x) <<<<<", prog, err);
 }
 
+/* Program Category:
+ * 0 = OPAQUE (Terrain, buildings, props)
+ * 1 = ROLE (Characters & NPCs)
+ * 2 = TRANSPARENT (Wounds, blood splatters, particles, dust, smoke, decals)
+ * 3 = ADDITIVE (Muzzle flash, tracers, sparks)
+ */
+static int8_t s_prog_cat[256];
+static bool s_prog_cat_inited = false;
+
+static int classify_program(unsigned prog)
+{
+    if (prog == 0 || prog >= 256) return 0;
+    if (!s_prog_cat_inited) {
+        memset(s_prog_cat, -1, sizeof(s_prog_cat));
+        s_prog_cat_inited = true;
+    }
+    if (s_prog_cat[prog] != -1) {
+        return s_prog_cat[prog];
+    }
+
+    void (*get_prog_iv)(unsigned, unsigned, int *) = gl_proc("glGetProgramiv");
+    void (*get_active_u)(unsigned, unsigned, int, int *, int *, unsigned *, char *) = gl_proc("glGetActiveUniform");
+    if (!get_prog_iv || !get_active_u) {
+        s_prog_cat[prog] = 0;
+        return 0;
+    }
+
+    int numUniforms = 0;
+    get_prog_iv(prog, 0x8B86 /* GL_ACTIVE_UNIFORMS */, &numUniforms);
+
+    bool is_role = false;
+    bool is_wound = false;
+    bool is_additive = false;
+    bool is_particle = false;
+    bool is_terrain = false;
+    bool has_shadowmap = false;
+    bool has_tex = false;
+
+    for (int u = 0; u < numUniforms && u < 128; u++) {
+        char uname[64] = ""; int ulen = 0, usize = 0; unsigned utype = 0;
+        get_active_u(prog, (unsigned)u, sizeof(uname) - 1, &ulen, &usize, &utype, uname);
+        const char *name = uname;
+        if (strncmp(name, "Xhlslcc_UnusedX", 15) == 0) name += 15;
+
+        if (strcmp(name, "_RoleMaps") == 0 || strcmp(name, "_RoleColor0") == 0) {
+            is_role = true;
+        } else if (strcmp(name, "_WoundErase") == 0) {
+            is_wound = true;
+        } else if (strcmp(name, "_Heat") == 0 || strcmp(name, "_ThinTo") == 0 || strcmp(name, "_CoreWhite") == 0) {
+            is_additive = true;
+        } else if (strcmp(name, "_CameraFadeParams") == 0 || strcmp(name, "_SoftParticleFadeParams") == 0) {
+            is_particle = true;
+        } else if (strcmp(name, "_TerrainField") == 0 || strcmp(name, "_TerrainAlbedo") == 0) {
+            is_terrain = true;
+        } else if (strstr(name, "MainLightShadowmap") != NULL) {
+            has_shadowmap = true;
+        } else if (strcmp(name, "_BaseMap") == 0 || strcmp(name, "_MainTex") == 0) {
+            has_tex = true;
+        }
+    }
+
+    int cat = 0; /* OPAQUE */
+    if (is_role) {
+        cat = 1; /* ROLE (NPC / Character) */
+    } else if (is_terrain) {
+        cat = 0; /* TERRAIN (Opaque) */
+    } else if (is_additive) {
+        cat = 3; /* ADDITIVE (Muzzle flash / gun fx) */
+    } else if (is_wound || is_particle || (has_tex && !has_shadowmap)) {
+        cat = 2; /* TRANSPARENT (Wound splatters, dust, dirt particles, blood decals) */
+    }
+
+    s_prog_cat[prog] = (int8_t)cat;
+    return cat;
+}
+
 static void enhance_draw_pipeline(int curProg)
 {
     if (curProg <= 0) return;
@@ -1101,6 +1177,8 @@ static void enhance_draw_pipeline(int curProg)
     static void (*set_depth_mask)(unsigned) = NULL;
     static void (*fn_enable)(unsigned) = NULL;
     static unsigned char (*fn_is_en)(unsigned) = NULL;
+    static void *(*map_buf)(unsigned, intptr_t, intptr_t, unsigned) = NULL;
+    static unsigned char (*unmap_buf)(unsigned) = NULL;
 
     if (!u_loc) {
         u_4f = gl_proc("glUniform4f");
@@ -1114,37 +1192,25 @@ static void enhance_draw_pipeline(int curProg)
         set_depth_mask = gl_proc("glDepthMask");
         fn_enable = gl_proc("glEnable");
         fn_is_en = gl_proc("glIsEnabled");
+        map_buf = gl_proc("glMapBufferRange");
+        unmap_buf = gl_proc("glUnmapBuffer");
     }
 
-    /* 1. GoreBox Character & NPC Meshes:
-     * Dynamically classify GoreBox Role Shaders (_RoleColor0 / _RoleMaps).
-     * This avoids any hardcoded program ID fragility when shader IDs shift across app runs.
-     */
-    static int8_t s_prog_is_role[256];
-    static bool s_role_cache_inited = false;
-    if (!s_role_cache_inited) {
-        memset(s_prog_is_role, -1, sizeof(s_prog_is_role));
-        s_role_cache_inited = true;
-    }
-    int is_role = 0;
-    if (curProg > 0 && curProg < 256) {
-        if (s_prog_is_role[curProg] == -1) {
-            int loc = u_loc ? u_loc((unsigned)curProg, "_RoleColor0") : -1;
-            s_prog_is_role[curProg] = (loc >= 0) ? 1 : 0;
-        }
-        is_role = s_prog_is_role[curProg];
-    }
+    int cat = classify_program((unsigned)curProg);
 
-    if (is_role) {
+    if (cat == 1) {
+        /* 1. GoreBox Character & NPC Meshes:
+         * Depth writes enabled, bypass shadow attenuation, boost ambient lighting,
+         * boost sunlight, and auto-populate body colors in UBO 1.
+         */
+        if (set_depth_mask) set_depth_mask(1 /* GL_TRUE */);
         if (u_loc && u_4f) {
-            /* Bypass shadow attenuation zeroing */
             int loc_sp = u_loc((unsigned)curProg, "_MainLightShadowParams");
             if (loc_sp >= 0) u_4f(loc_sp, 0.0f, 0.0f, 0.0f, 0.0f);
 
             int loc_asp = u_loc((unsigned)curProg, "_AdditionalShadowParams[0]");
             if (loc_asp >= 0) u_4f(loc_asp, 0.0f, 0.0f, 0.0f, -1.0f);
 
-            /* Boost ambient lighting for characters */
             if (u_1f) {
                 int loc_ns = u_loc((unsigned)curProg, "_GB27NightSight");
                 if (loc_ns >= 0) u_1f(loc_ns, 0.35f);
@@ -1154,7 +1220,6 @@ static void enhance_draw_pipeline(int curProg)
                 u_4f(loc_amb, 0.50f, 0.50f, 0.55f, 1.0f);
             }
 
-            /* Ensure directional sunlight is active */
             int loc_light = u_loc((unsigned)curProg, "_MainLightColor");
             if (loc_light >= 0 && u_fv) {
                 float col[4] = {0};
@@ -1174,25 +1239,23 @@ static void enhance_draw_pipeline(int curProg)
         }
 
         /* GoreBox Body Part Color Auto-Injector (UnityPerMaterial block, binding index 1):
-         * Head: Skin (0.85, 0.65, 0.52), Torso: Navy (0.18, 0.32, 0.55),
-         * Arms: Skin (0.85, 0.65, 0.52), Legs: Jeans (0.15, 0.22, 0.38), Shoes: Charcoal (0.15, 0.15, 0.16)
+         * Head: Natural Skin (0.80, 0.70, 0.62), Torso: Navy (0.20, 0.35, 0.55),
+         * Arms: Natural Skin (0.80, 0.70, 0.62), Legs: Jeans (0.18, 0.24, 0.36), Shoes: Charcoal (0.15, 0.15, 0.16)
          */
         if (get_int_i && b_buf && b_sub) {
             int ubo1 = 0;
             get_int_i(0x8A28 /* GL_UNIFORM_BUFFER_BINDING */, 1, &ubo1);
             if (ubo1 > 0) {
                 static const float role_colors[5][4] = {
-                    { 0.85f, 0.65f, 0.52f, 1.0f },
-                    { 0.18f, 0.32f, 0.55f, 1.0f },
-                    { 0.85f, 0.65f, 0.52f, 1.0f },
-                    { 0.15f, 0.22f, 0.38f, 1.0f },
+                    { 0.80f, 0.70f, 0.62f, 1.0f },
+                    { 0.20f, 0.35f, 0.55f, 1.0f },
+                    { 0.80f, 0.70f, 0.62f, 1.0f },
+                    { 0.18f, 0.24f, 0.36f, 1.0f },
                     { 0.15f, 0.15f, 0.16f, 1.0f }
                 };
                 int prev_ub = 0;
                 a_glGetIntegerv(0x8A28, &prev_ub);
                 b_buf(0x8A11 /* GL_UNIFORM_BUFFER */, (unsigned)ubo1);
-                void *(*map_buf)(unsigned, intptr_t, intptr_t, unsigned) = gl_proc("glMapBufferRange");
-                unsigned char (*unmap_buf)(unsigned) = gl_proc("glUnmapBuffer");
                 bool needs_colors = true;
                 if (map_buf && unmap_buf) {
                     const float *mapped = (const float *)map_buf(0x8A11, 80, sizeof(role_colors), 0x0001 /* GL_MAP_READ_BIT */);
@@ -1209,14 +1272,37 @@ static void enhance_draw_pipeline(int curProg)
                 b_buf(0x8A11, (unsigned)prev_ub);
             }
         }
-    } else {
-        /* General safety for any transparent draw call that has GL_BLEND enabled with src=0 and dst=0 */
-        if (fn_is_en && fn_is_en(0x0BE2 /* GL_BLEND */) && set_blend_fn) {
-            int src_rgb = 0, dst_rgb = 0;
-            a_glGetIntegerv(0x80C9 /* GL_BLEND_SRC_RGB */, &src_rgb);
-            a_glGetIntegerv(0x80C8 /* GL_BLEND_DST_RGB */, &dst_rgb);
-            if (src_rgb == 0 && dst_rgb == 0) {
+    } else if (cat == 2 || cat == 3) {
+        /* 2. Transparent shaders, wound splatters, particles, and decals:
+         * Fix opaque red patches on wounded NPCs and black/opaque rectangles around blood, decals, smoke, and particles!
+         */
+        if (fn_enable) fn_enable(0x0BE2 /* GL_BLEND */);
+        if (set_depth_mask) set_depth_mask(0 /* GL_FALSE */);
+        if (set_blend_fn) {
+            if (cat == 3) {
+                set_blend_fn(1 /* GL_ONE */, 1 /* GL_ONE */, 1, 1);
+            } else {
                 set_blend_fn(0x0302 /* GL_SRC_ALPHA */, 0x0303 /* GL_ONE_MINUS_SRC_ALPHA */, 1 /* GL_ONE */, 0x0303);
+            }
+        }
+        if (u_loc && u_4f) {
+            int loc_sp = u_loc((unsigned)curProg, "_MainLightShadowParams");
+            if (loc_sp >= 0) u_4f(loc_sp, 0.0f, 0.0f, 0.0f, 0.0f);
+
+            int loc_cf = u_loc((unsigned)curProg, "_CameraFadeParams");
+            if (loc_cf >= 0) u_4f(loc_cf, 0.0f, 1.0f, 0.0f, 0.0f);
+        }
+    } else {
+        /* General safety for any draw call that has GL_BLEND enabled */
+        if (fn_is_en && fn_is_en(0x0BE2 /* GL_BLEND */)) {
+            if (set_depth_mask) set_depth_mask(0 /* GL_FALSE */);
+            if (set_blend_fn) {
+                int src_rgb = 0, dst_rgb = 0;
+                a_glGetIntegerv(0x80C9 /* GL_BLEND_SRC_RGB */, &src_rgb);
+                a_glGetIntegerv(0x80C8 /* GL_BLEND_DST_RGB */, &dst_rgb);
+                if (src_rgb == 0 && dst_rgb == 0) {
+                    set_blend_fn(0x0302 /* GL_SRC_ALPHA */, 0x0303 /* GL_ONE_MINUS_SRC_ALPHA */, 1 /* GL_ONE */, 0x0303);
+                }
             }
         }
     }
