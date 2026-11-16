@@ -396,13 +396,14 @@ static void read_pixels_fbo0(void *buf, int w, int h)
     static void (*fn_read_buffer)(unsigned);
     if (!fn_read_buffer) fn_read_buffer = gl_proc("glReadBuffer");
 
-    int old_fb = 0, old_pack = 0, old_pbo = 0, old_row_len = 0, old_skip_rows = 0, old_skip_pixels = 0;
+    int old_fb = 0, old_pack = 0, old_pbo = 0, old_row_len = 0, old_skip_rows = 0, old_skip_pixels = 0, old_read_buf = 0;
     a_glGetIntegerv(0x8CAA /* GL_READ_FRAMEBUFFER_BINDING */, &old_fb);
     a_glGetIntegerv(0x0D05 /* GL_PACK_ALIGNMENT */, &old_pack);
     a_glGetIntegerv(0x88ED /* GL_PIXEL_PACK_BUFFER_BINDING */, &old_pbo);
     a_glGetIntegerv(0x0D02 /* GL_PACK_ROW_LENGTH */, &old_row_len);
     a_glGetIntegerv(0x0D03 /* GL_PACK_SKIP_ROWS */, &old_skip_rows);
     a_glGetIntegerv(0x0D04 /* GL_PACK_SKIP_PIXELS */, &old_skip_pixels);
+    a_glGetIntegerv(0x0C02 /* GL_READ_BUFFER */, &old_read_buf);
 
     if (old_pbo && fn_bind_buffer) fn_bind_buffer(0x88EB /* GL_PIXEL_PACK_BUFFER */, 0);
     a_glBindFramebuffer(0x8CA8 /* GL_READ_FRAMEBUFFER */, 0);
@@ -427,6 +428,7 @@ static void read_pixels_fbo0(void *buf, int w, int h)
         }
     }
 
+    if (old_read_buf && fn_read_buffer) fn_read_buffer((unsigned)old_read_buf);
     a_glPixelStorei(0x0D05, old_pack);
     if (old_row_len != 0) a_glPixelStorei(0x0D02, old_row_len);
     if (old_skip_rows != 0) a_glPixelStorei(0x0D03, old_skip_rows);
@@ -878,41 +880,41 @@ static void w_glCopyImageSubData(unsigned sn, unsigned st, int sl, int sx, int s
     gles_copy_image_sub_data_fallback(sn, st, sl, sx, sy, sz, dn, dt, (int)dl, (int)dx, (int)dy, (int)dz, (int)w, (int)h, (int)d);
 }
 
-/* Clean 16/32-bit GLenum parameters from AAPCS64 callers to Darwin ARM64 */
+/* Clean GLenum and state parameters from AAPCS64 callers to Darwin ARM64 */
 static void (*r_glBlendFunc)(unsigned, unsigned);
 static void w_glBlendFunc(unsigned s, unsigned d) {
     if (!r_glBlendFunc) r_glBlendFunc = gl_proc("glBlendFunc");
-    if (r_glBlendFunc) r_glBlendFunc(s & 0xffff, d & 0xffff);
+    if (r_glBlendFunc) r_glBlendFunc(s, d);
 }
 
 static void (*r_glBlendFuncSeparate)(unsigned, unsigned, unsigned, unsigned);
 static void w_glBlendFuncSeparate(unsigned sr, unsigned dr, unsigned sa, unsigned da) {
     if (!r_glBlendFuncSeparate) r_glBlendFuncSeparate = gl_proc("glBlendFuncSeparate");
-    if (r_glBlendFuncSeparate) r_glBlendFuncSeparate(sr & 0xffff, dr & 0xffff, sa & 0xffff, da & 0xffff);
+    if (r_glBlendFuncSeparate) r_glBlendFuncSeparate(sr, dr, sa, da);
 }
 
 static void (*r_glBlendEquation)(unsigned);
 static void w_glBlendEquation(unsigned m) {
     if (!r_glBlendEquation) r_glBlendEquation = gl_proc("glBlendEquation");
-    if (r_glBlendEquation) r_glBlendEquation(m & 0xffff);
+    if (r_glBlendEquation) r_glBlendEquation(m);
 }
 
 static void (*r_glBlendEquationSeparate)(unsigned, unsigned);
 static void w_glBlendEquationSeparate(unsigned mr, unsigned ma) {
     if (!r_glBlendEquationSeparate) r_glBlendEquationSeparate = gl_proc("glBlendEquationSeparate");
-    if (r_glBlendEquationSeparate) r_glBlendEquationSeparate(mr & 0xffff, ma & 0xffff);
+    if (r_glBlendEquationSeparate) r_glBlendEquationSeparate(mr, ma);
 }
 
 static void (*r_glEnable)(unsigned);
 static void w_glEnable(unsigned c) {
     if (!r_glEnable) r_glEnable = gl_proc("glEnable");
-    if (r_glEnable) r_glEnable(c & 0xffff);
+    if (r_glEnable) r_glEnable(c);
 }
 
 static void (*r_glDisable)(unsigned);
 static void w_glDisable(unsigned c) {
     if (!r_glDisable) r_glDisable = gl_proc("glDisable");
-    if (r_glDisable) r_glDisable(c & 0xffff);
+    if (r_glDisable) r_glDisable(c);
 }
 
 /* GLboolean arguments: AAPCS64 callers do not extend them, Apple's callee may assume they are. */
@@ -1126,19 +1128,91 @@ static void w_glDrawArrays(unsigned mode, int first, int count)
 }
 
 static void (*r_glDrawElementsBaseVertex)(unsigned, int, unsigned, const void *, int);
+static void (*r_glDrawRangeElementsBaseVertex)(unsigned, unsigned, unsigned, int, unsigned, const void *, int);
+static void (*r_glDrawElementsInstancedBaseVertex)(unsigned, int, unsigned, const void *, int, int);
+
+static void resolve_base_vertex_procs(void)
+{
+    static bool resolved = false;
+    if (resolved) return;
+    resolved = true;
+
+    r_glDrawElementsBaseVertex = gl_proc("glDrawElementsBaseVertex");
+    if (!r_glDrawElementsBaseVertex) r_glDrawElementsBaseVertex = gl_proc("glDrawElementsBaseVertexEXT");
+    if (!r_glDrawElementsBaseVertex) r_glDrawElementsBaseVertex = gl_proc("glDrawElementsBaseVertexOES");
+    if (!r_glDrawElementsBaseVertex) r_glDrawElementsBaseVertex = gl_proc("glDrawElementsBaseVertexANGLE");
+
+    r_glDrawRangeElementsBaseVertex = gl_proc("glDrawRangeElementsBaseVertex");
+    if (!r_glDrawRangeElementsBaseVertex) r_glDrawRangeElementsBaseVertex = gl_proc("glDrawRangeElementsBaseVertexEXT");
+    if (!r_glDrawRangeElementsBaseVertex) r_glDrawRangeElementsBaseVertex = gl_proc("glDrawRangeElementsBaseVertexOES");
+    if (!r_glDrawRangeElementsBaseVertex) r_glDrawRangeElementsBaseVertex = gl_proc("glDrawRangeElementsBaseVertexANGLE");
+
+    r_glDrawElementsInstancedBaseVertex = gl_proc("glDrawElementsInstancedBaseVertex");
+    if (!r_glDrawElementsInstancedBaseVertex) r_glDrawElementsInstancedBaseVertex = gl_proc("glDrawElementsInstancedBaseVertexEXT");
+    if (!r_glDrawElementsInstancedBaseVertex) r_glDrawElementsInstancedBaseVertex = gl_proc("glDrawElementsInstancedBaseVertexOES");
+    if (!r_glDrawElementsInstancedBaseVertex) r_glDrawElementsInstancedBaseVertex = gl_proc("glDrawElementsInstancedBaseVertexANGLE");
+}
+
 static void w_glDrawElementsBaseVertex(unsigned mode, int count, unsigned type, const void *indices, int basevertex)
 {
-    if (!r_glDrawElementsBaseVertex) {
-        r_glDrawElementsBaseVertex = gl_proc("glDrawElementsBaseVertex");
-        if (!r_glDrawElementsBaseVertex) r_glDrawElementsBaseVertex = gl_proc("glDrawElementsBaseVertexEXT");
-        if (!r_glDrawElementsBaseVertex) r_glDrawElementsBaseVertex = gl_proc("glDrawElementsBaseVertexOES");
+    resolve_base_vertex_procs();
+    if (r_glDrawElementsBaseVertex) {
+        r_glDrawElementsBaseVertex(mode, count, type, indices, basevertex);
+        return;
+    }
+    if (r_glDrawElementsInstancedBaseVertex) {
+        r_glDrawElementsInstancedBaseVertex(mode, count, type, indices, 1, basevertex);
+        return;
+    }
+    if (basevertex == 0) {
+        if (!r_glDrawElements) r_glDrawElements = gl_proc("glDrawElements");
+        if (r_glDrawElements) r_glDrawElements(mode, count, type, indices);
+    } else {
+        static int warned = 0;
+        if (!warned++) tl_log_line("gl: glDrawElementsBaseVertex called with basevertex %d but no driver base vertex proc available", basevertex);
+    }
+}
+
+static void w_glDrawRangeElementsBaseVertex(unsigned mode, unsigned start, unsigned end, int count, unsigned type, const void *indices, int basevertex)
+{
+    (void)start; (void)end;
+    resolve_base_vertex_procs();
+    if (r_glDrawRangeElementsBaseVertex) {
+        r_glDrawRangeElementsBaseVertex(mode, start, end, count, type, indices, basevertex);
+        return;
     }
     if (r_glDrawElementsBaseVertex) {
         r_glDrawElementsBaseVertex(mode, count, type, indices, basevertex);
         return;
     }
-    if (!r_glDrawElements) r_glDrawElements = gl_proc("glDrawElements");
-    if (r_glDrawElements) r_glDrawElements(mode, count, type, indices);
+    if (r_glDrawElementsInstancedBaseVertex) {
+        r_glDrawElementsInstancedBaseVertex(mode, count, type, indices, 1, basevertex);
+        return;
+    }
+    if (basevertex == 0) {
+        if (!r_glDrawElements) r_glDrawElements = gl_proc("glDrawElements");
+        if (r_glDrawElements) r_glDrawElements(mode, count, type, indices);
+    } else {
+        static int warned = 0;
+        if (!warned++) tl_log_line("gl: glDrawRangeElementsBaseVertex called with basevertex %d but no driver base vertex proc available", basevertex);
+    }
+}
+
+static void w_glDrawElementsInstancedBaseVertex(unsigned mode, int count, unsigned type, const void *indices, int instancecount, int basevertex)
+{
+    resolve_base_vertex_procs();
+    if (r_glDrawElementsInstancedBaseVertex) {
+        r_glDrawElementsInstancedBaseVertex(mode, count, type, indices, instancecount, basevertex);
+        return;
+    }
+    if (basevertex == 0) {
+        static void (*fn_inst)(unsigned, int, unsigned, const void *, int);
+        if (!fn_inst) fn_inst = gl_proc("glDrawElementsInstanced");
+        if (fn_inst) fn_inst(mode, count, type, indices, instancecount);
+    } else {
+        static int warned = 0;
+        if (!warned++) tl_log_line("gl: glDrawElementsInstancedBaseVertex called with basevertex %d but no driver base vertex proc available", basevertex);
+    }
 }
 
 
@@ -1166,6 +1240,8 @@ static const char *const k_extra_exts[] = {
     "GL_EXT_copy_image",
     "GL_OES_copy_image",
     "GL_EXT_texture_filter_anisotropic",
+    "GL_EXT_draw_elements_base_vertex",
+    "GL_OES_draw_elements_base_vertex",
 };
 #define EXTRA_EXT_COUNT (sizeof(k_extra_exts) / sizeof(k_extra_exts[0]))
 
@@ -1230,6 +1306,9 @@ static const unsigned char *w_glGetStringi(unsigned name, unsigned index)
             unsigned extra_idx = index - (unsigned)host_num;
             if (extra_idx < EXTRA_EXT_COUNT) {
                 return (const unsigned char *)k_extra_exts[extra_idx];
+            }
+            if (g_es31_shim && extra_idx == EXTRA_EXT_COUNT) {
+                return (const unsigned char *)"GL_EXT_texture_buffer";
             }
             return NULL;
         }
@@ -1309,9 +1388,16 @@ static const struct { const char *name; void *wrap; void **real; } k_adapt[] = {
     ADAPT(glSampleCoverage), ADAPT(glTexImage2D), ADAPT(glTexStorage2D), ADAPT(glTexSubImage2D), ADAPT(glCompressedTexImage2D), ADAPT(glCompressedTexSubImage2D), ADAPT(glUniformBlockBinding),
     ADAPT(glGetString), ADAPT(glGetStringi), ADAPT(glCompileShader), ADAPT(glShaderSource), ADAPT(glAttachShader), ADAPT(glLinkProgram), ADAPT(glGetIntegerv), ADAPT(glGetFloatv), ADAPT(glBindBufferBase), ADAPT(glBindBuffer), ADAPT(glBufferData), ADAPT(glBufferSubData), ADAPT(glBindBufferRange),
     ADAPT(glProgramBinary), ADAPT(glShaderBinary), ADAPT(glCreateShaderProgramv), ADAPT(glCreateProgram), ADAPT(glCreateShader),
-    ADAPT(glDrawElements), ADAPT(glDrawArrays), ADAPT(glDrawElementsBaseVertex),
+    ADAPT(glDrawElements), ADAPT(glDrawArrays),
+    ADAPT(glDrawElementsBaseVertex),
     { "glDrawElementsBaseVertexEXT", (void *)w_glDrawElementsBaseVertex, (void **)&r_glDrawElementsBaseVertex },
     { "glDrawElementsBaseVertexOES", (void *)w_glDrawElementsBaseVertex, (void **)&r_glDrawElementsBaseVertex },
+    ADAPT(glDrawRangeElementsBaseVertex),
+    { "glDrawRangeElementsBaseVertexEXT", (void *)w_glDrawRangeElementsBaseVertex, (void **)&r_glDrawRangeElementsBaseVertex },
+    { "glDrawRangeElementsBaseVertexOES", (void *)w_glDrawRangeElementsBaseVertex, (void **)&r_glDrawRangeElementsBaseVertex },
+    ADAPT(glDrawElementsInstancedBaseVertex),
+    { "glDrawElementsInstancedBaseVertexEXT", (void *)w_glDrawElementsInstancedBaseVertex, (void **)&r_glDrawElementsInstancedBaseVertex },
+    { "glDrawElementsInstancedBaseVertexOES", (void *)w_glDrawElementsInstancedBaseVertex, (void **)&r_glDrawElementsInstancedBaseVertex },
     ADAPT(glBlendFunc), ADAPT(glBlendFuncSeparate), ADAPT(glBlendEquation), ADAPT(glBlendEquationSeparate), ADAPT(glEnable), ADAPT(glDisable),
     ADAPT(glGetProgramInterfaceiv), ADAPT(glGetProgramResourceIndex), ADAPT(glGetProgramResourceName), ADAPT(glGetProgramResourceiv), ADAPT(glGetIntegeri_v),
     ADAPT(eglClientWaitSyncKHR), ADAPT(eglDestroySyncKHR), ADAPT(eglGetSyncAttribKHR), ADAPT(eglClientWaitSync), ADAPT(eglDestroySync),
@@ -1500,6 +1586,12 @@ static void *egl_resolve(const char *name)
     }
     for (size_t i = 0; i < sizeof(k_egl) / sizeof(k_egl[0]); i++) if (!strcmp(k_egl[i].name, name)) return k_egl[i].fn;
     if (!E.ready) return NULL;
+    if (!strncmp(name, "glDrawElementsBaseVertex", 24) ||
+        !strncmp(name, "glDrawRangeElementsBaseVertex", 29) ||
+        !strncmp(name, "glDrawElementsInstancedBaseVertex", 33)) {
+        resolve_base_vertex_procs();
+        if (!r_glDrawElementsBaseVertex && !r_glDrawElementsInstancedBaseVertex) return NULL;
+    }
     void *real = gl_proc(name);
     static int trace = -1;
     if (trace < 0) trace = getenv("TL_GL_TRACE") ? 1 : 0;
