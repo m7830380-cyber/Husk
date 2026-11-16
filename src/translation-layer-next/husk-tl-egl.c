@@ -388,6 +388,53 @@ static bool comp_surface(EGLSurface s)
     pthread_mutex_unlock(&g_tex_lock);
     return r;
 }
+/* Pixel readback helper: safely unbinds PBOs, aligns pixel packing, and retries read buffer on offscreen surfaces */
+static void read_pixels_fbo0(void *buf, int w, int h)
+{
+    static void (*fn_bind_buffer)(unsigned, unsigned);
+    if (!fn_bind_buffer) fn_bind_buffer = gl_proc("glBindBuffer");
+    static void (*fn_read_buffer)(unsigned);
+    if (!fn_read_buffer) fn_read_buffer = gl_proc("glReadBuffer");
+
+    int old_fb = 0, old_pack = 0, old_pbo = 0, old_row_len = 0, old_skip_rows = 0, old_skip_pixels = 0;
+    a_glGetIntegerv(0x8CAA /* GL_READ_FRAMEBUFFER_BINDING */, &old_fb);
+    a_glGetIntegerv(0x0D05 /* GL_PACK_ALIGNMENT */, &old_pack);
+    a_glGetIntegerv(0x88ED /* GL_PIXEL_PACK_BUFFER_BINDING */, &old_pbo);
+    a_glGetIntegerv(0x0D02 /* GL_PACK_ROW_LENGTH */, &old_row_len);
+    a_glGetIntegerv(0x0D03 /* GL_PACK_SKIP_ROWS */, &old_skip_rows);
+    a_glGetIntegerv(0x0D04 /* GL_PACK_SKIP_PIXELS */, &old_skip_pixels);
+
+    if (old_pbo && fn_bind_buffer) fn_bind_buffer(0x88EB /* GL_PIXEL_PACK_BUFFER */, 0);
+    a_glBindFramebuffer(0x8CA8 /* GL_READ_FRAMEBUFFER */, 0);
+    a_glPixelStorei(0x0D05 /* GL_PACK_ALIGNMENT */, 1);
+    if (old_row_len != 0) a_glPixelStorei(0x0D02, 0);
+    if (old_skip_rows != 0) a_glPixelStorei(0x0D03, 0);
+    if (old_skip_pixels != 0) a_glPixelStorei(0x0D04, 0);
+
+    while (gl_proc_get_error());
+    a_glReadPixels(0, 0, w, h, 0x1908 /* GL_RGBA */, 0x1401 /* GL_UNSIGNED_BYTE */, buf);
+    unsigned err = gl_proc_get_error();
+    if (err != 0 && fn_read_buffer) {
+        fn_read_buffer(0x0404 /* GL_FRONT */);
+        while (gl_proc_get_error());
+        a_glReadPixels(0, 0, w, h, 0x1908, 0x1401, buf);
+        err = gl_proc_get_error();
+        if (err != 0) {
+            fn_read_buffer(0x0405 /* GL_BACK */);
+            while (gl_proc_get_error());
+            a_glReadPixels(0, 0, w, h, 0x1908, 0x1401, buf);
+            err = gl_proc_get_error();
+        }
+    }
+
+    a_glPixelStorei(0x0D05, old_pack);
+    if (old_row_len != 0) a_glPixelStorei(0x0D02, old_row_len);
+    if (old_skip_rows != 0) a_glPixelStorei(0x0D03, old_skip_rows);
+    if (old_skip_pixels != 0) a_glPixelStorei(0x0D04, old_skip_pixels);
+    if (old_pbo && fn_bind_buffer) fn_bind_buffer(0x88EB, (unsigned)old_pbo);
+    a_glBindFramebuffer(0x8CA8, (unsigned)old_fb);
+}
+
 /* The current frame of a surface, read back (bottom-up RGBA, in a buffer of this thread's). */
 static const uint8_t *read_back(EGLDisplay d, EGLSurface s, EGLint *pw, EGLint *ph)
 {
@@ -398,14 +445,7 @@ static const uint8_t *read_back(EGLDisplay d, EGLSurface s, EGLint *pw, EGLint *
     size_t need = (size_t)w * h * 4;
     if (need > cap) { free(buf); buf = malloc(need); cap = buf ? need : 0; }
     if (!buf) return NULL;
-    int old_fb = 0, old_pack = 0;
-    a_glGetIntegerv(0x8CAA /* GL_READ_FRAMEBUFFER_BINDING */, &old_fb);
-    a_glGetIntegerv(0x0D05 /* GL_PACK_ALIGNMENT */, &old_pack);
-    a_glBindFramebuffer(0x8CA8 /* GL_READ_FRAMEBUFFER */, 0);
-    a_glPixelStorei(0x0D05, 1);
-    a_glReadPixels(0, 0, w, h, 0x1908 /* GL_RGBA */, 0x1401 /* GL_UNSIGNED_BYTE */, buf);
-    a_glPixelStorei(0x0D05, old_pack);
-    a_glBindFramebuffer(0x8CA8, (unsigned)old_fb);
+    read_pixels_fbo0(buf, w, h);
     *pw = w; *ph = h;
     return buf;
 }
@@ -473,14 +513,8 @@ static void save_frame(EGLDisplay d, EGLSurface s, unsigned long n)
     a_eglQuerySurface(d, s, EGL_HEIGHT, &h);
     if (w <= 0 || h <= 0 || !a_glReadPixels) return;
     uint8_t *rgba = malloc((size_t)w * h * 4);
-    int old_fb = 0, old_pack = 0;
-    a_glGetIntegerv(0x8CAA /* GL_READ_FRAMEBUFFER_BINDING */, &old_fb);
-    a_glGetIntegerv(0x0D05 /* GL_PACK_ALIGNMENT */, &old_pack);
-    a_glBindFramebuffer(0x8CA8 /* GL_READ_FRAMEBUFFER */, 0);
-    a_glPixelStorei(0x0D05, 1);
-    a_glReadPixels(0, 0, w, h, 0x1908 /* GL_RGBA */, 0x1401 /* GL_UNSIGNED_BYTE */, rgba);
-    a_glPixelStorei(0x0D05, old_pack);
-    a_glBindFramebuffer(0x8CA8, (unsigned)old_fb);
+    if (!rgba) return;
+    read_pixels_fbo0(rgba, w, h);
     char path[700], final_path[700] = "";
     if (E.latest_only) {
         snprintf(final_path, sizeof(final_path), "%s/latest.bmp", E.frame_dir);
@@ -521,14 +555,7 @@ static void tex_swap(EGLDisplay d, EGLSurface s, void *win)
     size_t need = (size_t)w * h * 4;
     if (need > cap) { free(buf); buf = malloc(need); cap = buf ? need : 0; }
     if (!buf) return;
-    int old_fb = 0, old_pack = 0;
-    a_glGetIntegerv(0x8CAA /* GL_READ_FRAMEBUFFER_BINDING */, &old_fb);
-    a_glGetIntegerv(0x0D05 /* GL_PACK_ALIGNMENT */, &old_pack);
-    a_glBindFramebuffer(0x8CA8 /* GL_READ_FRAMEBUFFER */, 0);
-    a_glPixelStorei(0x0D05, 1);
-    a_glReadPixels(0, 0, w, h, 0x1908 /* GL_RGBA */, 0x1401 /* GL_UNSIGNED_BYTE */, buf);
-    a_glPixelStorei(0x0D05, old_pack);
-    a_glBindFramebuffer(0x8CA8, (unsigned)old_fb);
+    read_pixels_fbo0(buf, w, h);
     tl_nwindow_post(win, buf, w, h, true);
 }
 
@@ -610,11 +637,20 @@ static void (*r_glTexStorage3D)(unsigned, int, unsigned, int, int, int);
 static void w_glTexStorage3D(unsigned target, int levels, unsigned internalformat, int width, int height, int depth)
 {
     if (!r_glTexStorage3D) r_glTexStorage3D = gl_proc("glTexStorage3D");
-    if (r_glTexStorage3D) r_glTexStorage3D(target, levels, internalformat, width, height, depth);
+    if (!r_glTexStorage3D) return;
+    while (gl_proc_get_error());
+    r_glTexStorage3D(target, levels, internalformat, width, height, depth);
+    unsigned err = gl_proc_get_error();
+    if (err != 0 && internalformat == 0x8C41 /* GL_SRGB8 */) {
+        while (gl_proc_get_error());
+        r_glTexStorage3D(target, levels, 0x8C43 /* GL_SRGB8_ALPHA8 */, width, height, depth);
+        err = gl_proc_get_error();
+        tl_log_line("gl: glTexStorage3D fallback intfmt 0x8C41 -> 0x8C43: err %#x", err);
+    }
     static atomic_int count;
-    if (atomic_fetch_add(&count, 1) < 20) {
+    if (atomic_fetch_add(&count, 1) < 20 || err != 0) {
         tl_log_line("gl: glTexStorage3D(target %#x, lvls %d, intfmt %#x, %dx%dx%d) -> err %#x",
-                    target, levels, internalformat, width, height, depth, gl_proc_get_error());
+                    target, levels, internalformat, width, height, depth, err);
     }
 }
 
@@ -673,6 +709,9 @@ static void gles_copy_image_sub_data_fallback(
     static void (*fb_tex2d)(unsigned, unsigned, unsigned, unsigned, int);
     static void (*fb_tex_layer)(unsigned, unsigned, unsigned, int, int);
     static void (*fb_rb)(unsigned, unsigned, unsigned, unsigned);
+    static void (*bind_tex)(unsigned, unsigned);
+    static void (*copy_sub2d)(unsigned, int, int, int, int, int, int, int);
+    static void (*copy_sub3d)(unsigned, int, int, int, int, int, int, int, int);
     static void (*blit_fb)(int, int, int, int, int, int, int, int, unsigned, unsigned);
     static unsigned (*check_fb)(unsigned);
     static unsigned char (*is_en)(unsigned);
@@ -685,6 +724,11 @@ static void gles_copy_image_sub_data_fallback(
         fb_tex2d = gl_proc("glFramebufferTexture2D");
         fb_tex_layer = gl_proc("glFramebufferTextureLayer");
         fb_rb = gl_proc("glFramebufferRenderbuffer");
+        bind_tex = gl_proc("glBindTexture");
+        copy_sub2d = gl_proc("glCopyTexSubImage2D");
+        copy_sub3d = gl_proc("glCopyTexSubImage3D");
+        if (!copy_sub3d) copy_sub3d = gl_proc("glCopyTexSubImage3DEXT");
+        if (!copy_sub3d) copy_sub3d = gl_proc("glCopyTexSubImage3DOES");
         blit_fb = gl_proc("glBlitFramebuffer");
         check_fb = gl_proc("glCheckFramebufferStatus");
         is_en = gl_proc("glIsEnabled");
@@ -692,36 +736,52 @@ static void gles_copy_image_sub_data_fallback(
         fn_dis = gl_proc("glDisable");
     }
 
-    if (!bind_fb || !gen_fb || !fb_tex2d || !blit_fb) {
-        tl_log_line("gl: copy_image fallback unavailable (missing FBO entry points)");
+    if (!bind_fb || !gen_fb || !fb_tex2d || !bind_tex || !copy_sub2d) {
+        tl_log_line("gl: copy_image fallback unavailable (missing GL entry points)");
         return;
     }
 
     static unsigned s_copy_fbo_src = 0;
-    static unsigned s_copy_fbo_dst = 0;
     static pthread_mutex_t s_copy_mu = PTHREAD_MUTEX_INITIALIZER;
 
     pthread_mutex_lock(&s_copy_mu);
 
     if (s_copy_fbo_src == 0) {
-        unsigned fbos[2] = {0, 0};
-        gen_fb(2, fbos);
-        s_copy_fbo_src = fbos[0];
-        s_copy_fbo_dst = fbos[1];
+        gen_fb(1, &s_copy_fbo_src);
     }
 
-    int prev_read_fb = 0, prev_draw_fb = 0;
+    int prev_read_fb = 0;
     a_glGetIntegerv(0x8CAA /* GL_READ_FRAMEBUFFER_BINDING */, &prev_read_fb);
-    a_glGetIntegerv(0x8CA6 /* GL_DRAW_FRAMEBUFFER_BINDING */, &prev_draw_fb);
 
     int scissor_en = is_en ? is_en(0x0C11 /* GL_SCISSOR_TEST */) : 0;
     if (scissor_en && fn_dis) fn_dis(0x0C11);
 
     bind_fb(0x8CA8 /* GL_READ_FRAMEBUFFER */, s_copy_fbo_src);
-    bind_fb(0x8CA9 /* GL_DRAW_FRAMEBUFFER */, s_copy_fbo_dst);
+
+    /* Determine destination binding target and query current texture binding to restore */
+    unsigned dst_bind_target = 0x0DE1 /* GL_TEXTURE_2D */;
+    unsigned dst_query_target = 0x8069 /* GL_TEXTURE_BINDING_2D */;
+    bool dst_is_3d = false;
+
+    if (dstTarget == 0x8C1A /* GL_TEXTURE_2D_ARRAY */) {
+        dst_bind_target = 0x8C1A;
+        dst_query_target = 0x8C1D /* GL_TEXTURE_BINDING_2D_ARRAY */;
+        dst_is_3d = true;
+    } else if (dstTarget == 0x806F /* GL_TEXTURE_3D */) {
+        dst_bind_target = 0x806F;
+        dst_query_target = 0x806A /* GL_TEXTURE_BINDING_3D */;
+        dst_is_3d = true;
+    } else if (dstTarget == 0x8513 /* GL_TEXTURE_CUBE_MAP */ || (dstTarget >= 0x8515 && dstTarget <= 0x851A)) {
+        dst_bind_target = 0x8513 /* GL_TEXTURE_CUBE_MAP */;
+        dst_query_target = 0x8514 /* GL_TEXTURE_BINDING_CUBE_MAP */;
+    }
+
+    int prev_tex_binding = 0;
+    a_glGetIntegerv(dst_query_target, &prev_tex_binding);
+    bind_tex(dst_bind_target, dstName);
 
     for (int slice = 0; slice < depth; slice++) {
-        /* Attach source slice */
+        /* Attach source slice to READ_FRAMEBUFFER */
         if (srcTarget == 0x0DE1 /* GL_TEXTURE_2D */) {
             fb_tex2d(0x8CA8, 0x8CE0 /* GL_COLOR_ATTACHMENT0 */, 0x0DE1, srcName, srcLevel);
         } else if (srcTarget == 0x8C1A /* GL_TEXTURE_2D_ARRAY */ || srcTarget == 0x806F /* GL_TEXTURE_3D */) {
@@ -736,49 +796,57 @@ static void gles_copy_image_sub_data_fallback(
             fb_rb(0x8CA8, 0x8CE0, 0x8D41, srcName);
         }
 
-        /* Attach destination slice */
-        if (dstTarget == 0x0DE1 /* GL_TEXTURE_2D */) {
-            fb_tex2d(0x8CA9, 0x8CE0 /* GL_COLOR_ATTACHMENT0 */, 0x0DE1, dstName, dstLevel);
-        } else if (dstTarget == 0x8C1A /* GL_TEXTURE_2D_ARRAY */ || dstTarget == 0x806F /* GL_TEXTURE_3D */) {
-            if (fb_tex_layer) {
-                fb_tex_layer(0x8CA9, 0x8CE0, dstName, dstLevel, dstZ + slice);
-            }
-        } else if (dstTarget >= 0x8515 && dstTarget <= 0x851A) {
-            fb_tex2d(0x8CA9, 0x8CE0, dstTarget, dstName, dstLevel);
-        } else if (dstTarget == 0x8513 /* GL_TEXTURE_CUBE_MAP */) {
-            fb_tex2d(0x8CA9, 0x8CE0, 0x8515 + (unsigned)(dstZ + slice), dstName, dstLevel);
-        } else if (dstTarget == 0x8D41 /* GL_RENDERBUFFER */ && fb_rb) {
-            fb_rb(0x8CA9, 0x8CE0, 0x8D41, dstName);
-        }
-
-        unsigned blit_mask = 0x4000 /* GL_COLOR_BUFFER_BIT */;
+        /* Check framebuffer completeness */
         if (check_fb && check_fb(0x8CA8) != 0x8CD5 /* GL_FRAMEBUFFER_COMPLETE */) {
-            /* If color attachment is incomplete, texture might be depth/stencil */
-            fb_tex2d(0x8CA8, 0x8CE0, 0x0DE1, 0, 0);
-            fb_tex2d(0x8CA9, 0x8CE0, 0x0DE1, 0, 0);
-            if (srcTarget == 0x0DE1) fb_tex2d(0x8CA8, 0x8D00 /* GL_DEPTH_ATTACHMENT */, 0x0DE1, srcName, srcLevel);
-            else if (fb_tex_layer && (srcTarget == 0x8C1A || srcTarget == 0x806F)) fb_tex_layer(0x8CA8, 0x8D00, srcName, srcLevel, srcZ + slice);
-            if (dstTarget == 0x0DE1) fb_tex2d(0x8CA9, 0x8D00 /* GL_DEPTH_ATTACHMENT */, 0x0DE1, dstName, dstLevel);
-            else if (fb_tex_layer && (dstTarget == 0x8C1A || dstTarget == 0x806F)) fb_tex_layer(0x8CA9, 0x8D00, dstName, dstLevel, dstZ + slice);
-            blit_mask = 0x0100 /* GL_DEPTH_BUFFER_BIT */;
+            /* If color attachment is incomplete (e.g. depth texture), try fallback to depth blit */
+            if (blit_fb) {
+                static unsigned s_copy_fbo_dst = 0;
+                if (!s_copy_fbo_dst) gen_fb(1, &s_copy_fbo_dst);
+                int prev_draw_fb = 0;
+                a_glGetIntegerv(0x8CA6 /* GL_DRAW_FRAMEBUFFER_BINDING */, &prev_draw_fb);
+                bind_fb(0x8CA9 /* GL_DRAW_FRAMEBUFFER */, s_copy_fbo_dst);
+
+                fb_tex2d(0x8CA8, 0x8CE0, 0x0DE1, 0, 0);
+                if (srcTarget == 0x0DE1) fb_tex2d(0x8CA8, 0x8D00 /* GL_DEPTH_ATTACHMENT */, 0x0DE1, srcName, srcLevel);
+                else if (fb_tex_layer && (srcTarget == 0x8C1A || srcTarget == 0x806F)) fb_tex_layer(0x8CA8, 0x8D00, srcName, srcLevel, srcZ + slice);
+
+                if (dstTarget == 0x0DE1) fb_tex2d(0x8CA9, 0x8D00, 0x0DE1, dstName, dstLevel);
+                else if (fb_tex_layer && (dstTarget == 0x8C1A || dstTarget == 0x806F)) fb_tex_layer(0x8CA9, 0x8D00, dstName, dstLevel, dstZ + slice);
+
+                blit_fb(srcX, srcY, srcX + width, srcY + height,
+                        dstX, dstY, dstX + width, dstY + height,
+                        0x0100 /* GL_DEPTH_BUFFER_BIT */, 0x2600 /* GL_NEAREST */);
+
+                fb_tex2d(0x8CA8, 0x8D00, 0x0DE1, 0, 0);
+                fb_tex2d(0x8CA9, 0x8D00, 0x0DE1, 0, 0);
+                bind_fb(0x8CA9, (unsigned)prev_draw_fb);
+            }
+            continue;
         }
 
-        blit_fb(srcX, srcY, srcX + width, srcY + height,
-                dstX, dstY, dstX + width, dstY + height,
-                blit_mask, 0x2600 /* GL_NEAREST */);
+        /* Perform copy from READ_FRAMEBUFFER directly into destination texture */
+        if (dst_is_3d && copy_sub3d) {
+            copy_sub3d(dst_bind_target, dstLevel, dstX, dstY, dstZ + slice, srcX, srcY, width, height);
+        } else if (dstTarget == 0x8513 /* GL_TEXTURE_CUBE_MAP */) {
+            copy_sub2d(0x8515 + (unsigned)(dstZ + slice), dstLevel, dstX, dstY, srcX, srcY, width, height);
+        } else if (dstTarget >= 0x8515 && dstTarget <= 0x851A) {
+            copy_sub2d(dstTarget, dstLevel, dstX, dstY, srcX, srcY, width, height);
+        } else {
+            copy_sub2d(0x0DE1 /* GL_TEXTURE_2D */, dstLevel, dstX, dstY, srcX, srcY, width, height);
+        }
     }
 
-    /* Detach attachments */
+    /* Detach source attachment */
     fb_tex2d(0x8CA8, 0x8CE0, 0x0DE1, 0, 0);
-    fb_tex2d(0x8CA9, 0x8CE0, 0x0DE1, 0, 0);
-    fb_tex2d(0x8CA8, 0x8D00, 0x0DE1, 0, 0);
-    fb_tex2d(0x8CA9, 0x8D00, 0x0DE1, 0, 0);
 
-    /* Restore previous state */
+    /* Restore bindings and state */
+    bind_tex(dst_bind_target, (unsigned)prev_tex_binding);
     bind_fb(0x8CA8, (unsigned)prev_read_fb);
-    bind_fb(0x8CA9, (unsigned)prev_draw_fb);
 
     if (scissor_en && fn_en) fn_en(0x0C11);
+
+    /* Clear any latched errors from fallback probe */
+    while (gl_proc_get_error());
 
     pthread_mutex_unlock(&s_copy_mu);
 }
@@ -805,7 +873,7 @@ static void w_glCopyImageSubData(unsigned sn, unsigned st, int sl, int sx, int s
         r_glCopyImageSubData(sn, st, sl, sx, sy, sz, dn, dt, (int)dl, (int)dx, (int)dy, (int)dz, (int)w, (int)h, (int)d);
         unsigned err = gl_proc_get_error();
         if (err == 0) return;
-        if (c < 10) tl_log_line("gl: host glCopyImageSubData returned err %#x, running FBO blit fallback", err);
+        if (c < 10) tl_log_line("gl: host glCopyImageSubData returned err %#x, running copy fallback", err);
     }
     gles_copy_image_sub_data_fallback(sn, st, sl, sx, sy, sz, dn, dt, (int)dl, (int)dx, (int)dy, (int)dz, (int)w, (int)h, (int)d);
 }
@@ -878,24 +946,56 @@ static void w_glSampleCoverage(float v, unsigned i) { r_glSampleCoverage(v, i & 
 static void (*r_glTexImage2D)(unsigned, int, int, int, int, int, unsigned, unsigned, const void *);
 static void w_glTexImage2D(unsigned target, int level, int internalformat, int width, int height, int border, unsigned format, unsigned type, const void *pixels)
 {
+    if (!r_glTexImage2D) r_glTexImage2D = gl_proc("glTexImage2D");
+    if (!r_glTexImage2D) return;
+
+    while (gl_proc_get_error());
     r_glTexImage2D(target, level, internalformat, width, height, border, format, type, pixels);
+    unsigned err = gl_proc_get_error();
+    if (err != 0 && (unsigned)internalformat == 0x8C41 /* GL_SRGB8 */) {
+        while (gl_proc_get_error());
+        r_glTexImage2D(target, level, 0x8C43 /* GL_SRGB8_ALPHA8 */, width, height, border, format, type, pixels);
+        err = gl_proc_get_error();
+        tl_log_line("gl: glTexImage2D fallback intfmt 0x8C41 -> 0x8C43: err %#x", err);
+    }
+
     static atomic_int count;
     int c = atomic_fetch_add(&count, 1);
-    if (c < 30 || (c % 100 == 0)) {
-        unsigned err = gl_proc_get_error();
-        tl_log_line("gl: glTexImage2D(target %#x, lvl %d, intfmt %#x, %dx%d, fmt %#x, type %#x) -> err %#x", target, level, internalformat, width, height, format, type, err);
+    if (c < 30 || (c % 100 == 0) || err != 0) {
+        tl_log_line("gl: glTexImage2D(target %#x, lvl %d, intfmt %#x, %dx%d, fmt %#x, type %#x) -> err %#x",
+                    target, level, internalformat, width, height, format, type, err);
     }
 }
 
 static void (*r_glTexStorage2D)(unsigned, int, unsigned, int, int);
 static void w_glTexStorage2D(unsigned target, int levels, unsigned internalformat, int width, int height)
 {
+    if (!r_glTexStorage2D) r_glTexStorage2D = gl_proc("glTexStorage2D");
+    if (!r_glTexStorage2D) return;
+
+    while (gl_proc_get_error());
     r_glTexStorage2D(target, levels, internalformat, width, height);
+    unsigned err = gl_proc_get_error();
+    if (err != 0 && internalformat == 0x8C41 /* GL_SRGB8 */) {
+        while (gl_proc_get_error());
+        r_glTexStorage2D(target, levels, 0x8C43 /* GL_SRGB8_ALPHA8 */, width, height);
+        err = gl_proc_get_error();
+        tl_log_line("gl: glTexStorage2D fallback intfmt 0x8C41 -> 0x8C43: err %#x", err);
+    } else if (err != 0 && internalformat == 0x1908 /* GL_RGBA un-sized */) {
+        while (gl_proc_get_error());
+        r_glTexStorage2D(target, levels, 0x8058 /* GL_RGBA8 */, width, height);
+        err = gl_proc_get_error();
+    } else if (err != 0 && internalformat == 0x1907 /* GL_RGB un-sized */) {
+        while (gl_proc_get_error());
+        r_glTexStorage2D(target, levels, 0x8051 /* GL_RGB8 */, width, height);
+        err = gl_proc_get_error();
+    }
+
     static atomic_int count;
     int c = atomic_fetch_add(&count, 1);
-    if (c < 30 || (c % 100 == 0)) {
-        unsigned err = gl_proc_get_error();
-        tl_log_line("gl: glTexStorage2D(target %#x, lvls %d, intfmt %#x, %dx%d) -> err %#x", target, levels, internalformat, width, height, err);
+    if (c < 30 || (c % 100 == 0) || err != 0) {
+        tl_log_line("gl: glTexStorage2D(target %#x, lvls %d, intfmt %#x, %dx%d) -> err %#x",
+                    target, levels, internalformat, width, height, err);
     }
 }
 
@@ -1065,8 +1165,6 @@ static bool ext_hidden(const char *name, size_t n)
 static const char *const k_extra_exts[] = {
     "GL_EXT_copy_image",
     "GL_OES_copy_image",
-    "GL_EXT_draw_elements_base_vertex",
-    "GL_OES_draw_elements_base_vertex",
     "GL_EXT_texture_filter_anisotropic",
 };
 #define EXTRA_EXT_COUNT (sizeof(k_extra_exts) / sizeof(k_extra_exts[0]))

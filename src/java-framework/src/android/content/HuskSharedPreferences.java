@@ -20,26 +20,114 @@ public final class HuskSharedPreferences implements SharedPreferences {
         for (int i = 0; i < s.length(); i++) { char c = s.charAt(i); if (c == '\\' && i + 1 < s.length()) { char n = s.charAt(++i); b.append(n == 'n' ? '\n' : n); } else b.append(c); }
         return b.toString();
     }
+    private void loadXml(File f) {
+        try (BufferedReader r = new BufferedReader(new InputStreamReader(new FileInputStream(f), "UTF-8"))) {
+            String line;
+            String curName = null;
+            HashSet<String> curSet = null;
+            while ((line = r.readLine()) != null) {
+                line = line.trim();
+                if (line.startsWith("<string name=\"")) {
+                    int n1 = 14, n2 = line.indexOf('"', n1);
+                    if (n2 > 0) {
+                        String name = line.substring(n1, n2);
+                        int v1 = line.indexOf('>', n2) + 1;
+                        int v2 = line.lastIndexOf('<');
+                        if (v1 > 0 && v2 >= v1) map.put(name, line.substring(v1, v2));
+                        else if (line.endsWith("/>")) map.put(name, "");
+                    }
+                } else if (line.startsWith("<int name=\"")) {
+                    parseXmlAttr(line, "int");
+                } else if (line.startsWith("<long name=\"")) {
+                    parseXmlAttr(line, "long");
+                } else if (line.startsWith("<float name=\"")) {
+                    parseXmlAttr(line, "float");
+                } else if (line.startsWith("<boolean name=\"")) {
+                    parseXmlAttr(line, "boolean");
+                } else if (line.startsWith("<set name=\"")) {
+                    int n1 = 11, n2 = line.indexOf('"', n1);
+                    if (n2 > 0) {
+                        curName = line.substring(n1, n2);
+                        curSet = new HashSet<>();
+                    }
+                } else if (line.startsWith("<string>") && curSet != null) {
+                    int v1 = 8, v2 = line.lastIndexOf('<');
+                    if (v2 >= v1) curSet.add(line.substring(v1, v2));
+                } else if (line.startsWith("</set>") && curName != null && curSet != null) {
+                    map.put(curName, curSet);
+                    curName = null;
+                    curSet = null;
+                }
+            }
+        } catch (Exception ignored) { }
+    }
+
+    private void parseXmlAttr(String line, String type) {
+        try {
+            int n1 = line.indexOf("name=\"") + 6;
+            int n2 = line.indexOf('"', n1);
+            int v1 = line.indexOf("value=\"") + 7;
+            int v2 = line.indexOf('"', v1);
+            if (n1 > 5 && n2 > n1 && v1 > 6 && v2 > v1) {
+                String name = line.substring(n1, n2);
+                String val = line.substring(v1, v2);
+                switch (type) {
+                case "int": map.put(name, Integer.parseInt(val)); break;
+                case "long": map.put(name, Long.parseLong(val)); break;
+                case "float": map.put(name, Float.parseFloat(val)); break;
+                case "boolean": map.put(name, Boolean.parseBoolean(val)); break;
+                }
+            }
+        } catch (Exception ignored) { }
+    }
+
     private void load() {
         if (!file.exists()) return;
         try (BufferedReader r = new BufferedReader(new InputStreamReader(new FileInputStream(file), "UTF-8"))) {
             String line;
+            boolean firstLine = true;
             while ((line = r.readLine()) != null) {
+                if (firstLine) {
+                    firstLine = false;
+                    String tr = line.trim();
+                    if (tr.startsWith("<?xml") || tr.startsWith("<map")) {
+                        loadXml(file);
+                        return;
+                    }
+                }
                 if (line.length() < 3) continue;
                 char t = line.charAt(0);
-                int sp = line.indexOf(' ', 2);
+                int sp = -1;
+                for (int i = 2; i < line.length(); i++) {
+                    if (line.charAt(i) == ' ') {
+                        int backslashes = 0;
+                        for (int j = i - 1; j >= 0 && line.charAt(j) == '\\'; j--) {
+                            backslashes++;
+                        }
+                        if ((backslashes % 2) == 0) {
+                            sp = i;
+                            break;
+                        }
+                    }
+                }
                 if (sp < 0) continue;
-                String k = unesc(line.substring(2, sp)), v = line.substring(sp + 1);
-                switch (t) {
-                case 's': map.put(k, unesc(v)); break;
-                case 'i': map.put(k, Integer.parseInt(v)); break;
-                case 'l': map.put(k, Long.parseLong(v)); break;
-                case 'f': map.put(k, Float.parseFloat(v)); break;
-                case 'b': map.put(k, Boolean.parseBoolean(v)); break;
-                case 'S': { HashSet<String> set = new HashSet<>(); for (String p : v.split("\u0001", -1)) if (!p.isEmpty()) set.add(unesc(p)); map.put(k, set); break; }
+                String k = unesc(line.substring(2, sp).replace("\\ ", " "));
+                String v = line.substring(sp + 1);
+                try {
+                    switch (t) {
+                    case 's': map.put(k, unesc(v)); break;
+                    case 'i': map.put(k, Integer.parseInt(v.trim())); break;
+                    case 'l': map.put(k, Long.parseLong(v.trim())); break;
+                    case 'f': map.put(k, Float.parseFloat(v.trim())); break;
+                    case 'b': map.put(k, Boolean.parseBoolean(v.trim())); break;
+                    case 'S': { HashSet<String> set = new HashSet<>(); for (String p : v.split("\u0001", -1)) if (!p.isEmpty()) set.add(unesc(p)); map.put(k, set); break; }
+                    default: map.put(k, unesc(v)); break;
+                    }
+                } catch (Exception ex) {
+                    map.put(k, unesc(v));
                 }
             }
-        } catch (IOException e) { }
+        } catch (Exception ignored) { }
     }
     private synchronized boolean save() {
         file.getParentFile().mkdirs();
