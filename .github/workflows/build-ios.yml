@@ -21,7 +21,7 @@ concurrency:
 jobs:
   build:
     name: Build Husk IPA
-    runs-on: macos-14
+    runs-on: macos-15
     timeout-minutes: 60
 
     steps:
@@ -80,12 +80,12 @@ jobs:
           if-no-files-found: error
 
       - name: Publish Release
-        if: startsWith(github.ref, 'refs/tags/') || (github.event_name == 'workflow_dispatch' && inputs.create_release)
+        if: startsWith(github.ref, 'refs/tags/') || (github.event_name == 'workflow_dispatch' && inputs.create_release) || github.event_name == 'push'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           TAG="${{ github.ref_name }}"
-          if [ "${{ github.event_name }}" = "workflow_dispatch" ] && ! [[ "$TAG" =~ ^v[0-9] ]]; then
+          if ! [[ "$TAG" =~ ^v[0-9] ]]; then
             TAG="v3.4-fixed-$(date +'%Y%m%d%H%M')"
           fi
           COMMIT="$(git rev-parse --short HEAD)"
