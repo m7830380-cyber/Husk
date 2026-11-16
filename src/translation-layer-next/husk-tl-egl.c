@@ -443,8 +443,15 @@ static void tex_swap(EGLDisplay d, EGLSurface s, void *win)
     a_glBindFramebuffer(0x8CA8, (unsigned)old_fb);
     tl_nwindow_post(win, buf, w, h, true);
 }
+
+/* 1st-person view countdown: Keeps 1st-person view stable across frames without any single-frame flicker */
+static atomic_int s_fp_hands_countdown;
+
 static EGLBoolean w_eglSwapBuffers(EGLDisplay d, EGLSurface s)
 {
+    int cd = atomic_load(&s_fp_hands_countdown);
+    if (cd > 0) atomic_fetch_sub(&s_fp_hands_countdown, 1);
+
     void *texwin = tex_window_of(s);
     if (texwin) { tex_swap(d, s, texwin); return EGL_TRUE; }
     unsigned long n = atomic_fetch_add(&E.presented, 1) + 1;
@@ -545,28 +552,44 @@ static void w_glTexStorage3D(unsigned target, int levels, unsigned internalforma
                     /* Character & NPC body parts (depth 5: Head, Torso, Arms, Legs, Shoes) */
                     bool is_bump = (internalformat == 0x8058 /* GL_RGBA8 */);
                     for (int s = 0; s < depth; s++) {
-                        uint8_t r = 235, g = 195, b = 165, a = 255;
+                        uint8_t r = 155, g = 145, b = 135, a = 255;
                         if (is_bump) {
                             /* Flat tangent-space normal (0, 0, 1):
                              * Set a = 128 (0.5) so that both standard RGB unpack (r,g,b) and Unity DXT5nm
                              * unpack (normal.x = a * 2 - 1, normal.y = g * 2 - 1) decode to (0, 0, 1).
-                             * When a was 255, DXT5nm decoded normal.x = +1.0, tilting all normals 90 degrees!
                              */
                             r = 128; g = 128; b = 255; a = 128;
                         } else {
+                            /* Calibrated for GoreBox's sunlight multiplier (1.500, 0.984, 0.674):
+                             * Never clips or blows out, preserving clean realistic skin and clothing!
+                             */
                             switch (s) {
-                                case 0: r = 215; g = 185; b = 165; break; /* Head / Face skin */
-                                case 1: r = 55;  g = 95;  b = 165; break; /* Torso / Navy Shirt */
-                                case 2: r = 215; g = 185; b = 165; break; /* Arms / Hands skin */
-                                case 3: r = 45;  g = 55;  b = 75;  break; /* Legs / Dark Jeans */
-                                case 4: r = 35;  g = 35;  b = 40;  break; /* Shoes / Boots */
-                                default: r = 200; g = 200; b = 200; break;
+                                case 0: r = 155; g = 145; b = 135; break; /* Head / Face natural skin */
+                                case 1: r = 45;  g = 75;  b = 135; break; /* Torso / Navy Shirt */
+                                case 2: r = 155; g = 145; b = 135; break; /* Arms / Hands natural skin */
+                                case 3: r = 40;  g = 50;  b = 75;  break; /* Legs / Dark Jeans */
+                                case 4: r = 30;  g = 30;  b = 35;  break; /* Shoes / Boots */
+                                default: r = 120; g = 120; b = 120; break;
                             }
                         }
-                        uint32_t pixel = (uint32_t)r | ((uint32_t)g << 8) | ((uint32_t)b << 16) | ((uint32_t)a << 24);
                         uint32_t *p32 = (uint32_t *)slice_data;
-                        size_t npix = (size_t)width * height;
-                        for (size_t p = 0; p < npix; p++) p32[p] = pixel;
+                        if (is_bump) {
+                            uint32_t pixel = (uint32_t)r | ((uint32_t)g << 8) | ((uint32_t)b << 16) | ((uint32_t)a << 24);
+                            size_t npix = (size_t)width * height;
+                            for (size_t p = 0; p < npix; p++) p32[p] = pixel;
+                        } else {
+                            for (int y = 0; y < height; y++) {
+                                for (int x = 0; x < width; x++) {
+                                    uint32_t h = (uint32_t)(x * 374761393u + y * 668265263u + s * 314159265u);
+                                    h = (h ^ (h >> 13)) * 1274126177u;
+                                    int grain = (int)((h >> 24) % 9) - 4; /* Subtle fabric/skin texture variation */
+                                    int cr = r + grain; if (cr < 0) cr = 0; if (cr > 255) cr = 255;
+                                    int cg = g + grain; if (cg < 0) cg = 0; if (cg > 255) cg = 255;
+                                    int cb = b + grain; if (cb < 0) cb = 0; if (cb > 255) cb = 255;
+                                    p32[y * width + x] = (uint32_t)cr | ((uint32_t)cg << 8) | ((uint32_t)cb << 16) | ((uint32_t)a << 24);
+                                }
+                            }
+                        }
                         r_glTexSubImage3D(target, 0, 0, 0, s, width, height, 1, upload_fmt, 0x1401 /* GL_UNSIGNED_BYTE */, slice_data);
                     }
                 } else if (depth == 2) {
@@ -583,23 +606,33 @@ static void w_glTexStorage3D(unsigned target, int levels, unsigned internalforma
                                 for (size_t p = 0; p < npix; p++) p32[p] = norm_pixel;
                             } else {
                                 /* _TerrainSpec: Low specularity matte dirt/ground */
-                                uint32_t spec_pixel = 30 | (30 << 8) | (30 << 16) | (255u << 24);
+                                uint32_t spec_pixel = 25 | (25 << 8) | (25 << 16) | (255u << 24);
                                 uint32_t *p32 = (uint32_t *)slice_data;
                                 size_t npix = (size_t)width * height;
                                 for (size_t p = 0; p < npix; p++) p32[p] = spec_pixel;
                             }
                         } else {
                             /* _TerrainAlbedo / _TerrainEmission (0x8C43):
-                             * Slice 0: Natural earthy dirt road brown - neutral, no reddish clay tint under warm sunlight
-                             * Slice 1: Natural ground earthy green/brown
+                             * Slice 0: Natural gravel / dirt road (65, 78, 90). Under warm sunlight (1.50, 0.98, 0.67),
+                             * this yields (97, 76, 60) - authentic neutral earthy gravel dirt road, ZERO reddish clay!
+                             * Slice 1: Natural ground / grass (55, 85, 75). Under warm sunlight, yields (82, 83, 50) -
+                             * authentic natural earthy green-brown ground.
                              */
-                            uint8_t r = (s == 0) ? 85  : 70;
-                            uint8_t g = (s == 0) ? 90  : 95;
-                            uint8_t b = (s == 0) ? 82  : 65;
-                            uint32_t pixel = (uint32_t)r | ((uint32_t)g << 8) | ((uint32_t)b << 16) | (255u << 24);
+                            uint8_t base_r = (s == 0) ? 65 : 55;
+                            uint8_t base_g = (s == 0) ? 78 : 85;
+                            uint8_t base_b = (s == 0) ? 90 : 75;
                             uint32_t *p32 = (uint32_t *)slice_data;
-                            size_t npix = (size_t)width * height;
-                            for (size_t p = 0; p < npix; p++) p32[p] = pixel;
+                            for (int y = 0; y < height; y++) {
+                                for (int x = 0; x < width; x++) {
+                                    uint32_t h = (uint32_t)(x * 374761393u + y * 668265263u + (s + 1) * 314159265u);
+                                    h = (h ^ (h >> 13)) * 1274126177u;
+                                    int grain = (int)((h >> 24) % 15) - 7; /* Natural dirt/gravel roughness */
+                                    int cr = base_r + grain; if (cr < 0) cr = 0; if (cr > 255) cr = 255;
+                                    int cg = base_g + grain; if (cg < 0) cg = 0; if (cg > 255) cg = 255;
+                                    int cb = base_b + grain; if (cb < 0) cb = 0; if (cb > 255) cb = 255;
+                                    p32[y * width + x] = (uint32_t)cr | ((uint32_t)cg << 8) | ((uint32_t)cb << 16) | (255u << 24);
+                                }
+                            }
                         }
                         r_glTexSubImage3D(target, 0, 0, 0, s, width, height, 1, upload_fmt, 0x1401 /* GL_UNSIGNED_BYTE */, slice_data);
                     }
@@ -1149,12 +1182,12 @@ static int classify_program(unsigned prog)
 
     int cat = 0; /* OPAQUE */
     if (is_role) {
-        cat = 1; /* ROLE (NPC / Character) */
+        cat = 1; /* ROLE (NPC / Character / Viewmodel) */
     } else if (is_terrain) {
         cat = 0; /* TERRAIN (Opaque) */
     } else if (is_additive) {
         cat = 3; /* ADDITIVE (Muzzle flash / gun fx) */
-    } else if (is_wound || is_particle || (has_tex && !has_shadowmap)) {
+    } else if (is_wound || is_particle) {
         cat = 2; /* TRANSPARENT (Wound splatters, dust, dirt particles, blood decals) */
     }
 
@@ -1175,6 +1208,7 @@ static void enhance_draw_pipeline(int curProg)
     static void (*get_int_i)(unsigned, unsigned, int *) = NULL;
     static void (*set_blend_fn)(unsigned, unsigned, unsigned, unsigned) = NULL;
     static void (*set_depth_mask)(unsigned) = NULL;
+    static void (*set_depth_range)(float, float) = NULL;
     static void (*fn_enable)(unsigned) = NULL;
     static unsigned char (*fn_is_en)(unsigned) = NULL;
     static void *(*map_buf)(unsigned, intptr_t, intptr_t, unsigned) = NULL;
@@ -1190,10 +1224,23 @@ static void enhance_draw_pipeline(int curProg)
         get_int_i = gl_proc("glGetIntegeri_v");
         set_blend_fn = gl_proc("glBlendFuncSeparate");
         set_depth_mask = gl_proc("glDepthMask");
+        set_depth_range = gl_proc("glDepthRangef");
         fn_enable = gl_proc("glEnable");
         fn_is_en = gl_proc("glIsEnabled");
         map_buf = gl_proc("glMapBufferRange");
         unmap_buf = gl_proc("glUnmapBuffer");
+    }
+
+    /* Industry-standard FPS Viewmodel depth compression:
+     * Compress 1st-person hands (prog 44) and weapon (prog 46) depth to [0.0, 0.25]
+     * so they never clip into world geometry or nearby walls!
+     */
+    if (set_depth_range) {
+        if (curProg == 44 || curProg == 46) {
+            set_depth_range(0.0f, 0.25f);
+        } else {
+            set_depth_range(0.0f, 1.0f);
+        }
     }
 
     int cat = classify_program((unsigned)curProg);
@@ -1315,6 +1362,21 @@ static void w_glDrawElements(unsigned mode, int count, unsigned type, const void
     int c = atomic_fetch_add(&draw_count, 1);
     int curProg = 0;
     a_glGetIntegerv(0x8B8D /* GL_CURRENT_PROGRAM */, &curProg);
+
+    if (curProg == 44 || curProg == 46) {
+        /* Viewmodel hands or weapon drawn: keep 1st-person active for 30 frames */
+        atomic_store(&s_fp_hands_countdown, 30);
+    } else if (curProg == 45) {
+        if (atomic_load(&s_fp_hands_countdown) > 0) {
+            /* 1st-person view is active: cull the overlapping local player upper body
+             * (Head=2538, Torso=2256, 3rd-person Arms=4512) so it doesn't clip into the camera!
+             * Keep Legs=7488 visible when looking down, and NEVER touch NPCs (counts > 7488 or other)!
+             */
+            if (count == 2538 || count == 2256 || count == 4512) {
+                return;
+            }
+        }
+    }
 
     if (curProg >= 40) {
         inspect_prog_draw((unsigned)curProg, count);
