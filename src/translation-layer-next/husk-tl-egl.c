@@ -79,9 +79,32 @@ static void (*a_glPixelStorei)(unsigned, int);
 
 static void *gl_proc(const char *name)
 {
+    if (!name) return NULL;
     void *p = a_eglGetProcAddress ? a_eglGetProcAddress(name) : NULL;
     if (!p && E.gles) p = dlsym(E.gles, name);
-    return p;
+    if (p) return p;
+
+    size_t len = strlen(name);
+    char buf[128];
+    if (len >= 4 && (!strcmp(name + len - 3, "EXT") || !strcmp(name + len - 3, "OES") || !strcmp(name + len - 3, "KHR"))) {
+        if (len - 3 < sizeof(buf)) {
+            memcpy(buf, name, len - 3);
+            buf[len - 3] = '\0';
+            p = a_eglGetProcAddress ? a_eglGetProcAddress(buf) : NULL;
+            if (!p && E.gles) p = dlsym(E.gles, buf);
+            if (p) return p;
+        }
+    } else {
+        static const char *const sfx[] = { "EXT", "OES", "KHR" };
+        for (int i = 0; i < 3; i++) {
+            if (snprintf(buf, sizeof(buf), "%s%s", name, sfx[i]) < (int)sizeof(buf)) {
+                p = a_eglGetProcAddress ? a_eglGetProcAddress(buf) : NULL;
+                if (!p && E.gles) p = dlsym(E.gles, buf);
+                if (p) return p;
+            }
+        }
+    }
+    return NULL;
 }
 
 static unsigned gl_proc_get_error(void)
@@ -444,14 +467,8 @@ static void tex_swap(EGLDisplay d, EGLSurface s, void *win)
     tl_nwindow_post(win, buf, w, h, true);
 }
 
-/* 1st-person view countdown: Keeps 1st-person view stable across frames without any single-frame flicker */
-static atomic_int s_fp_hands_countdown;
-
 static EGLBoolean w_eglSwapBuffers(EGLDisplay d, EGLSurface s)
 {
-    int cd = atomic_load(&s_fp_hands_countdown);
-    if (cd > 0) atomic_fetch_sub(&s_fp_hands_countdown, 1);
-
     void *texwin = tex_window_of(s);
     if (texwin) { tex_swap(d, s, texwin); return EGL_TRUE; }
     unsigned long n = atomic_fetch_add(&E.presented, 1) + 1;
@@ -529,120 +546,10 @@ static void w_glTexStorage3D(unsigned target, int levels, unsigned internalforma
 {
     if (!r_glTexStorage3D) r_glTexStorage3D = gl_proc("glTexStorage3D");
     if (r_glTexStorage3D) r_glTexStorage3D(target, levels, internalformat, width, height, depth);
-    tl_log_line("gl: glTexStorage3D(target %#x, lvls %d, intfmt %#x, %dx%dx%d) -> err %#x",
-                target, levels, internalformat, width, height, depth, gl_proc_get_error());
-
-    /* GoreBox 2D Texture Array Auto-Populator:
-     * - depth == 5: Characters & NPCs (_RoleMaps 0x8C43, _RoleBumps 0x8058).
-     *   Populate 5 body part slices with human skin / clothing colors and flat tangent normal.
-     * - depth == 2: Terrain (_TerrainAlbedo 0x8C43, _TerrainNormal 0x8058, _TerrainSpec 0x8058, _TerrainHeight 0x8229).
-     *   Populate slice 0 (dirt road) with natural earthy dirt road brown, slice 1 with natural ground brown/green,
-     *   normal map with flat tangent normals (128, 128, 255), spec with low specularity (30), and height with neutral 128!
-     */
-    if (target == 0x8C1A /* GL_TEXTURE_2D_ARRAY */ && depth >= 2 && width >= 4 && height >= 4) {
-        if (!r_glTexSubImage3D) r_glTexSubImage3D = gl_proc("glTexSubImage3D");
-        if (r_glTexSubImage3D) {
-            bool is_r8 = (internalformat == 0x8229 /* GL_R8 */);
-            unsigned upload_fmt = is_r8 ? 0x1903 /* GL_RED */ : 0x1908 /* GL_RGBA */;
-            int bpp = is_r8 ? 1 : 4;
-            size_t slice_bytes = (size_t)width * height * (size_t)bpp;
-            uint8_t *slice_data = malloc(slice_bytes);
-            if (slice_data) {
-                if (depth >= 5) {
-                    /* Character & NPC body parts (depth 5: Head, Torso, Arms, Legs, Shoes) */
-                    bool is_bump = (internalformat == 0x8058 /* GL_RGBA8 */);
-                    for (int s = 0; s < depth; s++) {
-                        uint8_t r = 155, g = 145, b = 135, a = 255;
-                        if (is_bump) {
-                            /* Flat tangent-space normal (0, 0, 1):
-                             * Set a = 128 (0.5) so that both standard RGB unpack (r,g,b) and Unity DXT5nm
-                             * unpack (normal.x = a * 2 - 1, normal.y = g * 2 - 1) decode to (0, 0, 1).
-                             */
-                            r = 128; g = 128; b = 255; a = 128;
-                        } else {
-                            /* Calibrated for GoreBox's sunlight multiplier (1.500, 0.984, 0.674):
-                             * Never clips or blows out, preserving clean realistic skin and clothing!
-                             */
-                            switch (s) {
-                                case 0: r = 155; g = 145; b = 135; break; /* Head / Face natural skin */
-                                case 1: r = 45;  g = 75;  b = 135; break; /* Torso / Navy Shirt */
-                                case 2: r = 155; g = 145; b = 135; break; /* Arms / Hands natural skin */
-                                case 3: r = 40;  g = 50;  b = 75;  break; /* Legs / Dark Jeans */
-                                case 4: r = 30;  g = 30;  b = 35;  break; /* Shoes / Boots */
-                                default: r = 120; g = 120; b = 120; break;
-                            }
-                        }
-                        uint32_t *p32 = (uint32_t *)slice_data;
-                        if (is_bump) {
-                            uint32_t pixel = (uint32_t)r | ((uint32_t)g << 8) | ((uint32_t)b << 16) | ((uint32_t)a << 24);
-                            size_t npix = (size_t)width * height;
-                            for (size_t p = 0; p < npix; p++) p32[p] = pixel;
-                        } else {
-                            for (int y = 0; y < height; y++) {
-                                for (int x = 0; x < width; x++) {
-                                    uint32_t h = (uint32_t)(x * 374761393u + y * 668265263u + s * 314159265u);
-                                    h = (h ^ (h >> 13)) * 1274126177u;
-                                    int grain = (int)((h >> 24) % 9) - 4; /* Subtle fabric/skin texture variation */
-                                    int cr = r + grain; if (cr < 0) cr = 0; if (cr > 255) cr = 255;
-                                    int cg = g + grain; if (cg < 0) cg = 0; if (cg > 255) cg = 255;
-                                    int cb = b + grain; if (cb < 0) cb = 0; if (cb > 255) cb = 255;
-                                    p32[y * width + x] = (uint32_t)cr | ((uint32_t)cg << 8) | ((uint32_t)cb << 16) | ((uint32_t)a << 24);
-                                }
-                            }
-                        }
-                        r_glTexSubImage3D(target, 0, 0, 0, s, width, height, 1, upload_fmt, 0x1401 /* GL_UNSIGNED_BYTE */, slice_data);
-                    }
-                } else if (depth == 2) {
-                    /* Terrain 2D Array Textures (depth 2: slice 0 = dirt road / path, slice 1 = ground / terrain) */
-                    for (int s = 0; s < depth; s++) {
-                        if (is_r8) {
-                            memset(slice_data, 128, slice_bytes); /* Neutral displacement height */
-                        } else if (internalformat == 0x8058 /* GL_RGBA8 */) {
-                            if (width >= 512) {
-                                /* _TerrainNormal: Flat tangent-space normal (128, 128, 255, 128) */
-                                uint32_t norm_pixel = 128 | (128 << 8) | (255 << 16) | (128u << 24);
-                                uint32_t *p32 = (uint32_t *)slice_data;
-                                size_t npix = (size_t)width * height;
-                                for (size_t p = 0; p < npix; p++) p32[p] = norm_pixel;
-                            } else {
-                                /* _TerrainSpec: Low specularity matte dirt/ground */
-                                uint32_t spec_pixel = 25 | (25 << 8) | (25 << 16) | (255u << 24);
-                                uint32_t *p32 = (uint32_t *)slice_data;
-                                size_t npix = (size_t)width * height;
-                                for (size_t p = 0; p < npix; p++) p32[p] = spec_pixel;
-                            }
-                        } else {
-                            /* _TerrainAlbedo / _TerrainEmission (0x8C43):
-                             * Slice 0: Natural gravel / dirt road (65, 78, 90). Under warm sunlight (1.50, 0.98, 0.67),
-                             * this yields (97, 76, 60) - authentic neutral earthy gravel dirt road, ZERO reddish clay!
-                             * Slice 1: Natural ground / grass (55, 85, 75). Under warm sunlight, yields (82, 83, 50) -
-                             * authentic natural earthy green-brown ground.
-                             */
-                            uint8_t base_r = (s == 0) ? 65 : 55;
-                            uint8_t base_g = (s == 0) ? 78 : 85;
-                            uint8_t base_b = (s == 0) ? 90 : 75;
-                            uint32_t *p32 = (uint32_t *)slice_data;
-                            for (int y = 0; y < height; y++) {
-                                for (int x = 0; x < width; x++) {
-                                    uint32_t h = (uint32_t)(x * 374761393u + y * 668265263u + (s + 1) * 314159265u);
-                                    h = (h ^ (h >> 13)) * 1274126177u;
-                                    int grain = (int)((h >> 24) % 15) - 7; /* Natural dirt/gravel roughness */
-                                    int cr = base_r + grain; if (cr < 0) cr = 0; if (cr > 255) cr = 255;
-                                    int cg = base_g + grain; if (cg < 0) cg = 0; if (cg > 255) cg = 255;
-                                    int cb = base_b + grain; if (cb < 0) cb = 0; if (cb > 255) cb = 255;
-                                    p32[y * width + x] = (uint32_t)cr | ((uint32_t)cg << 8) | ((uint32_t)cb << 16) | (255u << 24);
-                                }
-                            }
-                        }
-                        r_glTexSubImage3D(target, 0, 0, 0, s, width, height, 1, upload_fmt, 0x1401 /* GL_UNSIGNED_BYTE */, slice_data);
-                    }
-                }
-                free(slice_data);
-                void (*gen_mip)(unsigned) = gl_proc("glGenerateMipmap");
-                if (gen_mip) gen_mip(target);
-                tl_log_line("gl: [AUTO_POPULATE] populated %d slices for 2D Array %dx%dx%d (intfmt %#x)", depth, width, height, depth, internalformat);
-            }
-        }
+    static atomic_int count;
+    if (atomic_fetch_add(&count, 1) < 20) {
+        tl_log_line("gl: glTexStorage3D(target %#x, lvls %d, intfmt %#x, %dx%dx%d) -> err %#x",
+                    target, levels, internalformat, width, height, depth, gl_proc_get_error());
     }
 }
 
@@ -679,40 +586,160 @@ static void w_glCompressedTexSubImage3D(unsigned t, int l, int x, int y, int z, 
                     t, l, x, y, z, w, h, d, (unsigned)fmt, (int)size, gl_proc_get_error());
 }
 
+static void (*r_glCopyTexSubImage3D)(unsigned, int, int, int, int, int, int, int, int);
+static void w_glCopyTexSubImage3D(unsigned target, int level, int xoffset, int yoffset, int zoffset, int x, int y, int width, uint64_t height)
+{
+    if (!r_glCopyTexSubImage3D) r_glCopyTexSubImage3D = gl_proc("glCopyTexSubImage3D");
+    if (r_glCopyTexSubImage3D) r_glCopyTexSubImage3D(target, level, xoffset, yoffset, zoffset, x, y, width, (int)height);
+    static atomic_int count;
+    if (atomic_fetch_add(&count, 1) < 20) {
+        tl_log_line("gl: glCopyTexSubImage3D(target %#x, lvl %d, off %d,%d,%d, src %d,%d, %dx%d) -> err %#x",
+                    target, level, xoffset, yoffset, zoffset, x, y, width, (int)height, gl_proc_get_error());
+    }
+}
+
+static void gles_copy_image_sub_data_fallback(
+    unsigned srcName, unsigned srcTarget, int srcLevel, int srcX, int srcY, int srcZ,
+    unsigned dstName, unsigned dstTarget, int dstLevel, int dstX, int dstY, int dstZ,
+    int width, int height, int depth)
+{
+    static void (*bind_fb)(unsigned, unsigned);
+    static void (*gen_fb)(int, unsigned *);
+    static void (*fb_tex2d)(unsigned, unsigned, unsigned, unsigned, int);
+    static void (*fb_tex_layer)(unsigned, unsigned, unsigned, int, int);
+    static void (*fb_rb)(unsigned, unsigned, unsigned, unsigned);
+    static void (*blit_fb)(int, int, int, int, int, int, int, int, unsigned, unsigned);
+    static unsigned char (*is_en)(unsigned);
+    static void (*fn_en)(unsigned);
+    static void (*fn_dis)(unsigned);
+
+    if (!bind_fb) {
+        bind_fb = gl_proc("glBindFramebuffer");
+        gen_fb = gl_proc("glGenFramebuffers");
+        fb_tex2d = gl_proc("glFramebufferTexture2D");
+        fb_tex_layer = gl_proc("glFramebufferTextureLayer");
+        fb_rb = gl_proc("glFramebufferRenderbuffer");
+        blit_fb = gl_proc("glBlitFramebuffer");
+        is_en = gl_proc("glIsEnabled");
+        fn_en = gl_proc("glEnable");
+        fn_dis = gl_proc("glDisable");
+    }
+
+    if (!bind_fb || !gen_fb || !fb_tex2d || !blit_fb) {
+        tl_log_line("gl: copy_image fallback unavailable (missing FBO entry points)");
+        return;
+    }
+
+    static unsigned s_copy_fbo_src = 0;
+    static unsigned s_copy_fbo_dst = 0;
+    static pthread_mutex_t s_copy_mu = PTHREAD_MUTEX_INITIALIZER;
+
+    pthread_mutex_lock(&s_copy_mu);
+
+    if (s_copy_fbo_src == 0) {
+        unsigned fbos[2] = {0, 0};
+        gen_fb(2, fbos);
+        s_copy_fbo_src = fbos[0];
+        s_copy_fbo_dst = fbos[1];
+    }
+
+    int prev_read_fb = 0, prev_draw_fb = 0;
+    a_glGetIntegerv(0x8CAA /* GL_READ_FRAMEBUFFER_BINDING */, &prev_read_fb);
+    a_glGetIntegerv(0x8CA6 /* GL_DRAW_FRAMEBUFFER_BINDING */, &prev_draw_fb);
+
+    int scissor_en = is_en ? is_en(0x0C11 /* GL_SCISSOR_TEST */) : 0;
+    if (scissor_en && fn_dis) fn_dis(0x0C11);
+
+    bind_fb(0x8CA8 /* GL_READ_FRAMEBUFFER */, s_copy_fbo_src);
+    bind_fb(0x8CA9 /* GL_DRAW_FRAMEBUFFER */, s_copy_fbo_dst);
+
+    for (int slice = 0; slice < depth; slice++) {
+        /* Attach source slice */
+        if (srcTarget == 0x0DE1 /* GL_TEXTURE_2D */) {
+            fb_tex2d(0x8CA8, 0x8CE0 /* GL_COLOR_ATTACHMENT0 */, 0x0DE1, srcName, srcLevel);
+        } else if (srcTarget == 0x8C1A /* GL_TEXTURE_2D_ARRAY */ || srcTarget == 0x806F /* GL_TEXTURE_3D */) {
+            if (fb_tex_layer) {
+                fb_tex_layer(0x8CA8, 0x8CE0, srcName, srcLevel, srcZ + slice);
+            }
+        } else if (srcTarget >= 0x8515 && srcTarget <= 0x851A) {
+            fb_tex2d(0x8CA8, 0x8CE0, srcTarget, srcName, srcLevel);
+        } else if (srcTarget == 0x8513 /* GL_TEXTURE_CUBE_MAP */) {
+            fb_tex2d(0x8CA8, 0x8CE0, 0x8515 + (unsigned)(srcZ + slice), srcName, srcLevel);
+        } else if (srcTarget == 0x8D41 /* GL_RENDERBUFFER */ && fb_rb) {
+            fb_rb(0x8CA8, 0x8CE0, 0x8D41, srcName);
+        }
+
+        /* Attach destination slice */
+        if (dstTarget == 0x0DE1 /* GL_TEXTURE_2D */) {
+            fb_tex2d(0x8CA9, 0x8CE0 /* GL_COLOR_ATTACHMENT0 */, 0x0DE1, dstName, dstLevel);
+        } else if (dstTarget == 0x8C1A /* GL_TEXTURE_2D_ARRAY */ || dstTarget == 0x806F /* GL_TEXTURE_3D */) {
+            if (fb_tex_layer) {
+                fb_tex_layer(0x8CA9, 0x8CE0, dstName, dstLevel, dstZ + slice);
+            }
+        } else if (dstTarget >= 0x8515 && dstTarget <= 0x851A) {
+            fb_tex2d(0x8CA9, 0x8CE0, dstTarget, dstName, dstLevel);
+        } else if (dstTarget == 0x8513 /* GL_TEXTURE_CUBE_MAP */) {
+            fb_tex2d(0x8CA9, 0x8CE0, 0x8515 + (unsigned)(dstZ + slice), dstName, dstLevel);
+        } else if (dstTarget == 0x8D41 /* GL_RENDERBUFFER */ && fb_rb) {
+            fb_rb(0x8CA9, 0x8CE0, 0x8D41, dstName);
+        }
+
+        blit_fb(srcX, srcY, srcX + width, srcY + height,
+                dstX, dstY, dstX + width, dstY + height,
+                0x4000 /* GL_COLOR_BUFFER_BIT */, 0x2600 /* GL_NEAREST */);
+    }
+
+    /* Detach attachments */
+    fb_tex2d(0x8CA8, 0x8CE0, 0x0DE1, 0, 0);
+    fb_tex2d(0x8CA9, 0x8CE0, 0x0DE1, 0, 0);
+
+    /* Restore previous state */
+    bind_fb(0x8CA8, (unsigned)prev_read_fb);
+    bind_fb(0x8CA9, (unsigned)prev_draw_fb);
+
+    if (scissor_en && fn_en) fn_en(0x0C11);
+
+    pthread_mutex_unlock(&s_copy_mu);
+}
+
 static void (*r_glCopyImageSubData)(unsigned, unsigned, int, int, int, int, unsigned, unsigned, int, int, int, int, int, int, int);
 static void w_glCopyImageSubData(unsigned sn, unsigned st, int sl, int sx, int sy, int sz, unsigned dn, unsigned dt,
                                  uint64_t dl, uint64_t dx, uint64_t dy, uint64_t dz, uint64_t w, uint64_t h, uint64_t d)
-{ r_glCopyImageSubData(sn, st, sl, sx, sy, sz, dn, dt, (int)dl, (int)dx, (int)dy, (int)dz, (int)w, (int)h, (int)d); }
+{
+    static atomic_int count;
+    int c = atomic_fetch_add(&count, 1);
+    if (c < 30 || (c % 100 == 0)) {
+        tl_log_line("gl: glCopyImageSubData(src %u [%#x] lvl %d (%d,%d,%d) -> dst %u [%#x] lvl %d (%d,%d,%d), %dx%dx%d)",
+                    sn, st, sl, sx, sy, sz, dn, dt, (int)dl, (int)dx, (int)dy, (int)dz, (int)w, (int)h, (int)d);
+    }
+
+    if (!r_glCopyImageSubData) {
+        r_glCopyImageSubData = gl_proc("glCopyImageSubData");
+        if (!r_glCopyImageSubData) r_glCopyImageSubData = gl_proc("glCopyImageSubDataEXT");
+        if (!r_glCopyImageSubData) r_glCopyImageSubData = gl_proc("glCopyImageSubDataOES");
+    }
+
+    if (r_glCopyImageSubData) {
+        while (gl_proc_get_error());
+        r_glCopyImageSubData(sn, st, sl, sx, sy, sz, dn, dt, (int)dl, (int)dx, (int)dy, (int)dz, (int)w, (int)h, (int)d);
+        unsigned err = gl_proc_get_error();
+        if (err == 0) return;
+        if (c < 10) tl_log_line("gl: host glCopyImageSubData returned err %#x, running FBO blit fallback", err);
+    }
+    gles_copy_image_sub_data_fallback(sn, st, sl, sx, sy, sz, dn, dt, (int)dl, (int)dx, (int)dy, (int)dz, (int)w, (int)h, (int)d);
+}
 
 /* Clean 16/32-bit GLenum parameters from AAPCS64 callers to Darwin ARM64 */
 static void (*r_glBlendFunc)(unsigned, unsigned);
 static void w_glBlendFunc(unsigned s, unsigned d) {
     if (!r_glBlendFunc) r_glBlendFunc = gl_proc("glBlendFunc");
-    unsigned s_clean = s & 0xffff;
-    unsigned d_clean = d & 0xffff;
-    if (s_clean == 0 && d_clean == 0) {
-        s_clean = 0x0302; /* GL_SRC_ALPHA */
-        d_clean = 0x0303; /* GL_ONE_MINUS_SRC_ALPHA */
-    }
-    if (r_glBlendFunc) r_glBlendFunc(s_clean, d_clean);
+    if (r_glBlendFunc) r_glBlendFunc(s & 0xffff, d & 0xffff);
 }
 
 static void (*r_glBlendFuncSeparate)(unsigned, unsigned, unsigned, unsigned);
 static void w_glBlendFuncSeparate(unsigned sr, unsigned dr, unsigned sa, unsigned da) {
     if (!r_glBlendFuncSeparate) r_glBlendFuncSeparate = gl_proc("glBlendFuncSeparate");
-    unsigned sr_clean = sr & 0xffff;
-    unsigned dr_clean = dr & 0xffff;
-    unsigned sa_clean = sa & 0xffff;
-    unsigned da_clean = da & 0xffff;
-    if (sr_clean == 0 && dr_clean == 0) {
-        sr_clean = 0x0302; /* GL_SRC_ALPHA */
-        dr_clean = 0x0303; /* GL_ONE_MINUS_SRC_ALPHA */
-    }
-    if (sa_clean == 0 && da_clean == 0) {
-        sa_clean = 1;      /* GL_ONE */
-        da_clean = 0x0303; /* GL_ONE_MINUS_SRC_ALPHA */
-    }
-    if (r_glBlendFuncSeparate) r_glBlendFuncSeparate(sr_clean, dr_clean, sa_clean, da_clean);
+    if (r_glBlendFuncSeparate) r_glBlendFuncSeparate(sr & 0xffff, dr & 0xffff, sa & 0xffff, da & 0xffff);
 }
 
 static void (*r_glBlendEquation)(unsigned);
@@ -835,31 +862,13 @@ static void w_glProgramBinary(unsigned program, unsigned binaryFormat, const voi
     if (r_glProgramBinary) r_glProgramBinary(program, binaryFormat, binary, length);
     static atomic_int count;
     int c = atomic_fetch_add(&count, 1);
-    unsigned err = gl_proc_get_error();
-    int link_ok = 0;
-    void (*get_prog_iv)(unsigned, unsigned, int *) = gl_proc("glGetProgramiv");
-    if (get_prog_iv) get_prog_iv(program, 0x8B82 /* GL_LINK_STATUS */, &link_ok);
-    if (c < 80 || program >= 40) {
+    if (c < 30) {
+        unsigned err = gl_proc_get_error();
+        int link_ok = 0;
+        void (*get_prog_iv)(unsigned, unsigned, int *) = gl_proc("glGetProgramiv");
+        if (get_prog_iv) get_prog_iv(program, 0x8B82 /* GL_LINK_STATUS */, &link_ok);
         tl_log_line("gl: glProgramBinary(prog %u, binFmt %#x, len %d) -> err %#x, link_status %d",
                     program, binaryFormat, length, err, link_ok);
-        if (program >= 40 && binary && length > 32) {
-            const char *p = (const char *)binary;
-            int found = 0;
-            for (int i = 0; i < length - 8 && found < 25; i++) {
-                if (!strncmp(p + i, "_Base", 5) || !strncmp(p + i, "_MainLight", 10) || 
-                    !strncmp(p + i, "unity_SH", 8) || !strncmp(p + i, "_Bone", 5) ||
-                    !strncmp(p + i, "_Color", 6) || !strncmp(p + i, "UnityPer", 8) ||
-                    !strncmp(p + i, "_Shadow", 7) || !strncmp(p + i, "unity_ObjectToWorld", 19) ||
-                    !strncmp(p + i, "_Metallic", 9) || !strncmp(p + i, "_Smoothness", 11)) {
-                    char str[64] = {0};
-                    int k = 0;
-                    while (k < 63 && p[i+k] >= 32 && p[i+k] <= 126) { str[k] = p[i+k]; k++; }
-                    tl_log_line("gl:   prog %u bin str: %s", program, str);
-                    found++;
-                    i += k;
-                }
-            }
-        }
     }
 }
 
@@ -921,480 +930,9 @@ static void w_glUniformBlockBinding(unsigned prog, unsigned blockIndex, unsigned
     if (r_glUniformBlockBinding) r_glUniformBlockBinding(prog, blockIndex, binding);
 }
 
-static void dump_prog_reflection(unsigned prog)
-{
-    void (*get_prog_iv)(unsigned, unsigned, int *) = gl_proc("glGetProgramiv");
-    if (!get_prog_iv) return;
-    while (gl_proc_get_error());
-    int link_ok = 0;
-    get_prog_iv(prog, 0x8B82 /* GL_LINK_STATUS */, &link_ok);
-    int numBlocks = 0, numUniforms = 0, numAttribs = 0;
-    get_prog_iv(prog, 0x8A36 /* GL_ACTIVE_UNIFORM_BLOCKS */, &numBlocks);
-    get_prog_iv(prog, 0x8B86 /* GL_ACTIVE_UNIFORMS */, &numUniforms);
-    get_prog_iv(prog, 0x8B89 /* GL_ACTIVE_ATTRIBUTES */, &numAttribs);
-    tl_log_line("gl: [REFL] prog %u: link_status=%d, blocks=%d, uniforms=%d, attribs=%d",
-                prog, link_ok, numBlocks, numUniforms, numAttribs);
-
-    void (*get_block_name)(unsigned, unsigned, int, int *, char *) = gl_proc("glGetActiveUniformBlockName");
-    void (*get_block_iv)(unsigned, unsigned, unsigned, int *) = gl_proc("glGetActiveUniformBlockiv");
-    if (get_block_name && get_block_iv) {
-        for (int b = 0; b < numBlocks && b < 16; b++) {
-            char bname[64] = ""; int blen = 0, bsize = 0, bbind = 0;
-            get_block_name(prog, (unsigned)b, sizeof(bname) - 1, &blen, bname);
-            get_block_iv(prog, (unsigned)b, 0x8A40 /* GL_UNIFORM_BLOCK_DATA_SIZE */, &bsize);
-            get_block_iv(prog, (unsigned)b, 0x8A3F /* GL_UNIFORM_BLOCK_BINDING */, &bbind);
-            tl_log_line("gl: [REFL]   prog %u block %d '%s': size %d, binding %d", prog, b, bname, bsize, bbind);
-        }
-    }
-
-    void (*get_active_u)(unsigned, unsigned, int, int *, int *, unsigned *, char *) = gl_proc("glGetActiveUniform");
-    int (*get_u_loc)(unsigned, const char *) = gl_proc("glGetUniformLocation");
-    void (*get_active_uiv)(unsigned, int, const unsigned *, unsigned, int *) = gl_proc("glGetActiveUniformsiv");
-    void (*get_u_iv)(unsigned, int, int *) = gl_proc("glGetUniformiv");
-    void (*get_u_fv)(unsigned, int, float *) = gl_proc("glGetUniformfv");
-
-    if (get_active_u && get_u_loc) {
-        for (int u = 0; u < numUniforms && u < 128; u++) {
-            char uname[64] = ""; int ulen = 0, usize = 0; unsigned utype = 0;
-            get_active_u(prog, (unsigned)u, sizeof(uname) - 1, &ulen, &usize, &utype, uname);
-            int loc = get_u_loc(prog, uname);
-            int block_idx = -1, offset = -1;
-            if (get_active_uiv) {
-                unsigned u_idx = (unsigned)u;
-                get_active_uiv(prog, 1, &u_idx, 0x8A3A /* GL_UNIFORM_BLOCK_INDEX */, &block_idx);
-                if (block_idx != -1) {
-                    get_active_uiv(prog, 1, &u_idx, 0x8A37 /* GL_UNIFORM_OFFSET */, &offset);
-                }
-            }
-            if (loc >= 0 && (utype == 0x8B5E /* 2D */ || utype == 0x8DC1 /* 2D_ARRAY */ || utype == 0x8B60 /* CUBE */ || utype == 0x8B62 /* SHADOW */)) {
-                int smp_unit = -1;
-                if (get_u_iv) get_u_iv(prog, loc, &smp_unit);
-                tl_log_line("gl: [REFL]   prog %u sampler '%s': type %#x, loc %d, unit %d",
-                            prog, uname, utype, loc, smp_unit);
-            } else if (loc >= 0 && utype == 0x8B52 /* FLOAT_VEC4 */) {
-                float v[4] = {0};
-                if (get_u_fv) get_u_fv(prog, loc, v);
-                tl_log_line("gl: [REFL]   prog %u vec4 '%s': loc %d = [%.3f, %.3f, %.3f, %.3f]",
-                            prog, uname, loc, v[0], v[1], v[2], v[3]);
-            } else if (loc >= 0 && utype == 0x1406 /* FLOAT */) {
-                float v = 0;
-                if (get_u_fv) get_u_fv(prog, loc, &v);
-                tl_log_line("gl: [REFL]   prog %u float '%s': loc %d = %.3f", prog, uname, loc, v);
-            } else if (block_idx != -1) {
-                tl_log_line("gl: [REFL]   prog %u uniform %d '%s': type %#x, blk %d, off %d",
-                            prog, u, uname, utype, block_idx, offset);
-            }
-        }
-    }
-
-    void (*get_active_a)(unsigned, unsigned, int, int *, int *, unsigned *, char *) = gl_proc("glGetActiveAttrib");
-    int (*get_a_loc)(unsigned, const char *) = gl_proc("glGetAttribLocation");
-    if (get_active_a && get_a_loc) {
-        for (int a = 0; a < numAttribs && a < 16; a++) {
-            char aname[64] = ""; int alen = 0, asize = 0; unsigned atype = 0;
-            get_active_a(prog, (unsigned)a, sizeof(aname) - 1, &alen, &asize, &atype, aname);
-            int loc = get_a_loc(prog, aname);
-            tl_log_line("gl: [REFL]   prog %u attrib %d '%s': type %#x, loc %d", prog, a, aname, atype, loc);
-        }
-    }
-}
-
-static void inspect_prog_draw(unsigned prog, int count)
-{
-    static uint8_t s_inspected[128];
-    if (prog >= 128) return;
-    int n = s_inspected[prog]++;
-    if (n >= 2) return;
-
-    tl_log_line("gl: >>>>> INSPECT DRAW #%d for prog %u (indices %d) <<<<<", n, prog, count);
-    dump_prog_reflection(prog);
-
-    void (*get_int_i)(unsigned, unsigned, int *) = gl_proc("glGetIntegeri_v");
-    void (*bind_buf)(unsigned, unsigned) = gl_proc("glBindBuffer");
-    void (*get_buf_param)(unsigned, unsigned, int *) = gl_proc("glGetBufferParameteriv");
-    void *(*map_buf)(unsigned, long, long, unsigned) = gl_proc("glMapBufferRange");
-    unsigned char (*unmap_buf)(unsigned) = gl_proc("glUnmapBuffer");
-
-    int old_ubo = 0;
-    a_glGetIntegerv(0x8A28 /* GL_UNIFORM_BUFFER_BINDING */, &old_ubo);
-
-    for (int i = 0; i < 4; i++) {
-        int ubo = 0;
-        if (get_int_i) get_int_i(0x8A28 /* GL_UNIFORM_BUFFER_BINDING */, (unsigned)i, &ubo);
-        if (ubo > 0 && bind_buf && get_buf_param) {
-            bind_buf(0x8A11 /* GL_UNIFORM_BUFFER */, (unsigned)ubo);
-            int sz = 0;
-            get_buf_param(0x8A11, 0x8764 /* GL_BUFFER_SIZE */, &sz);
-            if (map_buf && unmap_buf && sz >= 16) {
-                int read_sz = sz < 256 ? sz : 256;
-                void *ptr = map_buf(0x8A11, 0, read_sz, 0x0001 /* GL_MAP_READ_BIT */);
-                if (ptr) {
-                    float f[64] = {0};
-                    memcpy(f, ptr, (size_t)read_sz);
-                    unmap_buf(0x8A11);
-                    int n_floats = read_sz / 4;
-                    for (int k = 0; k < n_floats; k += 8) {
-                        int left = n_floats - k;
-                        if (left >= 8) {
-                            tl_log_line("gl:   UBO idx %d: buf %d f[%d..%d]: [%.3f, %.3f, %.3f, %.3f] [%.3f, %.3f, %.3f, %.3f]",
-                                        i, ubo, k, k + 7, f[k], f[k+1], f[k+2], f[k+3], f[k+4], f[k+5], f[k+6], f[k+7]);
-                        } else if (left >= 4) {
-                            tl_log_line("gl:   UBO idx %d: buf %d f[%d..%d]: [%.3f, %.3f, %.3f, %.3f]",
-                                        i, ubo, k, k + 3, f[k], f[k+1], f[k+2], f[k+3]);
-                        }
-                    }
-                } else {
-                    tl_log_line("gl:   UBO idx %d: buf %d (sz %d) map failed", i, ubo, sz);
-                }
-            } else {
-                tl_log_line("gl:   UBO idx %d: buf %d (sz %d)", i, ubo, sz);
-            }
-        } else {
-            tl_log_line("gl:   UBO idx %d: buf %d", i, ubo);
-        }
-    }
-    if (bind_buf) bind_buf(0x8A11, (unsigned)old_ubo);
-
-    int old_act = 0x84C0;
-    a_glGetIntegerv(0x84E0 /* GL_ACTIVE_TEXTURE */, &old_act);
-    void (*active_tex)(unsigned) = gl_proc("glActiveTexture");
-    void (*get_tex_param)(unsigned, unsigned, int *) = gl_proc("glGetTexParameteriv");
-
-    for (int t = 0; t < 12; t++) {
-        if (active_tex) active_tex(0x84C0 + (unsigned)t);
-        int t2d = 0, t2d_arr = 0, tcube = 0;
-        a_glGetIntegerv(0x8069 /* GL_TEXTURE_BINDING_2D */, &t2d);
-        a_glGetIntegerv(0x8C1D /* GL_TEXTURE_BINDING_2D_ARRAY */, &t2d_arr);
-        a_glGetIntegerv(0x8514 /* GL_TEXTURE_BINDING_CUBE_MAP */, &tcube);
-        if (t2d > 0) {
-            int min_f = 0, mag_f = 0;
-            if (get_tex_param) {
-                get_tex_param(0x0DE1, 0x2801 /* GL_TEXTURE_MIN_FILTER */, &min_f);
-                get_tex_param(0x0DE1, 0x2800 /* GL_TEXTURE_MAG_FILTER */, &mag_f);
-            }
-            tl_log_line("gl:   TEX unit %d: 2D tex %d (min %#x, mag %#x)", t, t2d, min_f, mag_f);
-        }
-        if (t2d_arr > 0) {
-            int min_f = 0, mag_f = 0;
-            if (get_tex_param) {
-                get_tex_param(0x8C1A, 0x2801 /* GL_TEXTURE_MIN_FILTER */, &min_f);
-                get_tex_param(0x8C1A, 0x2800 /* GL_TEXTURE_MAG_FILTER */, &mag_f);
-            }
-            tl_log_line("gl:   TEX unit %d: 2D_ARRAY tex %d (min %#x, mag %#x)", t, t2d_arr, min_f, mag_f);
-        }
-        if (tcube > 0) {
-            tl_log_line("gl:   TEX unit %d: CUBE tex %d", t, tcube);
-        }
-    }
-    if (active_tex) active_tex((unsigned)old_act);
-
-    /* Check pipeline states */
-    unsigned char (*is_en)(unsigned) = gl_proc("glIsEnabled");
-    if (is_en) {
-        int blend_en = is_en(0x0BE2 /* GL_BLEND */);
-        int depth_en = is_en(0x0B71 /* GL_DEPTH_TEST */);
-        int cull_en = is_en(0x0B44 /* GL_CULL_FACE */);
-        int dmask = 0, src_rgb = 0, dst_rgb = 0;
-        a_glGetIntegerv(0x0B72 /* GL_DEPTH_WRITEMASK */, &dmask);
-        a_glGetIntegerv(0x80C9 /* GL_BLEND_SRC_RGB */, &src_rgb);
-        a_glGetIntegerv(0x80C8 /* GL_BLEND_DST_RGB */, &dst_rgb);
-        tl_log_line("gl:   STATE prog %u: blend=%d (src=%#x dst=%#x), depth_test=%d, depth_mask=%d, cull=%d",
-                    prog, blend_en, src_rgb, dst_rgb, depth_en, dmask, cull_en);
-    }
-
-    void (*get_va_iv)(unsigned, unsigned, int *) = gl_proc("glGetVertexAttribiv");
-    if (get_va_iv) {
-        for (int a = 0; a < 8; a++) {
-            int en = 0, buf = 0, sz = 0, type = 0;
-            get_va_iv((unsigned)a, 0x8622 /* GL_VERTEX_ATTRIB_ARRAY_ENABLED */, &en);
-            get_va_iv((unsigned)a, 0x889F /* GL_VERTEX_ATTRIB_ARRAY_BUFFER_BINDING */, &buf);
-            get_va_iv((unsigned)a, 0x8623 /* GL_VERTEX_ATTRIB_ARRAY_SIZE */, &sz);
-            get_va_iv((unsigned)a, 0x8625 /* GL_VERTEX_ATTRIB_ARRAY_TYPE */, &type);
-            if (en) {
-                tl_log_line("gl:   ATTRIB %d: buf %d, sz %d, type %#x", a, buf, sz, type);
-            }
-        }
-    }
-    unsigned err = gl_proc_get_error();
-    tl_log_line("gl: >>>>> END INSPECT prog %u (GL err %#x) <<<<<", prog, err);
-}
-
-/* Program Category:
- * 0 = OPAQUE (Terrain, buildings, props)
- * 1 = ROLE (Characters & NPCs)
- * 2 = TRANSPARENT (Wounds, blood splatters, particles, dust, smoke, decals)
- * 3 = ADDITIVE (Muzzle flash, tracers, sparks)
- */
-static int8_t s_prog_cat[256];
-static bool s_prog_cat_inited = false;
-
-static int classify_program(unsigned prog)
-{
-    if (prog == 0 || prog >= 256) return 0;
-    if (!s_prog_cat_inited) {
-        memset(s_prog_cat, -1, sizeof(s_prog_cat));
-        s_prog_cat_inited = true;
-    }
-    if (s_prog_cat[prog] != -1) {
-        return s_prog_cat[prog];
-    }
-
-    void (*get_prog_iv)(unsigned, unsigned, int *) = gl_proc("glGetProgramiv");
-    void (*get_active_u)(unsigned, unsigned, int, int *, int *, unsigned *, char *) = gl_proc("glGetActiveUniform");
-    if (!get_prog_iv || !get_active_u) {
-        s_prog_cat[prog] = 0;
-        return 0;
-    }
-
-    int numUniforms = 0;
-    get_prog_iv(prog, 0x8B86 /* GL_ACTIVE_UNIFORMS */, &numUniforms);
-
-    bool is_role = false;
-    bool is_wound = false;
-    bool is_additive = false;
-    bool is_particle = false;
-    bool is_terrain = false;
-    bool has_shadowmap = false;
-    bool has_tex = false;
-
-    for (int u = 0; u < numUniforms && u < 128; u++) {
-        char uname[64] = ""; int ulen = 0, usize = 0; unsigned utype = 0;
-        get_active_u(prog, (unsigned)u, sizeof(uname) - 1, &ulen, &usize, &utype, uname);
-        const char *name = uname;
-        if (strncmp(name, "Xhlslcc_UnusedX", 15) == 0) name += 15;
-
-        if (strcmp(name, "_RoleMaps") == 0 || strcmp(name, "_RoleColor0") == 0) {
-            is_role = true;
-        } else if (strcmp(name, "_WoundErase") == 0) {
-            is_wound = true;
-        } else if (strcmp(name, "_Heat") == 0 || strcmp(name, "_ThinTo") == 0 || strcmp(name, "_CoreWhite") == 0) {
-            is_additive = true;
-        } else if (strcmp(name, "_CameraFadeParams") == 0 || strcmp(name, "_SoftParticleFadeParams") == 0) {
-            is_particle = true;
-        } else if (strcmp(name, "_TerrainField") == 0 || strcmp(name, "_TerrainAlbedo") == 0) {
-            is_terrain = true;
-        } else if (strstr(name, "MainLightShadowmap") != NULL) {
-            has_shadowmap = true;
-        } else if (strcmp(name, "_BaseMap") == 0 || strcmp(name, "_MainTex") == 0) {
-            has_tex = true;
-        }
-    }
-
-    int cat = 0; /* OPAQUE */
-    if (is_role) {
-        cat = 1; /* ROLE (NPC / Character / Viewmodel) */
-    } else if (is_terrain) {
-        cat = 0; /* TERRAIN (Opaque) */
-    } else if (is_additive) {
-        cat = 3; /* ADDITIVE (Muzzle flash / gun fx) */
-    } else if (is_wound || is_particle) {
-        cat = 2; /* TRANSPARENT (Wound splatters, dust, dirt particles, blood decals) */
-    }
-
-    s_prog_cat[prog] = (int8_t)cat;
-    return cat;
-}
-
-static void enhance_draw_pipeline(int curProg)
-{
-    if (curProg <= 0) return;
-
-    static void (*u_4f)(int, float, float, float, float) = NULL;
-    static void (*u_1f)(int, float) = NULL;
-    static int (*u_loc)(unsigned, const char *) = NULL;
-    static void (*u_fv)(unsigned, int, float *) = NULL;
-    static void (*b_buf)(unsigned, unsigned) = NULL;
-    static void (*b_sub)(unsigned, intptr_t, intptr_t, const void *) = NULL;
-    static void (*get_int_i)(unsigned, unsigned, int *) = NULL;
-    static void (*set_blend_fn)(unsigned, unsigned, unsigned, unsigned) = NULL;
-    static void (*set_depth_mask)(unsigned) = NULL;
-    static void (*set_depth_range)(float, float) = NULL;
-    static void (*fn_enable)(unsigned) = NULL;
-    static unsigned char (*fn_is_en)(unsigned) = NULL;
-    static void *(*map_buf)(unsigned, intptr_t, intptr_t, unsigned) = NULL;
-    static unsigned char (*unmap_buf)(unsigned) = NULL;
-
-    if (!u_loc) {
-        u_4f = gl_proc("glUniform4f");
-        u_1f = gl_proc("glUniform1f");
-        u_loc = gl_proc("glGetUniformLocation");
-        u_fv = gl_proc("glGetUniformfv");
-        b_buf = gl_proc("glBindBuffer");
-        b_sub = gl_proc("glBufferSubData");
-        get_int_i = gl_proc("glGetIntegeri_v");
-        set_blend_fn = gl_proc("glBlendFuncSeparate");
-        set_depth_mask = gl_proc("glDepthMask");
-        set_depth_range = gl_proc("glDepthRangef");
-        fn_enable = gl_proc("glEnable");
-        fn_is_en = gl_proc("glIsEnabled");
-        map_buf = gl_proc("glMapBufferRange");
-        unmap_buf = gl_proc("glUnmapBuffer");
-    }
-
-    /* Industry-standard FPS Viewmodel depth compression:
-     * Compress 1st-person hands (prog 44) and weapon (prog 46) depth to [0.0, 0.25]
-     * so they never clip into world geometry or nearby walls!
-     */
-    if (set_depth_range) {
-        if (curProg == 44 || curProg == 46) {
-            set_depth_range(0.0f, 0.25f);
-        } else {
-            set_depth_range(0.0f, 1.0f);
-        }
-    }
-
-    int cat = classify_program((unsigned)curProg);
-
-    if (cat == 1) {
-        /* 1. GoreBox Character & NPC Meshes:
-         * Depth writes enabled, bypass shadow attenuation, boost ambient lighting,
-         * boost sunlight, and auto-populate body colors in UBO 1.
-         */
-        if (set_depth_mask) set_depth_mask(1 /* GL_TRUE */);
-        if (u_loc && u_4f) {
-            int loc_sp = u_loc((unsigned)curProg, "_MainLightShadowParams");
-            if (loc_sp >= 0) u_4f(loc_sp, 0.0f, 0.0f, 0.0f, 0.0f);
-
-            int loc_asp = u_loc((unsigned)curProg, "_AdditionalShadowParams[0]");
-            if (loc_asp >= 0) u_4f(loc_asp, 0.0f, 0.0f, 0.0f, -1.0f);
-
-            if (u_1f) {
-                int loc_ns = u_loc((unsigned)curProg, "_GB27NightSight");
-                if (loc_ns >= 0) u_1f(loc_ns, 0.35f);
-            }
-            int loc_amb = u_loc((unsigned)curProg, "_GB27SceneAmbientDC");
-            if (loc_amb >= 0) {
-                u_4f(loc_amb, 0.50f, 0.50f, 0.55f, 1.0f);
-            }
-
-            int loc_light = u_loc((unsigned)curProg, "_MainLightColor");
-            if (loc_light >= 0 && u_fv) {
-                float col[4] = {0};
-                u_fv((unsigned)curProg, loc_light, col);
-                if (col[0] == 0.0f && col[1] == 0.0f && col[2] == 0.0f) {
-                    u_4f(loc_light, 1.30f, 1.20f, 1.10f, 1.0f);
-                }
-            }
-            int loc_pos = u_loc((unsigned)curProg, "_MainLightPosition");
-            if (loc_pos >= 0 && u_fv) {
-                float pos[4] = {0};
-                u_fv((unsigned)curProg, loc_pos, pos);
-                if (pos[0] == 0.0f && pos[1] == 0.0f && pos[2] == 0.0f) {
-                    u_4f(loc_pos, 0.4f, 0.8f, -0.4f, 0.0f);
-                }
-            }
-        }
-
-        /* GoreBox Body Part Color Auto-Injector (UnityPerMaterial block, binding index 1):
-         * Head: Natural Skin (0.80, 0.70, 0.62), Torso: Navy (0.20, 0.35, 0.55),
-         * Arms: Natural Skin (0.80, 0.70, 0.62), Legs: Jeans (0.18, 0.24, 0.36), Shoes: Charcoal (0.15, 0.15, 0.16)
-         */
-        if (get_int_i && b_buf && b_sub) {
-            int ubo1 = 0;
-            get_int_i(0x8A28 /* GL_UNIFORM_BUFFER_BINDING */, 1, &ubo1);
-            if (ubo1 > 0) {
-                static const float role_colors[5][4] = {
-                    { 0.80f, 0.70f, 0.62f, 1.0f },
-                    { 0.20f, 0.35f, 0.55f, 1.0f },
-                    { 0.80f, 0.70f, 0.62f, 1.0f },
-                    { 0.18f, 0.24f, 0.36f, 1.0f },
-                    { 0.15f, 0.15f, 0.16f, 1.0f }
-                };
-                int prev_ub = 0;
-                a_glGetIntegerv(0x8A28, &prev_ub);
-                b_buf(0x8A11 /* GL_UNIFORM_BUFFER */, (unsigned)ubo1);
-                bool needs_colors = true;
-                if (map_buf && unmap_buf) {
-                    const float *mapped = (const float *)map_buf(0x8A11, 80, sizeof(role_colors), 0x0001 /* GL_MAP_READ_BIT */);
-                    if (mapped) {
-                        if (mapped[0] != 0.0f || mapped[1] != 0.0f || mapped[4] != 0.0f) {
-                            needs_colors = false;
-                        }
-                        unmap_buf(0x8A11);
-                    }
-                }
-                if (needs_colors) {
-                    b_sub(0x8A11, 80, sizeof(role_colors), role_colors);
-                }
-                b_buf(0x8A11, (unsigned)prev_ub);
-            }
-        }
-    } else if (cat == 2 || cat == 3) {
-        /* 2. Transparent shaders, wound splatters, particles, and decals:
-         * Fix opaque red patches on wounded NPCs and black/opaque rectangles around blood, decals, smoke, and particles!
-         */
-        if (fn_enable) fn_enable(0x0BE2 /* GL_BLEND */);
-        if (set_depth_mask) set_depth_mask(0 /* GL_FALSE */);
-        if (set_blend_fn) {
-            if (cat == 3) {
-                set_blend_fn(1 /* GL_ONE */, 1 /* GL_ONE */, 1, 1);
-            } else {
-                set_blend_fn(0x0302 /* GL_SRC_ALPHA */, 0x0303 /* GL_ONE_MINUS_SRC_ALPHA */, 1 /* GL_ONE */, 0x0303);
-            }
-        }
-        if (u_loc && u_4f) {
-            int loc_sp = u_loc((unsigned)curProg, "_MainLightShadowParams");
-            if (loc_sp >= 0) u_4f(loc_sp, 0.0f, 0.0f, 0.0f, 0.0f);
-
-            int loc_cf = u_loc((unsigned)curProg, "_CameraFadeParams");
-            if (loc_cf >= 0) u_4f(loc_cf, 0.0f, 1.0f, 0.0f, 0.0f);
-        }
-    } else {
-        /* General safety for any draw call that has GL_BLEND enabled */
-        if (fn_is_en && fn_is_en(0x0BE2 /* GL_BLEND */)) {
-            if (set_depth_mask) set_depth_mask(0 /* GL_FALSE */);
-            if (set_blend_fn) {
-                int src_rgb = 0, dst_rgb = 0;
-                a_glGetIntegerv(0x80C9 /* GL_BLEND_SRC_RGB */, &src_rgb);
-                a_glGetIntegerv(0x80C8 /* GL_BLEND_DST_RGB */, &dst_rgb);
-                if (src_rgb == 0 && dst_rgb == 0) {
-                    set_blend_fn(0x0302 /* GL_SRC_ALPHA */, 0x0303 /* GL_ONE_MINUS_SRC_ALPHA */, 1 /* GL_ONE */, 0x0303);
-                }
-            }
-        }
-    }
-}
-
 static void (*r_glDrawElements)(unsigned, int, unsigned, const void *);
 static void w_glDrawElements(unsigned mode, int count, unsigned type, const void *indices)
 {
-    static atomic_int draw_count;
-    int c = atomic_fetch_add(&draw_count, 1);
-    int curProg = 0;
-    a_glGetIntegerv(0x8B8D /* GL_CURRENT_PROGRAM */, &curProg);
-
-    if (curProg == 44 || curProg == 46) {
-        /* Viewmodel hands or weapon drawn: keep 1st-person active for 30 frames */
-        atomic_store(&s_fp_hands_countdown, 30);
-    } else if (curProg == 45) {
-        if (atomic_load(&s_fp_hands_countdown) > 0) {
-            /* 1st-person view is active: cull the overlapping local player upper body
-             * (Head=2538, Torso=2256, 3rd-person Arms=4512) so it doesn't clip into the camera!
-             * Keep Legs=7488 visible when looking down, and NEVER touch NPCs (counts > 7488 or other)!
-             */
-            if (count == 2538 || count == 2256 || count == 4512) {
-                return;
-            }
-        }
-    }
-
-    if (curProg >= 40) {
-        inspect_prog_draw((unsigned)curProg, count);
-    }
-    enhance_draw_pipeline(curProg);
-
-    if (c < 30 || (c % 600 == 0)) {
-        int ubo0 = 0, ubo1 = 0;
-        void (*get_int_i)(unsigned, unsigned, int *) = gl_proc("glGetIntegeri_v");
-        if (get_int_i) {
-            get_int_i(0x8A28 /* GL_UNIFORM_BUFFER_BINDING */, 0, &ubo0);
-            get_int_i(0x8A28 /* GL_UNIFORM_BUFFER_BINDING */, 1, &ubo1);
-        }
-        int vao = 0;
-        a_glGetIntegerv(0x85B5 /* GL_VERTEX_ARRAY_BINDING */, &vao);
-        tl_log_line("gl: glDrawElements #%d prog %d, vao %d, ubo0 %d, ubo1 %d, cnt %d",
-                    c, curProg, vao, ubo0, ubo1, count);
-    }
     if (!r_glDrawElements) r_glDrawElements = gl_proc("glDrawElements");
     if (r_glDrawElements) r_glDrawElements(mode, count, type, indices);
 }
@@ -1402,18 +940,24 @@ static void w_glDrawElements(unsigned mode, int count, unsigned type, const void
 static void (*r_glDrawArrays)(unsigned, int, int);
 static void w_glDrawArrays(unsigned mode, int first, int count)
 {
-    static atomic_int draw_count;
-    int c = atomic_fetch_add(&draw_count, 1);
-    int curProg = 0;
-    a_glGetIntegerv(0x8B8D /* GL_CURRENT_PROGRAM */, &curProg);
-    if (curProg >= 40) {
-        enhance_draw_pipeline(curProg);
-    }
-    if (c < 30 || (c % 600 == 0)) {
-        tl_log_line("gl: glDrawArrays #%d prog %d, first %d, cnt %d", c, curProg, first, count);
-    }
     if (!r_glDrawArrays) r_glDrawArrays = gl_proc("glDrawArrays");
     if (r_glDrawArrays) r_glDrawArrays(mode, first, count);
+}
+
+static void (*r_glDrawElementsBaseVertex)(unsigned, int, unsigned, const void *, int);
+static void w_glDrawElementsBaseVertex(unsigned mode, int count, unsigned type, const void *indices, int basevertex)
+{
+    if (!r_glDrawElementsBaseVertex) {
+        r_glDrawElementsBaseVertex = gl_proc("glDrawElementsBaseVertex");
+        if (!r_glDrawElementsBaseVertex) r_glDrawElementsBaseVertex = gl_proc("glDrawElementsBaseVertexEXT");
+        if (!r_glDrawElementsBaseVertex) r_glDrawElementsBaseVertex = gl_proc("glDrawElementsBaseVertexOES");
+    }
+    if (r_glDrawElementsBaseVertex) {
+        r_glDrawElementsBaseVertex(mode, count, type, indices, basevertex);
+        return;
+    }
+    if (!r_glDrawElements) r_glDrawElements = gl_proc("glDrawElements");
+    if (r_glDrawElements) r_glDrawElements(mode, count, type, indices);
 }
 
 
@@ -1436,6 +980,14 @@ static bool ext_hidden(const char *name, size_t n)
     }
     return false;
 }
+
+static const char *const k_extra_exts[] = {
+    "GL_EXT_copy_image",
+    "GL_OES_copy_image",
+    "GL_EXT_draw_elements_base_vertex",
+    "GL_OES_draw_elements_base_vertex",
+};
+#define EXTRA_EXT_COUNT (sizeof(k_extra_exts) / sizeof(k_extra_exts[0]))
 
 #include "husk-tl-egl-es31.inc"
 
@@ -1463,13 +1015,16 @@ static const unsigned char *w_glGetString(unsigned name)
     if (source != s) {
         free(filtered);
         size_t len = strlen((const char *)s);
-        filtered = malloc(len + 64);
+        filtered = malloc(len + 256);
         size_t k = 0;
         for (const char *p = (const char *)s; *p;) {
             const char *e = strchr(p, ' ');
             size_t n = e ? (size_t)(e - p) : strlen(p);
             if (n && !ext_hidden(p, n)) { if (k) filtered[k++] = ' '; memcpy(filtered + k, p, n); k += n; }
             p += n; if (e) p++;
+        }
+        for (size_t i = 0; i < EXTRA_EXT_COUNT; i++) {
+            k += (size_t)snprintf(filtered + k, 64, "%s%s", k ? " " : "", k_extra_exts[i]);
         }
         /* The engines that need ES 3.1 buffer textures check for the extension before asking for its entry points. */
         if (g_es31_shim) { k += (size_t)snprintf(filtered + k, 62, "%sGL_EXT_texture_buffer", k ? " " : ""); }
@@ -1484,12 +1039,22 @@ static const unsigned char *(*r_glGetStringi)(unsigned, unsigned);
 static const unsigned char *w_glGetStringi(unsigned name, unsigned index)
 {
     if (!r_glGetStringi) r_glGetStringi = gl_proc("glGetStringi");
-    const unsigned char *s = r_glGetStringi ? r_glGetStringi(name, index) : NULL;
-    if (name == 0x1F03 /* GL_EXTENSIONS */ && s) {
-        static atomic_int ext_count;
-        int idx = atomic_fetch_add(&ext_count, 1);
-        if (idx < 50) tl_log_line("gl: ext[%d]: %s", idx, (const char *)s);
+    if (name == 0x1F03 /* GL_EXTENSIONS */) {
+        int host_num = 0;
+        if (r_glGetIntegerv) r_glGetIntegerv(0x821D /* GL_NUM_EXTENSIONS */, &host_num);
+        else {
+            void (*get_iv)(unsigned, int *) = gl_proc("glGetIntegerv");
+            if (get_iv) get_iv(0x821D, &host_num);
+        }
+        if (host_num > 0 && index >= (unsigned)host_num) {
+            unsigned extra_idx = index - (unsigned)host_num;
+            if (extra_idx < EXTRA_EXT_COUNT) {
+                return (const unsigned char *)k_extra_exts[extra_idx];
+            }
+            return NULL;
+        }
     }
+    const unsigned char *s = r_glGetStringi ? r_glGetStringi(name, index) : NULL;
     if (name == 0x1F03 && s && ext_hidden((const char *)s, strlen((const char *)s))) return (const unsigned char *)"GL_ANGLE_husk_hidden_extension";
     return s;
 }
@@ -1552,6 +1117,11 @@ static EGLBoolean w_eglDestroySync(EGLDisplay d, void *s) { return s ? r_eglDest
 static const struct { const char *name; void *wrap; void **real; } k_adapt[] = {
     ADAPT(glBlitFramebuffer), ADAPT(glTexImage3D), ADAPT(glCompressedTexImage3D), ADAPT(glTexStorage3D),
     ADAPT(glBindTexture), ADAPT(glTexSubImage3D), ADAPT(glCompressedTexSubImage3D), ADAPT(glCopyImageSubData),
+    ADAPT(glCopyTexSubImage3D),
+    { "glCopyImageSubDataEXT", (void *)w_glCopyImageSubData, (void **)&r_glCopyImageSubData },
+    { "glCopyImageSubDataOES", (void *)w_glCopyImageSubData, (void **)&r_glCopyImageSubData },
+    { "glCopyTexSubImage3DEXT", (void *)w_glCopyTexSubImage3D, (void **)&r_glCopyTexSubImage3D },
+    { "glCopyTexSubImage3DOES", (void *)w_glCopyTexSubImage3D, (void **)&r_glCopyTexSubImage3D },
     ADAPT(glColorMask), ADAPT(glDepthMask), ADAPT(glVertexAttribPointer), ADAPT(glUniformMatrix2fv),
     ADAPT(glUniformMatrix3fv), ADAPT(glUniformMatrix4fv),
     ADAPT(glUniformMatrix2x3fv), ADAPT(glUniformMatrix3x2fv), ADAPT(glUniformMatrix2x4fv), ADAPT(glUniformMatrix4x2fv),
@@ -1559,7 +1129,9 @@ static const struct { const char *name; void *wrap; void **real; } k_adapt[] = {
     ADAPT(glSampleCoverage), ADAPT(glTexImage2D), ADAPT(glTexStorage2D), ADAPT(glTexSubImage2D), ADAPT(glCompressedTexImage2D), ADAPT(glCompressedTexSubImage2D), ADAPT(glUniformBlockBinding),
     ADAPT(glGetString), ADAPT(glGetStringi), ADAPT(glCompileShader), ADAPT(glShaderSource), ADAPT(glAttachShader), ADAPT(glLinkProgram), ADAPT(glGetIntegerv), ADAPT(glBindBufferBase), ADAPT(glBindBuffer), ADAPT(glBufferData), ADAPT(glBufferSubData), ADAPT(glBindBufferRange),
     ADAPT(glProgramBinary), ADAPT(glShaderBinary), ADAPT(glCreateShaderProgramv), ADAPT(glCreateProgram), ADAPT(glCreateShader),
-    ADAPT(glDrawElements), ADAPT(glDrawArrays),
+    ADAPT(glDrawElements), ADAPT(glDrawArrays), ADAPT(glDrawElementsBaseVertex),
+    { "glDrawElementsBaseVertexEXT", (void *)w_glDrawElementsBaseVertex, (void **)&r_glDrawElementsBaseVertex },
+    { "glDrawElementsBaseVertexOES", (void *)w_glDrawElementsBaseVertex, (void **)&r_glDrawElementsBaseVertex },
     ADAPT(glBlendFunc), ADAPT(glBlendFuncSeparate), ADAPT(glBlendEquation), ADAPT(glBlendEquationSeparate), ADAPT(glEnable), ADAPT(glDisable),
     ADAPT(glGetProgramInterfaceiv), ADAPT(glGetProgramResourceIndex), ADAPT(glGetProgramResourceName), ADAPT(glGetProgramResourceiv), ADAPT(glGetIntegeri_v),
     ADAPT(eglClientWaitSyncKHR), ADAPT(eglDestroySyncKHR), ADAPT(eglGetSyncAttribKHR), ADAPT(eglClientWaitSync), ADAPT(eglDestroySync),
@@ -1749,12 +1321,15 @@ static void *egl_resolve(const char *name)
     for (size_t i = 0; i < sizeof(k_egl) / sizeof(k_egl[0]); i++) if (!strcmp(k_egl[i].name, name)) return k_egl[i].fn;
     if (!E.ready) return NULL;
     void *real = gl_proc(name);
-    if (!real) return NULL;
     static int trace = -1;
     if (trace < 0) trace = getenv("TL_GL_TRACE") ? 1 : 0;
     for (size_t i = 0; i < sizeof(k_adapt) / sizeof(k_adapt[0]); i++) {
-        if (!strcmp(k_adapt[i].name, name)) { *k_adapt[i].real = real; return trace ? glt_wrap(name, k_adapt[i].wrap) : k_adapt[i].wrap; }
+        if (!strcmp(k_adapt[i].name, name)) {
+            if (real) *k_adapt[i].real = real;
+            return trace ? glt_wrap(name, k_adapt[i].wrap) : k_adapt[i].wrap;
+        }
     }
+    if (!real) return NULL;
     return trace && name[0] == 'g' && name[1] == 'l' ? glt_wrap(name, real) : real;
 }
 
