@@ -525,27 +525,26 @@ static void w_glTexStorage3D(unsigned target, int levels, unsigned internalforma
     tl_log_line("gl: glTexStorage3D(target %#x, lvls %d, intfmt %#x, %dx%dx%d) -> err %#x",
                 target, levels, internalformat, width, height, depth, gl_proc_get_error());
 
-    /* GoreBox Character & NPC 2D Array Texture Auto-Populator:
-     * When a 2D texture array is allocated (target == 0x8C1A, depth >= 2), GoreBox allocates
-     * 512x512x5 for _RoleMaps (0x8C43) and _RoleBumps (0x8058), but never uploads pixel slices via
-     * glTexSubImage3D, leaving slices uninitialized (transparent black zeroes in Metal).
-     * We populate each slice with human skin/clothing colors (or flat tangent normal for bumps)
-     * so characters always have distinct, shaded, non-black body parts!
+    /* GoreBox 2D Texture Array Auto-Populator:
+     * - depth == 5: Characters & NPCs (_RoleMaps 0x8C43, _RoleBumps 0x8058).
+     *   Populate 5 body part slices with human skin / clothing colors and flat tangent normal.
+     * - depth == 2: Terrain (_TerrainAlbedo 0x8C43, _TerrainNormal 0x8058, _TerrainSpec 0x8058, _TerrainHeight 0x8229).
+     *   Populate slice 0 (dirt road) with natural earthy dirt road brown, slice 1 with natural ground brown/green,
+     *   normal map with flat tangent normals (128, 128, 255), spec with low specularity (30), and height with neutral 128!
      */
     if (target == 0x8C1A /* GL_TEXTURE_2D_ARRAY */ && depth >= 2 && width >= 4 && height >= 4) {
         if (!r_glTexSubImage3D) r_glTexSubImage3D = gl_proc("glTexSubImage3D");
         if (r_glTexSubImage3D) {
-            bool is_bump = (internalformat == 0x8058 /* GL_RGBA8 */ && depth >= 5);
             bool is_r8 = (internalformat == 0x8229 /* GL_R8 */);
             unsigned upload_fmt = is_r8 ? 0x1903 /* GL_RED */ : 0x1908 /* GL_RGBA */;
             int bpp = is_r8 ? 1 : 4;
             size_t slice_bytes = (size_t)width * height * (size_t)bpp;
             uint8_t *slice_data = malloc(slice_bytes);
             if (slice_data) {
-                for (int s = 0; s < depth; s++) {
-                    if (is_r8) {
-                        memset(slice_data, 255, slice_bytes);
-                    } else {
+                if (depth >= 5) {
+                    /* Character & NPC body parts (depth 5: Head, Torso, Arms, Legs, Shoes) */
+                    bool is_bump = (internalformat == 0x8058 /* GL_RGBA8 */);
+                    for (int s = 0; s < depth; s++) {
                         uint8_t r = 235, g = 195, b = 165, a = 255;
                         if (is_bump) {
                             r = 128; g = 128; b = 255; a = 255; /* Flat tangent-space normal (0, 0, 1) */
@@ -563,13 +562,47 @@ static void w_glTexStorage3D(unsigned target, int levels, unsigned internalforma
                         uint32_t *p32 = (uint32_t *)slice_data;
                         size_t npix = (size_t)width * height;
                         for (size_t p = 0; p < npix; p++) p32[p] = pixel;
+                        r_glTexSubImage3D(target, 0, 0, 0, s, width, height, 1, upload_fmt, 0x1401 /* GL_UNSIGNED_BYTE */, slice_data);
                     }
-                    r_glTexSubImage3D(target, 0, 0, 0, s, width, height, 1, upload_fmt, 0x1401 /* GL_UNSIGNED_BYTE */, slice_data);
+                } else if (depth == 2) {
+                    /* Terrain 2D Array Textures (depth 2: slice 0 = dirt road / path, slice 1 = ground / terrain) */
+                    for (int s = 0; s < depth; s++) {
+                        if (is_r8) {
+                            memset(slice_data, 128, slice_bytes); /* Neutral displacement height */
+                        } else if (internalformat == 0x8058 /* GL_RGBA8 */) {
+                            if (width >= 512) {
+                                /* _TerrainNormal: Flat tangent-space normal (128, 128, 255, 255) */
+                                uint32_t norm_pixel = 128 | (128 << 8) | (255 << 16) | (255u << 24);
+                                uint32_t *p32 = (uint32_t *)slice_data;
+                                size_t npix = (size_t)width * height;
+                                for (size_t p = 0; p < npix; p++) p32[p] = norm_pixel;
+                            } else {
+                                /* _TerrainSpec: Low specularity matte dirt/ground */
+                                uint32_t spec_pixel = 30 | (30 << 8) | (30 << 16) | (255u << 24);
+                                uint32_t *p32 = (uint32_t *)slice_data;
+                                size_t npix = (size_t)width * height;
+                                for (size_t p = 0; p < npix; p++) p32[p] = spec_pixel;
+                            }
+                        } else {
+                            /* _TerrainAlbedo / _TerrainEmission (0x8C43):
+                             * Slice 0: Natural earthy dirt road brown (140, 115, 85, 255)
+                             * Slice 1: Natural ground earthy green/brown (110, 130, 85, 255)
+                             */
+                            uint8_t r = (s == 0) ? 140 : 110;
+                            uint8_t g = (s == 0) ? 115 : 130;
+                            uint8_t b = (s == 0) ? 85  : 85;
+                            uint32_t pixel = (uint32_t)r | ((uint32_t)g << 8) | ((uint32_t)b << 16) | (255u << 24);
+                            uint32_t *p32 = (uint32_t *)slice_data;
+                            size_t npix = (size_t)width * height;
+                            for (size_t p = 0; p < npix; p++) p32[p] = pixel;
+                        }
+                        r_glTexSubImage3D(target, 0, 0, 0, s, width, height, 1, upload_fmt, 0x1401 /* GL_UNSIGNED_BYTE */, slice_data);
+                    }
                 }
                 free(slice_data);
                 void (*gen_mip)(unsigned) = gl_proc("glGenerateMipmap");
                 if (gen_mip) gen_mip(target);
-                tl_log_line("gl: [AUTO_POPULATE] populated %d slices for 2D Array %dx%dx%d (is_bump=%d, is_r8=%d)", depth, width, height, depth, is_bump, is_r8);
+                tl_log_line("gl: [AUTO_POPULATE] populated %d slices for 2D Array %dx%dx%d (intfmt %#x)", depth, width, height, depth, internalformat);
             }
         }
     }
@@ -1078,8 +1111,10 @@ static void enhance_draw_pipeline(int curProg)
         fn_is_en = gl_proc("glIsEnabled");
     }
 
-    /* 1. GoreBox Character & NPC Meshes (prog 44, 45, 46, 60, 61, 62) */
-    if (curProg == 44 || curProg == 45 || curProg == 46 || curProg == 60 || curProg == 61 || curProg == 62) {
+    /* 1. GoreBox Character & NPC Meshes (prog 44, 45, 60, 61, 62).
+     * Note: prog 46 is standard URP Lit for weapons and static props; do not alter its material properties!
+     */
+    if (curProg == 44 || curProg == 45 || curProg == 60 || curProg == 61 || curProg == 62) {
         if (u_loc && u_4f) {
             /* Bypass shadow attenuation zeroing */
             int loc_sp = u_loc((unsigned)curProg, "_MainLightShadowParams");
@@ -1205,6 +1240,8 @@ static void enhance_draw_pipeline(int curProg)
     }
 }
 
+static unsigned long g_fp_hands_last_swap = 0;
+
 static void (*r_glDrawElements)(unsigned, int, unsigned, const void *);
 static void w_glDrawElements(unsigned mode, int count, unsigned type, const void *indices)
 {
@@ -1212,6 +1249,27 @@ static void w_glDrawElements(unsigned mode, int count, unsigned type, const void
     int c = atomic_fetch_add(&draw_count, 1);
     int curProg = 0;
     a_glGetIntegerv(0x8B8D /* GL_CURRENT_PROGRAM */, &curProg);
+
+    if (curProg == 44) {
+        /* Viewmodel hands drawn in 1st-person view */
+        g_fp_hands_last_swap = (unsigned long)atomic_load(&E.presented);
+    } else if (curProg == 45 || curProg == 49) {
+        /* If 1st-person viewmodel hands were drawn in this frame, cull the overlapping
+         * 3rd-person playermodel so the player doesn't see both playermodel and viewmodel hands!
+         */
+        static int s_cull_fp_body = -1;
+        if (s_cull_fp_body < 0) {
+            const char *e = getenv("TL_CULL_FP_BODY");
+            s_cull_fp_body = (e && strcmp(e, "0") == 0) ? 0 : 1;
+        }
+        if (s_cull_fp_body) {
+            unsigned long current_swap = (unsigned long)atomic_load(&E.presented);
+            if (current_swap >= g_fp_hands_last_swap && current_swap - g_fp_hands_last_swap <= 1) {
+                return; /* Discard overlapping 3rd-person playermodel in 1st-person view */
+            }
+        }
+    }
+
     if (curProg >= 40) {
         inspect_prog_draw((unsigned)curProg, count);
     }
