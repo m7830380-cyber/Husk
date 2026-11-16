@@ -547,7 +547,12 @@ static void w_glTexStorage3D(unsigned target, int levels, unsigned internalforma
                     for (int s = 0; s < depth; s++) {
                         uint8_t r = 235, g = 195, b = 165, a = 255;
                         if (is_bump) {
-                            r = 128; g = 128; b = 255; a = 255; /* Flat tangent-space normal (0, 0, 1) */
+                            /* Flat tangent-space normal (0, 0, 1):
+                             * Set a = 128 (0.5) so that both standard RGB unpack (r,g,b) and Unity DXT5nm
+                             * unpack (normal.x = a * 2 - 1, normal.y = g * 2 - 1) decode to (0, 0, 1).
+                             * When a was 255, DXT5nm decoded normal.x = +1.0, tilting all normals 90 degrees!
+                             */
+                            r = 128; g = 128; b = 255; a = 128;
                         } else {
                             switch (s) {
                                 case 0: r = 235; g = 195; b = 165; break; /* Head / Face skin */
@@ -571,8 +576,8 @@ static void w_glTexStorage3D(unsigned target, int levels, unsigned internalforma
                             memset(slice_data, 128, slice_bytes); /* Neutral displacement height */
                         } else if (internalformat == 0x8058 /* GL_RGBA8 */) {
                             if (width >= 512) {
-                                /* _TerrainNormal: Flat tangent-space normal (128, 128, 255, 255) */
-                                uint32_t norm_pixel = 128 | (128 << 8) | (255 << 16) | (255u << 24);
+                                /* _TerrainNormal: Flat tangent-space normal (128, 128, 255, 128) */
+                                uint32_t norm_pixel = 128 | (128 << 8) | (255 << 16) | (128u << 24);
                                 uint32_t *p32 = (uint32_t *)slice_data;
                                 size_t npix = (size_t)width * height;
                                 for (size_t p = 0; p < npix; p++) p32[p] = norm_pixel;
@@ -1111,10 +1116,12 @@ static void enhance_draw_pipeline(int curProg)
         fn_is_en = gl_proc("glIsEnabled");
     }
 
-    /* 1. GoreBox Character & NPC Meshes (prog 44, 45, 60, 61, 62).
-     * Note: prog 46 is standard URP Lit for weapons and static props; do not alter its material properties!
+    /* 1. GoreBox Character & NPC Meshes (prog 46, 50, 60, 61, 62).
+     * Note: prog 44 is terrain shader (_TerrainField/_TerrainAlbedo); do NOT touch its UBO 1!
+     * Prog 46 is character role shader (with shadowmap).
+     * Prog 50 is viewmodel hands role shader.
      */
-    if (curProg == 44 || curProg == 45 || curProg == 60 || curProg == 61 || curProg == 62) {
+    if (curProg == 46 || curProg == 50 || curProg == 45 || curProg == 60 || curProg == 61 || curProg == 62) {
         if (u_loc && u_4f) {
             /* Bypass shadow attenuation zeroing */
             int loc_sp = u_loc((unsigned)curProg, "_MainLightShadowParams");
@@ -1250,10 +1257,10 @@ static void w_glDrawElements(unsigned mode, int count, unsigned type, const void
     int curProg = 0;
     a_glGetIntegerv(0x8B8D /* GL_CURRENT_PROGRAM */, &curProg);
 
-    if (curProg == 44) {
+    if (curProg == 50) {
         /* Viewmodel hands drawn in 1st-person view */
         g_fp_hands_last_swap = (unsigned long)atomic_load(&E.presented);
-    } else if (curProg == 45 || curProg == 49) {
+    } else if (curProg == 46 || curProg == 45 || curProg == 49) {
         /* If 1st-person viewmodel hands were drawn in this frame, cull the overlapping
          * 3rd-person playermodel so the player doesn't see both playermodel and viewmodel hands!
          */
@@ -1262,10 +1269,37 @@ static void w_glDrawElements(unsigned mode, int count, unsigned type, const void
             const char *e = getenv("TL_CULL_FP_BODY");
             s_cull_fp_body = (e && strcmp(e, "0") == 0) ? 0 : 1;
         }
-        if (s_cull_fp_body) {
+        if (s_cull_fp_body && g_fp_hands_last_swap > 0) {
             unsigned long current_swap = (unsigned long)atomic_load(&E.presented);
             if (current_swap >= g_fp_hands_last_swap && current_swap - g_fp_hands_last_swap <= 1) {
-                return; /* Discard overlapping 3rd-person playermodel in 1st-person view */
+                /* In 1st-person view: only cull CAMERA-PASS draws (near clip < 0.1).
+                 * Preserve shadow-pass draws (near clip >= 0.1) so player's shadow is cast on ground!
+                 */
+                static int loc_proj[128];
+                static bool loc_proj_inited = false;
+                if (!loc_proj_inited) {
+                    memset(loc_proj, -1, sizeof(loc_proj));
+                    loc_proj_inited = true;
+                }
+                int lp = -1;
+                if (curProg < 128) {
+                    lp = loc_proj[curProg];
+                    if (lp == -1) {
+                        int (*fn_get_uloc)(unsigned, const char *) = gl_proc("glGetUniformLocation");
+                        lp = fn_get_uloc ? fn_get_uloc((unsigned)curProg, "_ProjectionParams") : -2;
+                        loc_proj[curProg] = lp;
+                    }
+                }
+                float proj[4] = {0};
+                void (*fn_get_ufv)(unsigned, int, float *) = gl_proc("glGetUniformfv");
+                if (fn_get_ufv && lp >= 0) {
+                    fn_get_ufv((unsigned)curProg, lp, proj);
+                    if (proj[1] > 0.0f && proj[1] < 0.10f) {
+                        return; /* Discard overlapping 3rd-person playermodel in 1st-person camera pass */
+                    }
+                } else {
+                    return;
+                }
             }
         }
     }
@@ -1274,6 +1308,15 @@ static void w_glDrawElements(unsigned mode, int count, unsigned type, const void
         inspect_prog_draw((unsigned)curProg, count);
     }
     enhance_draw_pipeline(curProg);
+
+    static void (*fn_depth_range)(float, float) = NULL;
+    if (curProg == 50) {
+        /* Compress viewmodel hands depth range to [0.0, 0.30] so they never clip into
+         * the floor, terrain, or walls when looking down or standing near obstacles!
+         */
+        if (!fn_depth_range) fn_depth_range = gl_proc("glDepthRangef");
+        if (fn_depth_range) fn_depth_range(0.0f, 0.30f);
+    }
 
     if (c < 30 || (c % 600 == 0)) {
         int ubo0 = 0, ubo1 = 0;
@@ -1289,6 +1332,10 @@ static void w_glDrawElements(unsigned mode, int count, unsigned type, const void
     }
     if (!r_glDrawElements) r_glDrawElements = gl_proc("glDrawElements");
     if (r_glDrawElements) r_glDrawElements(mode, count, type, indices);
+
+    if (curProg == 50 && fn_depth_range) {
+        fn_depth_range(0.0f, 1.0f);
+    }
 }
 
 static void (*r_glDrawArrays)(unsigned, int, int);
