@@ -1116,12 +1116,26 @@ static void enhance_draw_pipeline(int curProg)
         fn_is_en = gl_proc("glIsEnabled");
     }
 
-    /* 1. GoreBox Character & NPC Meshes (prog 46, 50, 60, 61, 62).
-     * Note: prog 44 is terrain shader (_TerrainField/_TerrainAlbedo); do NOT touch its UBO 1!
-     * Prog 46 is character role shader (with shadowmap).
-     * Prog 50 is viewmodel hands role shader.
+    /* 1. GoreBox Character & NPC Meshes:
+     * Dynamically classify GoreBox Role Shaders (_RoleColor0 / _RoleMaps).
+     * This avoids any hardcoded program ID fragility when shader IDs shift across app runs.
      */
-    if (curProg == 46 || curProg == 50 || curProg == 45 || curProg == 60 || curProg == 61 || curProg == 62) {
+    static int8_t s_prog_is_role[256];
+    static bool s_role_cache_inited = false;
+    if (!s_role_cache_inited) {
+        memset(s_prog_is_role, -1, sizeof(s_prog_is_role));
+        s_role_cache_inited = true;
+    }
+    int is_role = 0;
+    if (curProg > 0 && curProg < 256) {
+        if (s_prog_is_role[curProg] == -1) {
+            int loc = u_loc ? u_loc((unsigned)curProg, "_RoleColor0") : -1;
+            s_prog_is_role[curProg] = (loc >= 0) ? 1 : 0;
+        }
+        is_role = s_prog_is_role[curProg];
+    }
+
+    if (is_role) {
         if (u_loc && u_4f) {
             /* Bypass shadow attenuation zeroing */
             int loc_sp = u_loc((unsigned)curProg, "_MainLightShadowParams");
@@ -1195,47 +1209,8 @@ static void enhance_draw_pipeline(int curProg)
                 b_buf(0x8A11, (unsigned)prev_ub);
             }
         }
-    }
-
-    /* 2. Transparent shaders, decals, and particles (prog 47, 49, 56, 57, 58, 59):
-     * Fix black opaque rectangles around blood, decals, smoke, and particles!
-     */
-    if (curProg == 47 || curProg == 49 || curProg == 56 || curProg == 57 || curProg == 58 || curProg == 59) {
-        if (fn_enable) fn_enable(0x0BE2 /* GL_BLEND */);
-        if (set_depth_mask) set_depth_mask(0 /* GL_FALSE */);
-        if (set_blend_fn) {
-            int src_rgb = 0, dst_rgb = 0;
-            a_glGetIntegerv(0x80C9 /* GL_BLEND_SRC_RGB */, &src_rgb);
-            a_glGetIntegerv(0x80C8 /* GL_BLEND_DST_RGB */, &dst_rgb);
-            if (src_rgb == 0 && dst_rgb == 0) {
-                set_blend_fn(0x0302 /* GL_SRC_ALPHA */, 0x0303 /* GL_ONE_MINUS_SRC_ALPHA */, 1 /* GL_ONE */, 0x0303);
-            }
-        }
-        if (u_loc && u_4f) {
-            int loc_sp = u_loc((unsigned)curProg, "_MainLightShadowParams");
-            if (loc_sp >= 0) u_4f(loc_sp, 0.0f, 0.0f, 0.0f, 0.0f);
-
-            int loc_cf = u_loc((unsigned)curProg, "_CameraFadeParams");
-            if (loc_cf >= 0) u_4f(loc_cf, 0.0f, 1.0f, 0.0f, 0.0f);
-        }
-
-        /* Fix prog 59 UnityPerMaterial (buf 3845) zeroed _BaseColor and _Surface */
-        if (curProg == 59 && get_int_i && b_buf && b_sub) {
-            int ubo1 = 0;
-            get_int_i(0x8A28, 1, &ubo1);
-            if (ubo1 > 0) {
-                int prev_ub = 0;
-                a_glGetIntegerv(0x8A28, &prev_ub);
-                b_buf(0x8A11, (unsigned)ubo1);
-                static const float white_color[4] = { 1.0f, 1.0f, 1.0f, 1.0f };
-                static const float surf_transparent = 1.0f;
-                b_sub(0x8A11, 0, sizeof(white_color), white_color);
-                b_sub(0x8A11, 64, sizeof(float), &surf_transparent);
-                b_buf(0x8A11, (unsigned)prev_ub);
-            }
-        }
     } else {
-        /* General safety for any draw call that has GL_BLEND enabled with src=0 and dst=0 */
+        /* General safety for any transparent draw call that has GL_BLEND enabled with src=0 and dst=0 */
         if (fn_is_en && fn_is_en(0x0BE2 /* GL_BLEND */) && set_blend_fn) {
             int src_rgb = 0, dst_rgb = 0;
             a_glGetIntegerv(0x80C9 /* GL_BLEND_SRC_RGB */, &src_rgb);
@@ -1247,8 +1222,6 @@ static void enhance_draw_pipeline(int curProg)
     }
 }
 
-static unsigned long g_fp_hands_last_swap = 0;
-
 static void (*r_glDrawElements)(unsigned, int, unsigned, const void *);
 static void w_glDrawElements(unsigned mode, int count, unsigned type, const void *indices)
 {
@@ -1257,66 +1230,10 @@ static void w_glDrawElements(unsigned mode, int count, unsigned type, const void
     int curProg = 0;
     a_glGetIntegerv(0x8B8D /* GL_CURRENT_PROGRAM */, &curProg);
 
-    if (curProg == 50) {
-        /* Viewmodel hands drawn in 1st-person view */
-        g_fp_hands_last_swap = (unsigned long)atomic_load(&E.presented);
-    } else if (curProg == 46 || curProg == 45 || curProg == 49) {
-        /* If 1st-person viewmodel hands were drawn in this frame, cull the overlapping
-         * 3rd-person playermodel so the player doesn't see both playermodel and viewmodel hands!
-         */
-        static int s_cull_fp_body = -1;
-        if (s_cull_fp_body < 0) {
-            const char *e = getenv("TL_CULL_FP_BODY");
-            s_cull_fp_body = (e && strcmp(e, "0") == 0) ? 0 : 1;
-        }
-        if (s_cull_fp_body && g_fp_hands_last_swap > 0) {
-            unsigned long current_swap = (unsigned long)atomic_load(&E.presented);
-            if (current_swap >= g_fp_hands_last_swap && current_swap - g_fp_hands_last_swap <= 1) {
-                /* In 1st-person view: only cull CAMERA-PASS draws (near clip < 0.1).
-                 * Preserve shadow-pass draws (near clip >= 0.1) so player's shadow is cast on ground!
-                 */
-                static int loc_proj[128];
-                static bool loc_proj_inited = false;
-                if (!loc_proj_inited) {
-                    memset(loc_proj, -1, sizeof(loc_proj));
-                    loc_proj_inited = true;
-                }
-                int lp = -1;
-                if (curProg < 128) {
-                    lp = loc_proj[curProg];
-                    if (lp == -1) {
-                        int (*fn_get_uloc)(unsigned, const char *) = gl_proc("glGetUniformLocation");
-                        lp = fn_get_uloc ? fn_get_uloc((unsigned)curProg, "_ProjectionParams") : -2;
-                        loc_proj[curProg] = lp;
-                    }
-                }
-                float proj[4] = {0};
-                void (*fn_get_ufv)(unsigned, int, float *) = gl_proc("glGetUniformfv");
-                if (fn_get_ufv && lp >= 0) {
-                    fn_get_ufv((unsigned)curProg, lp, proj);
-                    if (proj[1] > 0.0f && proj[1] < 0.10f) {
-                        return; /* Discard overlapping 3rd-person playermodel in 1st-person camera pass */
-                    }
-                } else {
-                    return;
-                }
-            }
-        }
-    }
-
     if (curProg >= 40) {
         inspect_prog_draw((unsigned)curProg, count);
     }
     enhance_draw_pipeline(curProg);
-
-    static void (*fn_depth_range)(float, float) = NULL;
-    if (curProg == 50) {
-        /* Compress viewmodel hands depth range to [0.0, 0.30] so they never clip into
-         * the floor, terrain, or walls when looking down or standing near obstacles!
-         */
-        if (!fn_depth_range) fn_depth_range = gl_proc("glDepthRangef");
-        if (fn_depth_range) fn_depth_range(0.0f, 0.30f);
-    }
 
     if (c < 30 || (c % 600 == 0)) {
         int ubo0 = 0, ubo1 = 0;
@@ -1332,10 +1249,6 @@ static void w_glDrawElements(unsigned mode, int count, unsigned type, const void
     }
     if (!r_glDrawElements) r_glDrawElements = gl_proc("glDrawElements");
     if (r_glDrawElements) r_glDrawElements(mode, count, type, indices);
-
-    if (curProg == 50 && fn_depth_range) {
-        fn_depth_range(0.0f, 1.0f);
-    }
 }
 
 static void (*r_glDrawArrays)(unsigned, int, int);
