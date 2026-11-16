@@ -129,8 +129,27 @@ static const char *synth_content(const char *path, char *buf, size_t n)
         snprintf(buf, n, "MemTotal:       11722000 kB\nMemFree:         3000000 kB\nMemAvailable:    5000000 kB\nBuffers:           10000 kB\nCached:          2000000 kB\nSwapTotal:             0 kB\nSwapFree:              0 kB\n");
         return buf;
     }
-    if (!strncmp(path, "/sys/devices/system/cpu/", 24) && (strstr(path, "/present") || strstr(path, "/possible") || strstr(path, "/online"))) {
-        snprintf(buf, n, "0-%ld\n", (getenv("TL_NCPU") ? atol(getenv("TL_NCPU")) : sysconf(_SC_NPROCESSORS_ONLN)) - 1);
+    if (!strncmp(path, "/sys/devices/system/cpu/", 24)) {
+        if (strstr(path, "/present") || strstr(path, "/possible") || strstr(path, "/online")) {
+            snprintf(buf, n, "0-%ld\n", (getenv("TL_NCPU") ? atol(getenv("TL_NCPU")) : sysconf(_SC_NPROCESSORS_ONLN)) - 1);
+            return buf;
+        }
+        if (strstr(path, "/kernel_max")) {
+            snprintf(buf, n, "%ld\n", (getenv("TL_NCPU") ? atol(getenv("TL_NCPU")) : sysconf(_SC_NPROCESSORS_ONLN)) - 1);
+            return buf;
+        }
+        if (strstr(path, "cpufreq") || strstr(path, "_freq")) {
+            snprintf(buf, n, "3200000\n");
+            return buf;
+        }
+    }
+    if (!strcmp(path, "/proc/stat")) {
+        snprintf(buf, n, "cpu  10000 0 5000 800000 1000 0 0 0 0 0\n"
+                          "intr 1000000\nctxt 2000000\nbtime 1700000000\nprocesses 5000\nprocs_running 2\nprocs_blocked 0\n");
+        return buf;
+    }
+    if (!strcmp(path, "/proc/version")) {
+        snprintf(buf, n, "Linux version 5.15.0-android14-gki (android-build@google.com) (clang version 17.0.2) #1 SMP PREEMPT\n");
         return buf;
     }
     if (!strcmp(path, "/proc/self/maps") || (!strncmp(path, "/proc/", 6) && strstr(path, "/maps") && !strcmp(strstr(path, "/maps"), "/maps"))) {

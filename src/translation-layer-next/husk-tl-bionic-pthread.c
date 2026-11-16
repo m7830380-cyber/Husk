@@ -488,6 +488,100 @@ static int b_setname_np(pthread_t t, const char *name)
 static int b_join(pthread_t t, void **ret) { return rc(pthread_join(t, ret)); }
 static int b_detach(pthread_t t) { return rc(pthread_detach(t)); }
 
+/* ---------------------------------------------------------------- barriers */
+
+typedef struct {
+    pthread_mutex_t mu;
+    pthread_cond_t cv;
+    unsigned int count;
+    unsigned int total;
+    unsigned int cycle;
+} tl_barrier;
+
+static void *make_barrier(uint32_t total)
+{
+    tl_barrier *b = calloc(1, sizeof(*b));
+    if (!b) return NULL;
+    pthread_mutex_init(&b->mu, NULL);
+    pthread_cond_init(&b->cv, NULL);
+    b->total = total;
+    b->count = 0;
+    b->cycle = 0;
+    return b;
+}
+
+static int b_barrier_init(void *g, const void *attr, unsigned count)
+{
+    (void)attr;
+    if (!g || count == 0) return 22 /* EINVAL */;
+    guest_obj *o = g;
+    memset(g, 0, 32);
+    o->value = count;
+    o->host = make_barrier(count);
+    atomic_store_explicit(&o->magic, MAGIC_READY, memory_order_release);
+    return 0;
+}
+
+static int b_barrier_destroy(void *g)
+{
+    if (!g) return 22 /* EINVAL */;
+    guest_obj *o = g;
+    if (atomic_load(&o->magic) == MAGIC_READY && o->host) {
+        tl_barrier *b = o->host;
+        pthread_mutex_destroy(&b->mu);
+        pthread_cond_destroy(&b->cv);
+        free(b);
+        o->host = NULL;
+    }
+    memset(g, 0, 32);
+    return 0;
+}
+
+static int b_barrier_wait(void *g)
+{
+    if (!g) return 22 /* EINVAL */;
+    guest_obj *o = g;
+    tl_barrier *b = o->host;
+    if (!b) return 22 /* EINVAL */;
+    pthread_mutex_lock(&b->mu);
+    unsigned cycle = b->cycle;
+    b->count++;
+    if (b->count >= b->total) {
+        b->cycle++;
+        b->count = 0;
+        pthread_cond_broadcast(&b->cv);
+        pthread_mutex_unlock(&b->mu);
+        return -1 /* PTHREAD_BARRIER_SERIAL_THREAD */;
+    }
+    while (cycle == b->cycle) {
+        pthread_cond_wait(&b->cv, &b->mu);
+    }
+    pthread_mutex_unlock(&b->mu);
+    return 0;
+}
+
+static int b_barrierattr_init(void *attr) { if (attr) memset(attr, 0, 8); return 0; }
+static int b_barrierattr_destroy(void *attr) { (void)attr; return 0; }
+static int b_barrierattr_setpshared(void *attr, int pshared) { (void)attr; (void)pshared; return 0; }
+static int b_barrierattr_getpshared(const void *attr, int *pshared) { (void)attr; if (pshared) *pshared = 0; return 0; }
+
+static int b_pthread_getaffinity_np(pthread_t t, size_t size, void *mask)
+{
+    (void)t;
+    if (!mask || size == 0) return 22 /* EINVAL */;
+    memset(mask, 0, size);
+    long n = sysconf(_SC_NPROCESSORS_ONLN);
+    for (long i = 0; i < n && (size_t)(i / 8) < size; i++)
+        ((uint8_t *)mask)[i / 8] |= (uint8_t)(1u << (i % 8));
+    return 0;
+}
+
+static int b_pthread_setaffinity_np(pthread_t t, size_t size, const void *mask)
+{
+    (void)t; (void)size; (void)mask;
+    return 0;
+}
+
 /* sigset_t is one 64-bit word on bionic, bit (sig-1); Darwin's is a 32-bit mask. */
 static uint32_t sigset_to_darwin(uint64_t g)
 {
@@ -542,7 +636,11 @@ const tl_bionic_entry tl_tab_pthread[] = {
     TL_WRAP("pthread_getattr_np", b_getattr_np),
     TL_WRAP("pthread_create", b_create), TL_WRAP("pthread_join", b_join), TL_WRAP("pthread_detach", b_detach),
     TL_DIRECT(pthread_exit), TL_DIRECT(pthread_self), TL_DIRECT(pthread_equal),
-    TL_WRAP("pthread_kill", b_kill), TL_WRAP("pthread_setname_np", b_setname_np), TL_DIRECT(pthread_getname_np),
+    TL_WRAP("pthread_kill", b_kill), TL_WRAP("pthread_setname_np", b_setname_np),
     TL_WRAP("pthread_sigmask", b_sigmask), TL_WRAP("pthread_sigmask64", b_sigmask),
+    TL_WRAP("pthread_getaffinity_np", b_pthread_getaffinity_np), TL_WRAP("pthread_setaffinity_np", b_pthread_setaffinity_np),
+    TL_WRAP("pthread_barrier_init", b_barrier_init), TL_WRAP("pthread_barrier_destroy", b_barrier_destroy), TL_WRAP("pthread_barrier_wait", b_barrier_wait),
+    TL_WRAP("pthread_barrierattr_init", b_barrierattr_init), TL_WRAP("pthread_barrierattr_destroy", b_barrierattr_destroy),
+    TL_WRAP("pthread_barrierattr_getpshared", b_barrierattr_getpshared), TL_WRAP("pthread_barrierattr_setpshared", b_barrierattr_setpshared),
     TL_END
 };

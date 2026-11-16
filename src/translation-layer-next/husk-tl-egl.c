@@ -1097,7 +1097,7 @@ static const unsigned char *w_glGetString(unsigned name)
     if (source != s) {
         free(filtered);
         size_t len = strlen((const char *)s);
-        filtered = malloc(len + 256);
+        filtered = malloc(len + 1024);
         size_t k = 0;
         for (const char *p = (const char *)s; *p;) {
             const char *e = strchr(p, ' ');
