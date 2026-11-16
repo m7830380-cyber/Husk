@@ -283,6 +283,15 @@ static void w_glGetIntegerv(unsigned pname, int *data)
     r_glGetIntegerv(pname, data);
     if (g_es31_shim && pname == 0x821C /* GL_MINOR_VERSION */ && data && *data == 0) *data = g_es3_minor;
     if (pname == 0x821D /* GL_NUM_EXTENSIONS */ && data && *data > 0) *data += (int)EXTRA_EXT_COUNT;
+    if (pname == 0x84FF /* GL_MAX_TEXTURE_MAX_ANISOTROPY_EXT */ && data && *data <= 1) *data = 16;
+}
+
+static void (*r_glGetFloatv)(unsigned, float *);
+static void w_glGetFloatv(unsigned pname, float *data)
+{
+    if (!r_glGetFloatv) r_glGetFloatv = gl_proc("glGetFloatv");
+    if (r_glGetFloatv) r_glGetFloatv(pname, data);
+    if (pname == 0x84FF /* GL_MAX_TEXTURE_MAX_ANISOTROPY_EXT */ && data && *data <= 1.0f) *data = 16.0f;
 }
 
 /* The storage-buffer target (a block of the game's data) is a uniform buffer here; a buffer the game made for it is grown to what the

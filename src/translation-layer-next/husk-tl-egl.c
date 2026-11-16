@@ -229,7 +229,10 @@ static EGLBoolean w_eglChooseConfig(EGLDisplay d, const EGLint *at, EGLConfig *c
 }
 static EGLBoolean w_eglGetConfigAttrib(EGLDisplay d, EGLConfig c, EGLint at, EGLint *v)
 {
-    if (at == 0x3142 /* EGL_RECORDABLE_ANDROID */) { if (v) *v = 1; return EGL_TRUE; }
+    if (at == 0x3142 /* EGL_RECORDABLE_ANDROID */ || at == 0x3147 /* EGL_FRAMEBUFFER_TARGET_ANDROID */) {
+        if (v) *v = 1;
+        return EGL_TRUE;
+    }
     bool alias = cfg_alias(c);
     EGLBoolean ok = a_eglGetConfigAttrib(d, cfg_real(c), at, v);
     if (ok && alias && v) { if (at == 0x3021 /* ALPHA_SIZE */) *v = 0; else if (at == 0x3020 /* BUFFER_SIZE */) *v = 24; else if (at == 0x302E /* NATIVE_VISUAL_ID */) *v = 2; }
@@ -261,12 +264,42 @@ PASS_BOOL(eglWaitGL, (void), ())
 PASS_BOOL(eglWaitNative, (EGLint e), (e))
 PASS_BOOL(eglReleaseThread, (void), ())
 
-static const char *w_eglQueryString(EGLDisplay d, EGLint name) { return a_eglQueryString(d, name); }
+static const char *w_eglQueryString(EGLDisplay d, EGLint name)
+{
+    const char *s = a_eglQueryString(d, name);
+    if (name == 0x3055 /* EGL_EXTENSIONS */ && s) {
+        static pthread_mutex_t mu = PTHREAD_MUTEX_INITIALIZER;
+        static const char *last_s = NULL;
+        static char *ext_buf = NULL;
+        pthread_mutex_lock(&mu);
+        if (last_s != s) {
+            free(ext_buf);
+            size_t len = strlen(s);
+            ext_buf = malloc(len + 256);
+            strcpy(ext_buf, s);
+            if (!strstr(ext_buf, "EGL_ANDROID_presentation_time")) {
+                strcat(ext_buf, " EGL_ANDROID_presentation_time");
+            }
+            if (!strstr(ext_buf, "EGL_KHR_swap_buffers_with_damage")) {
+                strcat(ext_buf, " EGL_KHR_swap_buffers_with_damage");
+            }
+            if (!strstr(ext_buf, "EGL_EXT_swap_buffers_with_damage")) {
+                strcat(ext_buf, " EGL_EXT_swap_buffers_with_damage");
+            }
+            last_s = s;
+        }
+        const char *ret = ext_buf;
+        pthread_mutex_unlock(&mu);
+        return ret;
+    }
+    return s;
+}
 static bool g_es31_shim;           /* defined with the rest of the shim, below */
 static EGLContext w_eglCreateContext(EGLDisplay d, EGLConfig c, EGLContext share, const EGLint *at)
 {
-    /* A game that insists on ES 3.1 or 3.2 (Unreal Engine tries 3.2, then 3.1) is given the 3.0 context ANGLE can make: the version it is then told is the shim's. */
+    /* A game that insists on ES 3.1 or 3.2 (Unity, Unreal Engine try 3.2, then 3.1) is given the 3.0 context ANGLE can make: the version it is then told is the shim's. */
     EGLint patched[40];
+    const EGLint *req = at;
     if (g_es31_shim && at) {
         int n = 0;
         for (; at[n] != EGL_NONE && n < 36; n += 2) {
@@ -274,9 +307,41 @@ static EGLContext w_eglCreateContext(EGLDisplay d, EGLConfig c, EGLContext share
             if (at[n] == 0x30fb /* EGL_CONTEXT_MINOR_VERSION */ && at[n + 1] > 0) patched[n + 1] = 0;
         }
         patched[n] = EGL_NONE;
-        at = patched;
+        req = patched;
     }
-    EGLContext ctx = a_eglCreateContext(d, cfg_real(c), share, at);
+    EGLContext ctx = a_eglCreateContext(d, cfg_real(c), share, req);
+    if (!ctx && at) {
+        /* If ANGLE rejected the context because of minor version (e.g. 3.1, 3.2) or unsupported attributes,
+         * clamp minor version to 0 and retry. */
+        int n = 0;
+        bool has_minor = false;
+        for (; at[n] != EGL_NONE && n < 36; n += 2) {
+            patched[n] = at[n]; patched[n + 1] = at[n + 1];
+            if (at[n] == 0x30fb /* EGL_CONTEXT_MINOR_VERSION */ && at[n + 1] > 0) {
+                patched[n + 1] = 0;
+                has_minor = true;
+            }
+        }
+        patched[n] = EGL_NONE;
+        if (has_minor) {
+            ctx = a_eglCreateContext(d, cfg_real(c), share, patched);
+            if (ctx) {
+                tl_log_line("egl: eglCreateContext fallback succeeded with clamped EGL_CONTEXT_MINOR_VERSION=0 -> %p", ctx);
+            }
+        }
+        if (!ctx) {
+            /* Fallback to minimal compliant context attributes for client version */
+            int client_ver = 3;
+            for (int i = 0; at[i] != EGL_NONE && i < 36; i += 2) {
+                if (at[i] == 0x3098 /* EGL_CONTEXT_CLIENT_VERSION */) client_ver = at[i + 1];
+            }
+            const EGLint fallback_at[] = { 0x3098, client_ver, EGL_NONE };
+            ctx = a_eglCreateContext(d, cfg_real(c), share, fallback_at);
+            if (ctx) {
+                tl_log_line("egl: eglCreateContext fallback succeeded with basic client version %d -> %p", client_ver, ctx);
+            }
+        }
+    }
     static int trace = -1;
     if (trace < 0) trace = getenv("TL_EGL_TRACE") ? 1 : 0;
     if (trace || !ctx) {
@@ -609,6 +674,7 @@ static void gles_copy_image_sub_data_fallback(
     static void (*fb_tex_layer)(unsigned, unsigned, unsigned, int, int);
     static void (*fb_rb)(unsigned, unsigned, unsigned, unsigned);
     static void (*blit_fb)(int, int, int, int, int, int, int, int, unsigned, unsigned);
+    static unsigned (*check_fb)(unsigned);
     static unsigned char (*is_en)(unsigned);
     static void (*fn_en)(unsigned);
     static void (*fn_dis)(unsigned);
@@ -620,6 +686,7 @@ static void gles_copy_image_sub_data_fallback(
         fb_tex_layer = gl_proc("glFramebufferTextureLayer");
         fb_rb = gl_proc("glFramebufferRenderbuffer");
         blit_fb = gl_proc("glBlitFramebuffer");
+        check_fb = gl_proc("glCheckFramebufferStatus");
         is_en = gl_proc("glIsEnabled");
         fn_en = gl_proc("glEnable");
         fn_dis = gl_proc("glDisable");
@@ -684,14 +751,28 @@ static void gles_copy_image_sub_data_fallback(
             fb_rb(0x8CA9, 0x8CE0, 0x8D41, dstName);
         }
 
+        unsigned blit_mask = 0x4000 /* GL_COLOR_BUFFER_BIT */;
+        if (check_fb && check_fb(0x8CA8) != 0x8CD5 /* GL_FRAMEBUFFER_COMPLETE */) {
+            /* If color attachment is incomplete, texture might be depth/stencil */
+            fb_tex2d(0x8CA8, 0x8CE0, 0x0DE1, 0, 0);
+            fb_tex2d(0x8CA9, 0x8CE0, 0x0DE1, 0, 0);
+            if (srcTarget == 0x0DE1) fb_tex2d(0x8CA8, 0x8D00 /* GL_DEPTH_ATTACHMENT */, 0x0DE1, srcName, srcLevel);
+            else if (fb_tex_layer && (srcTarget == 0x8C1A || srcTarget == 0x806F)) fb_tex_layer(0x8CA8, 0x8D00, srcName, srcLevel, srcZ + slice);
+            if (dstTarget == 0x0DE1) fb_tex2d(0x8CA9, 0x8D00 /* GL_DEPTH_ATTACHMENT */, 0x0DE1, dstName, dstLevel);
+            else if (fb_tex_layer && (dstTarget == 0x8C1A || dstTarget == 0x806F)) fb_tex_layer(0x8CA9, 0x8D00, dstName, dstLevel, dstZ + slice);
+            blit_mask = 0x0100 /* GL_DEPTH_BUFFER_BIT */;
+        }
+
         blit_fb(srcX, srcY, srcX + width, srcY + height,
                 dstX, dstY, dstX + width, dstY + height,
-                0x4000 /* GL_COLOR_BUFFER_BIT */, 0x2600 /* GL_NEAREST */);
+                blit_mask, 0x2600 /* GL_NEAREST */);
     }
 
     /* Detach attachments */
     fb_tex2d(0x8CA8, 0x8CE0, 0x0DE1, 0, 0);
     fb_tex2d(0x8CA9, 0x8CE0, 0x0DE1, 0, 0);
+    fb_tex2d(0x8CA8, 0x8D00, 0x0DE1, 0, 0);
+    fb_tex2d(0x8CA9, 0x8D00, 0x0DE1, 0, 0);
 
     /* Restore previous state */
     bind_fb(0x8CA8, (unsigned)prev_read_fb);
@@ -986,6 +1067,7 @@ static const char *const k_extra_exts[] = {
     "GL_OES_copy_image",
     "GL_EXT_draw_elements_base_vertex",
     "GL_OES_draw_elements_base_vertex",
+    "GL_EXT_texture_filter_anisotropic",
 };
 #define EXTRA_EXT_COUNT (sizeof(k_extra_exts) / sizeof(k_extra_exts[0]))
 
@@ -1127,7 +1209,7 @@ static const struct { const char *name; void *wrap; void **real; } k_adapt[] = {
     ADAPT(glUniformMatrix2x3fv), ADAPT(glUniformMatrix3x2fv), ADAPT(glUniformMatrix2x4fv), ADAPT(glUniformMatrix4x2fv),
     ADAPT(glUniformMatrix3x4fv), ADAPT(glUniformMatrix4x3fv),
     ADAPT(glSampleCoverage), ADAPT(glTexImage2D), ADAPT(glTexStorage2D), ADAPT(glTexSubImage2D), ADAPT(glCompressedTexImage2D), ADAPT(glCompressedTexSubImage2D), ADAPT(glUniformBlockBinding),
-    ADAPT(glGetString), ADAPT(glGetStringi), ADAPT(glCompileShader), ADAPT(glShaderSource), ADAPT(glAttachShader), ADAPT(glLinkProgram), ADAPT(glGetIntegerv), ADAPT(glBindBufferBase), ADAPT(glBindBuffer), ADAPT(glBufferData), ADAPT(glBufferSubData), ADAPT(glBindBufferRange),
+    ADAPT(glGetString), ADAPT(glGetStringi), ADAPT(glCompileShader), ADAPT(glShaderSource), ADAPT(glAttachShader), ADAPT(glLinkProgram), ADAPT(glGetIntegerv), ADAPT(glGetFloatv), ADAPT(glBindBufferBase), ADAPT(glBindBuffer), ADAPT(glBufferData), ADAPT(glBufferSubData), ADAPT(glBindBufferRange),
     ADAPT(glProgramBinary), ADAPT(glShaderBinary), ADAPT(glCreateShaderProgramv), ADAPT(glCreateProgram), ADAPT(glCreateShader),
     ADAPT(glDrawElements), ADAPT(glDrawArrays), ADAPT(glDrawElementsBaseVertex),
     { "glDrawElementsBaseVertexEXT", (void *)w_glDrawElementsBaseVertex, (void **)&r_glDrawElementsBaseVertex },
