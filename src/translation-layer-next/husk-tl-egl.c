@@ -204,29 +204,62 @@ static EGLBoolean w_eglChooseConfig(EGLDisplay d, const EGLint *at, EGLConfig *c
     EGLBoolean ok = a_eglChooseConfig(d, at ? filtered : NULL, tmp, 256, &k);
     EGLint total = 0;
     if (ok) {
+        /* If the top config chosen by ANGLE lacks stencil (st == 0) because EGL sorts smaller stencil first,
+         * find a matching config in tmp with the EXACT same color depth, sample count, caveat, and surface
+         * types that includes stencil (st >= 8). This ensures games (like Unity UI using stencil masks for
+         * buttons and text) have an active stencil buffer without disrupting color/depth/sample compatibility. */
+        if (k > 1) {
+            EGLint st0 = 0;
+            a_eglGetConfigAttrib(d, tmp[0], 0x3026 /* EGL_STENCIL_SIZE */, &st0);
+            if (st0 == 0) {
+                EGLint r0 = 0, g0 = 0, b0 = 0, a0 = 0, dp0 = 0, sm0 = 0, cav0 = 0, stype0 = 0;
+                a_eglGetConfigAttrib(d, tmp[0], 0x3024 /* EGL_RED_SIZE */, &r0);
+                a_eglGetConfigAttrib(d, tmp[0], 0x3023 /* EGL_GREEN_SIZE */, &g0);
+                a_eglGetConfigAttrib(d, tmp[0], 0x3022 /* EGL_BLUE_SIZE */, &b0);
+                a_eglGetConfigAttrib(d, tmp[0], 0x3021 /* EGL_ALPHA_SIZE */, &a0);
+                a_eglGetConfigAttrib(d, tmp[0], 0x3025 /* EGL_DEPTH_SIZE */, &dp0);
+                a_eglGetConfigAttrib(d, tmp[0], 0x3031 /* EGL_SAMPLES */, &sm0);
+                a_eglGetConfigAttrib(d, tmp[0], 0x3027 /* EGL_CONFIG_CAVEAT */, &cav0);
+                a_eglGetConfigAttrib(d, tmp[0], 0x3033 /* EGL_SURFACE_TYPE */, &stype0);
+
+                int best_idx = -1;
+                for (int i = 1; i < k; i++) {
+                    EGLint r1 = 0, g1 = 0, b1 = 0, a1 = 0, dp1 = 0, st1 = 0, sm1 = 0, cav1 = 0, stype1 = 0;
+                    a_eglGetConfigAttrib(d, tmp[i], 0x3024, &r1);
+                    a_eglGetConfigAttrib(d, tmp[i], 0x3023, &g1);
+                    a_eglGetConfigAttrib(d, tmp[i], 0x3022, &b1);
+                    a_eglGetConfigAttrib(d, tmp[i], 0x3021, &a1);
+                    a_eglGetConfigAttrib(d, tmp[i], 0x3025, &dp1);
+                    a_eglGetConfigAttrib(d, tmp[i], 0x3026, &st1);
+                    a_eglGetConfigAttrib(d, tmp[i], 0x3031, &sm1);
+                    a_eglGetConfigAttrib(d, tmp[i], 0x3027, &cav1);
+                    a_eglGetConfigAttrib(d, tmp[i], 0x3033, &stype1);
+
+                    if (st1 >= 8 && r1 == r0 && g1 == g0 && b1 == b0 && a1 == a0 &&
+                        sm1 == sm0 && cav1 == cav0 && (stype1 & stype0) == stype0 &&
+                        dp1 >= dp0) {
+                        best_idx = i;
+                        break;
+                    }
+                }
+                if (best_idx > 0) {
+                    EGLConfig preferred = tmp[best_idx];
+                    for (int i = best_idx; i > 0; i--) tmp[i] = tmp[i - 1];
+                    tmp[0] = preferred;
+                    tl_log_line("egl: prioritized stencil config %p (dp=%d, st>=8) over %p",
+                                tmp[0], dp0, tmp[1]);
+                }
+            }
+        }
         EGLConfig all[512];
-        /* Place configs with depth >= 16 and stencil >= 8 at the front so games picking the first config
-         * (e.g. Unity UI using stencil masks for text/buttons) have full stencil and depth support. */
-        for (int i = 0; i < k && total < 512; i++) {
-            EGLint st = 0, dp = 0;
-            a_eglGetConfigAttrib(d, tmp[i], 0x3026 /* EGL_STENCIL_SIZE */, &st);
-            a_eglGetConfigAttrib(d, tmp[i], 0x3025 /* EGL_DEPTH_SIZE */, &dp);
-            if (st >= 8 && dp >= 16) all[total++] = tmp[i];
-        }
-        for (int i = 0; i < k && total < 512; i++) {
-            EGLint st = 0, dp = 0;
-            a_eglGetConfigAttrib(d, tmp[i], 0x3026 /* EGL_STENCIL_SIZE */, &st);
-            a_eglGetConfigAttrib(d, tmp[i], 0x3025 /* EGL_DEPTH_SIZE */, &dp);
-            if (st < 8 || dp < 16) all[total++] = tmp[i];
-        }
+        for (int i = 0; i < k; i++) all[total++] = tmp[i];
         static int no_alias = -1;
         if (no_alias < 0) no_alias = getenv("TL_EGL_NO_ALIAS") ? 1 : 0;
-        int pre_alias = total;
-        for (int i = 0; i < pre_alias && !alpha_wanted && !no_alias && total < 512; i++) {
+        for (int i = 0; i < k && !alpha_wanted && !no_alias && total < 512; i++) {
             EGLint a = 0, rr = 0, g = 0, b = 0;
-            a_eglGetConfigAttrib(d, all[i], 0x3021, &a); a_eglGetConfigAttrib(d, all[i], 0x3024, &rr);
-            a_eglGetConfigAttrib(d, all[i], 0x3023, &g); a_eglGetConfigAttrib(d, all[i], 0x3022, &b);
-            if (a == 8 && rr == 8 && g == 8 && b == 8) all[total++] = (EGLConfig)((uintptr_t)all[i] | 1);
+            a_eglGetConfigAttrib(d, tmp[i], 0x3021, &a); a_eglGetConfigAttrib(d, tmp[i], 0x3024, &rr);
+            a_eglGetConfigAttrib(d, tmp[i], 0x3023, &g); a_eglGetConfigAttrib(d, tmp[i], 0x3022, &b);
+            if (a == 8 && rr == 8 && g == 8 && b == 8) all[total++] = (EGLConfig)((uintptr_t)tmp[i] | 1);
         }
         if (c) { EGLint m = total < n ? total : n; for (int i = 0; i < m; i++) c[i] = all[i]; total = m; }
         if (r) *r = total;
@@ -465,47 +498,12 @@ static const uint8_t *read_back(EGLDisplay d, EGLSurface s, EGLint *pw, EGLint *
     *pw = w; *ph = h;
     return buf;
 }
-static EGLConfig cfg_with_depth_stencil(EGLDisplay d, EGLConfig cfg)
-{
-    EGLConfig real = cfg_real(cfg);
-    EGLint st = 0, dp = 0;
-    a_eglGetConfigAttrib(d, real, 0x3026 /* EGL_STENCIL_SIZE */, &st);
-    a_eglGetConfigAttrib(d, real, 0x3025 /* EGL_DEPTH_SIZE */, &dp);
-    if (st >= 8 && dp >= 16) return real;
-
-    EGLint r = 8, g = 8, b = 8, a = 8;
-    a_eglGetConfigAttrib(d, real, 0x3024 /* EGL_RED_SIZE */, &r);
-    a_eglGetConfigAttrib(d, real, 0x3023 /* EGL_GREEN_SIZE */, &g);
-    a_eglGetConfigAttrib(d, real, 0x3022 /* EGL_BLUE_SIZE */, &b);
-    a_eglGetConfigAttrib(d, real, 0x3021 /* EGL_ALPHA_SIZE */, &a);
-
-    EGLint match_at[] = {
-        0x3040 /* EGL_RENDERABLE_TYPE */, 0x4 /* EGL_OPENGL_ES2_BIT */ | 0x40 /* EGL_OPENGL_ES3_BIT */,
-        0x3033 /* EGL_SURFACE_TYPE */, 0x1 /* EGL_PBUFFER_BIT */,
-        0x3024 /* EGL_RED_SIZE */, r,
-        0x3023 /* EGL_GREEN_SIZE */, g,
-        0x3022 /* EGL_BLUE_SIZE */, b,
-        0x3025 /* EGL_DEPTH_SIZE */, 16,
-        0x3026 /* EGL_STENCIL_SIZE */, 8,
-        EGL_NONE
-    };
-    EGLConfig matched = NULL;
-    EGLint count = 0;
-    if (a_eglChooseConfig(d, match_at, &matched, 1, &count) && count > 0 && matched) {
-        tl_log_line("egl: upgraded pbuffer config from %p (dp=%d, st=%d) to %p (dp>=16, st>=8)", real, dp, st, matched);
-        return matched;
-    }
-    return real;
-}
-
 static EGLSurface w_eglCreateWindowSurface(EGLDisplay d, EGLConfig cfg, void *win, const EGLint *at)
 {
     cfg = cfg_real(cfg);
     if (tl_nwindow_texture(win)) {
-        EGLConfig scfg = cfg_with_depth_stencil(d, cfg);
         EGLint pb[] = { EGL_WIDTH, tl_nwindow_width(win), EGL_HEIGHT, tl_nwindow_height(win), EGL_NONE };
-        EGLSurface s = a_eglCreatePbufferSurface(d, scfg, pb);
-        if (!s) s = a_eglCreatePbufferSurface(d, cfg, pb);
+        EGLSurface s = a_eglCreatePbufferSurface(d, cfg, pb);
         if (s) {
             pthread_mutex_lock(&g_tex_lock);
             for (int i = 0; i < MAX_TEX_SURFACES; i++) if (!g_tex_surf[i].s) { g_tex_surf[i].s = s; g_tex_surf[i].win = win; break; }
@@ -515,27 +513,22 @@ static EGLSurface w_eglCreateWindowSurface(EGLDisplay d, EGLConfig cfg, void *wi
         return s;
     }
     if (tl_javaapp_compositing && tl_javaapp_compositing()) {
-        EGLConfig scfg = cfg_with_depth_stencil(d, cfg);
         EGLint pb[] = { EGL_WIDTH, tl_nwindow_width(win), EGL_HEIGHT, tl_nwindow_height(win), EGL_NONE };
-        EGLSurface s = a_eglCreatePbufferSurface(d, scfg, pb);
-        if (!s) s = a_eglCreatePbufferSurface(d, cfg, pb);
+        EGLSurface s = a_eglCreatePbufferSurface(d, cfg, pb);
         if (s) {
             pthread_mutex_lock(&g_tex_lock);
             for (int i = 0; i < MAX_COMP_SURFACES; i++) if (!g_comp_surf[i]) { g_comp_surf[i] = s; break; }
             pthread_mutex_unlock(&g_tex_lock);
         }
         EGLint s_dp = 0, s_st = 0;
-        a_eglGetConfigAttrib(d, scfg, 0x3025, &s_dp);
-        a_eglGetConfigAttrib(d, scfg, 0x3026, &s_st);
-        tl_log_line("egl: window %dx%d -> surface %p (cfg %p, depth %d, stencil %d), composited under the app's views",
-                    pb[1], pb[3], s, scfg, s_dp, s_st);
+        a_eglGetConfigAttrib(d, cfg, 0x3025, &s_dp);
+        a_eglGetConfigAttrib(d, cfg, 0x3026, &s_st);
+        tl_log_line("egl: window %dx%d -> surface %p (depth %d, stencil %d), composited under the app's views", pb[1], pb[3], s, s_dp, s_st);
         return s;
     }
     if (E.frame_dir[0] || g_offscreen_windows) {
-        EGLConfig scfg = cfg_with_depth_stencil(d, cfg);
         EGLint pb[] = { EGL_WIDTH, tl_nwindow_width(win), EGL_HEIGHT, tl_nwindow_height(win), EGL_NONE };
-        EGLSurface s = a_eglCreatePbufferSurface(d, scfg, pb);
-        if (!s) s = a_eglCreatePbufferSurface(d, cfg, pb);
+        EGLSurface s = a_eglCreatePbufferSurface(d, cfg, pb);
         if (!s) {
             /* the config the game chose may draw only to windows: the closest one that also makes buffers */
             EGLint r = 8, g = 8, b = 8, a = 0, dp = 0, st = 0, rt = 0;
@@ -549,11 +542,7 @@ static EGLSurface w_eglCreateWindowSurface(EGLDisplay d, EGLConfig cfg, void *wi
     }
     void *layer = tl_nwindow_native(win);
     EGLSurface s = a_eglCreateWindowSurface(d, cfg, layer, at);
-    EGLint s_dp = 0, s_st = 0;
-    a_eglGetConfigAttrib(d, cfg, 0x3025, &s_dp);
-    a_eglGetConfigAttrib(d, cfg, 0x3026, &s_st);
-    tl_log_line("egl: window surface %p on layer %p (%dx%d, depth %d, stencil %d), eglGetError %#x",
-                s, layer, tl_nwindow_width(win), tl_nwindow_height(win), s_dp, s_st, a_eglGetError());
+    tl_log_line("egl: window surface %p on layer %p (%dx%d), eglGetError %#x", s, layer, tl_nwindow_width(win), tl_nwindow_height(win), a_eglGetError());
     return s;
 }
 static EGLBoolean w_eglDestroySurface(EGLDisplay d, EGLSurface s)
@@ -1006,6 +995,18 @@ static void w_glUniformMatrix4x3fv(int l, int c, unsigned t, const float *v) { r
 static void (*r_glSampleCoverage)(float, unsigned);
 static void w_glSampleCoverage(float v, unsigned i) { r_glSampleCoverage(v, i & 0xff); }
 
+static inline void set_r8_font_swizzle(unsigned target)
+{
+    static void (*fn_tex_parami)(unsigned, unsigned, int);
+    if (!fn_tex_parami) fn_tex_parami = gl_proc("glTexParameteri");
+    if (fn_tex_parami) {
+        fn_tex_parami(target, 0x8E42 /* GL_TEXTURE_SWIZZLE_R */, 0x1903 /* GL_RED */);
+        fn_tex_parami(target, 0x8E43 /* GL_TEXTURE_SWIZZLE_G */, 0x1903 /* GL_RED */);
+        fn_tex_parami(target, 0x8E44 /* GL_TEXTURE_SWIZZLE_B */, 0x1903 /* GL_RED */);
+        fn_tex_parami(target, 0x8E45 /* GL_TEXTURE_SWIZZLE_A */, 0x1903 /* GL_RED */);
+    }
+}
+
 static void (*r_glTexImage2D)(unsigned, int, int, int, int, int, unsigned, unsigned, const void *);
 static void w_glTexImage2D(unsigned target, int level, int internalformat, int width, int height, int border, unsigned format, unsigned type, const void *pixels)
 {
@@ -1020,12 +1021,9 @@ static void w_glTexImage2D(unsigned target, int level, int internalformat, int w
         r_glTexImage2D(target, level, 0x8C43 /* GL_SRGB8_ALPHA8 */, width, height, border, format, type, pixels);
         err = gl_proc_get_error();
         tl_log_line("gl: glTexImage2D fallback intfmt 0x8C41 -> 0x8C43: err %#x", err);
-    } else if (err != 0 && (internalformat == 0x803C /* GL_ALPHA8_EXT */ || internalformat == 0x1906 /* GL_ALPHA */ ||
-                            internalformat == 0x8040 /* GL_LUMINANCE8_EXT */ || internalformat == 0x1909 /* GL_LUMINANCE */)) {
-        while (gl_proc_get_error());
-        r_glTexImage2D(target, level, 0x8229 /* GL_R8 */, width, height, border, 0x1903 /* GL_RED */, type, pixels);
-        err = gl_proc_get_error();
-        tl_log_line("gl: glTexImage2D fallback intfmt %#x -> GL_R8: err %#x", internalformat, err);
+    }
+    if (err == 0 && ((unsigned)internalformat == 0x8229 /* GL_R8 */ || format == 0x1903 /* GL_RED */)) {
+        set_r8_font_swizzle(target);
     }
 
     static atomic_int count;
@@ -1058,12 +1056,9 @@ static void w_glTexStorage2D(unsigned target, int levels, unsigned internalforma
         while (gl_proc_get_error());
         r_glTexStorage2D(target, levels, 0x8051 /* GL_RGB8 */, width, height);
         err = gl_proc_get_error();
-    } else if (err != 0 && (internalformat == 0x803C /* GL_ALPHA8_EXT */ || internalformat == 0x1906 /* GL_ALPHA */ ||
-                            internalformat == 0x8040 /* GL_LUMINANCE8_EXT */ || internalformat == 0x1909 /* GL_LUMINANCE */)) {
-        while (gl_proc_get_error());
-        r_glTexStorage2D(target, levels, 0x8229 /* GL_R8 */, width, height);
-        err = gl_proc_get_error();
-        tl_log_line("gl: glTexStorage2D fallback intfmt %#x -> GL_R8: err %#x", internalformat, err);
+    }
+    if (err == 0 && internalformat == 0x8229 /* GL_R8 */) {
+        set_r8_font_swizzle(target);
     }
 
     static atomic_int count;
@@ -1077,79 +1072,15 @@ static void w_glTexStorage2D(unsigned target, int levels, unsigned internalforma
 static void (*r_glTexSubImage2D)(unsigned, int, int, int, int, int, unsigned, unsigned, const void *);
 static void w_glTexSubImage2D(unsigned target, int level, int xoffset, int yoffset, int width, int height, unsigned format, unsigned type, const void *pixels)
 {
-    if (!r_glTexSubImage2D) r_glTexSubImage2D = gl_proc("glTexSubImage2D");
-    if (!r_glTexSubImage2D) return;
-
-    while (gl_proc_get_error());
     r_glTexSubImage2D(target, level, xoffset, yoffset, width, height, format, type, pixels);
-    unsigned err = gl_proc_get_error();
-    if (err != 0) {
-        if (format == 0x1906 /* GL_ALPHA */ || format == 0x1909 /* GL_LUMINANCE */) {
-            while (gl_proc_get_error());
-            r_glTexSubImage2D(target, level, xoffset, yoffset, width, height, 0x1903 /* GL_RED */, type, pixels);
-            unsigned err2 = gl_proc_get_error();
-            tl_log_line("gl: glTexSubImage2D fmt %#x failed (%#x), retry with GL_RED -> err %#x", format, err, err2);
-            err = err2;
-        } else if (format == 0x1903 /* GL_RED */) {
-            while (gl_proc_get_error());
-            r_glTexSubImage2D(target, level, xoffset, yoffset, width, height, 0x1906 /* GL_ALPHA */, type, pixels);
-            unsigned err2 = gl_proc_get_error();
-            if (err2 == 0) {
-                tl_log_line("gl: glTexSubImage2D GL_RED failed (%#x), retry with GL_ALPHA -> err 0", err);
-                err = 0;
-            }
-        }
+    if (format == 0x1903 /* GL_RED */) {
+        set_r8_font_swizzle(target);
     }
-
     static atomic_int count;
     int c = atomic_fetch_add(&count, 1);
-    if (c < 30 || (c % 100 == 0) || err != 0) {
-        tl_log_line("gl: glTexSubImage2D(target %#x, lvl %d, %dx%d, fmt %#x, type %#x) -> err %#x", target, level, width, height, format, type, err);
+    if (c < 30 || (c % 100 == 0)) {
+        tl_log_line("gl: glTexSubImage2D(target %#x, lvl %d, %dx%d, fmt %#x, type %#x)", target, level, width, height, format, type);
     }
-}
-
-static void (*r_glTexParameteri)(unsigned, unsigned, int);
-static void w_glTexParameteri(unsigned target, unsigned pname, int param)
-{
-    if (!r_glTexParameteri) r_glTexParameteri = gl_proc("glTexParameteri");
-    if (pname >= 0x8E42 && pname <= 0x8E46) {
-        tl_log_line("gl: glTexParameteri(target %#x, swizzle %#x, val %#x)", target, pname, param);
-    }
-    while (gl_proc_get_error());
-    if (r_glTexParameteri) r_glTexParameteri(target, pname, param);
-    unsigned err = gl_proc_get_error();
-    if (err != 0 && (pname >= 0x8E42 && pname <= 0x8E46)) {
-        tl_log_line("gl: glTexParameteri swizzle %#x failed with err %#x", pname, err);
-    }
-}
-
-static void (*r_glTexParameteriv)(unsigned, unsigned, const int *);
-static void w_glTexParameteriv(unsigned target, unsigned pname, const int *params)
-{
-    if (!r_glTexParameteriv) r_glTexParameteriv = gl_proc("glTexParameteriv");
-    if (pname == 0x8E46 /* GL_TEXTURE_SWIZZLE_RGBA */ && params) {
-        tl_log_line("gl: glTexParameteriv(target %#x, swizzle RGBA: %#x %#x %#x %#x)", target, params[0], params[1], params[2], params[3]);
-    }
-    while (gl_proc_get_error());
-    if (r_glTexParameteriv) r_glTexParameteriv(target, pname, params);
-    unsigned err = gl_proc_get_error();
-    if (err != 0 && (pname >= 0x8E42 && pname <= 0x8E46)) {
-        tl_log_line("gl: glTexParameteriv swizzle %#x failed with err %#x", pname, err);
-    }
-}
-
-static void (*r_glTexParameterf)(unsigned, unsigned, float);
-static void w_glTexParameterf(unsigned target, unsigned pname, float param)
-{
-    if (!r_glTexParameterf) r_glTexParameterf = gl_proc("glTexParameterf");
-    if (r_glTexParameterf) r_glTexParameterf(target, pname, param);
-}
-
-static void (*r_glTexParameterfv)(unsigned, unsigned, const float *);
-static void w_glTexParameterfv(unsigned target, unsigned pname, const float *params)
-{
-    if (!r_glTexParameterfv) r_glTexParameterfv = gl_proc("glTexParameterfv");
-    if (r_glTexParameterfv) r_glTexParameterfv(target, pname, params);
 }
 
 static void (*r_glCompressedTexImage2D)(unsigned, int, unsigned, int, int, int, int, const void *);
@@ -1256,28 +1187,14 @@ static void (*r_glDrawElements)(unsigned, int, unsigned, const void *);
 static void w_glDrawElements(unsigned mode, int count, unsigned type, const void *indices)
 {
     if (!r_glDrawElements) r_glDrawElements = gl_proc("glDrawElements");
-    if (r_glDrawElements) {
-        r_glDrawElements(mode, count, type, indices);
-        unsigned err = gl_proc_get_error();
-        if (err != 0) {
-            static int draw_err;
-            if (draw_err++ < 10) tl_log_line("gl: glDrawElements(mode %#x, count %d, type %#x) -> err %#x", mode, count, type, err);
-        }
-    }
+    if (r_glDrawElements) r_glDrawElements(mode, count, type, indices);
 }
 
 static void (*r_glDrawArrays)(unsigned, int, int);
 static void w_glDrawArrays(unsigned mode, int first, int count)
 {
     if (!r_glDrawArrays) r_glDrawArrays = gl_proc("glDrawArrays");
-    if (r_glDrawArrays) {
-        r_glDrawArrays(mode, first, count);
-        unsigned err = gl_proc_get_error();
-        if (err != 0) {
-            static int draw_a_err;
-            if (draw_a_err++ < 10) tl_log_line("gl: glDrawArrays(mode %#x, first %d, count %d) -> err %#x", mode, first, count, err);
-        }
-    }
+    if (r_glDrawArrays) r_glDrawArrays(mode, first, count);
 }
 
 static void (*r_glDrawElementsBaseVertex)(unsigned, int, unsigned, const void *, int);
@@ -1311,19 +1228,18 @@ static void w_glDrawElementsBaseVertex(unsigned mode, int count, unsigned type, 
     resolve_base_vertex_procs();
     if (r_glDrawElementsBaseVertex) {
         r_glDrawElementsBaseVertex(mode, count, type, indices, basevertex);
-    } else if (r_glDrawElementsInstancedBaseVertex) {
+        return;
+    }
+    if (r_glDrawElementsInstancedBaseVertex) {
         r_glDrawElementsInstancedBaseVertex(mode, count, type, indices, 1, basevertex);
-    } else if (basevertex == 0) {
+        return;
+    }
+    if (basevertex == 0) {
         if (!r_glDrawElements) r_glDrawElements = gl_proc("glDrawElements");
         if (r_glDrawElements) r_glDrawElements(mode, count, type, indices);
     } else {
         static int warned = 0;
         if (!warned++) tl_log_line("gl: glDrawElementsBaseVertex called with basevertex %d but no driver base vertex proc available", basevertex);
-    }
-    unsigned err = gl_proc_get_error();
-    if (err != 0) {
-        static int bv_err;
-        if (bv_err++ < 10) tl_log_line("gl: glDrawElementsBaseVertex(mode %#x, count %d, type %#x, bv %d) -> err %#x", mode, count, type, basevertex, err);
     }
 }
 
@@ -1539,9 +1455,7 @@ static const struct { const char *name; void *wrap; void **real; } k_adapt[] = {
     ADAPT(glUniformMatrix3fv), ADAPT(glUniformMatrix4fv),
     ADAPT(glUniformMatrix2x3fv), ADAPT(glUniformMatrix3x2fv), ADAPT(glUniformMatrix2x4fv), ADAPT(glUniformMatrix4x2fv),
     ADAPT(glUniformMatrix3x4fv), ADAPT(glUniformMatrix4x3fv),
-    ADAPT(glSampleCoverage), ADAPT(glTexImage2D), ADAPT(glTexStorage2D), ADAPT(glTexSubImage2D),
-    ADAPT(glTexParameteri), ADAPT(glTexParameteriv), ADAPT(glTexParameterf), ADAPT(glTexParameterfv),
-    ADAPT(glCompressedTexImage2D), ADAPT(glCompressedTexSubImage2D), ADAPT(glUniformBlockBinding),
+    ADAPT(glSampleCoverage), ADAPT(glTexImage2D), ADAPT(glTexStorage2D), ADAPT(glTexSubImage2D), ADAPT(glCompressedTexImage2D), ADAPT(glCompressedTexSubImage2D), ADAPT(glUniformBlockBinding),
     ADAPT(glGetString), ADAPT(glGetStringi), ADAPT(glCompileShader), ADAPT(glShaderSource), ADAPT(glAttachShader), ADAPT(glLinkProgram), ADAPT(glGetIntegerv), ADAPT(glGetFloatv), ADAPT(glBindBufferBase), ADAPT(glBindBuffer), ADAPT(glBufferData), ADAPT(glBufferSubData), ADAPT(glBindBufferRange),
     ADAPT(glProgramBinary), ADAPT(glShaderBinary), ADAPT(glCreateShaderProgramv), ADAPT(glCreateProgram), ADAPT(glCreateShader),
     ADAPT(glDrawElements), ADAPT(glDrawArrays),
