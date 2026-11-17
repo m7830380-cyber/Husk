@@ -146,18 +146,27 @@ static void w_glShaderSource(unsigned sh, int count, const char *const *str, con
     static atomic_int sh_count;
     int sc = atomic_fetch_add(&sh_count, 1);
     if (sc < 40) {
-        char preview[201];
-        size_t pl = k < 200 ? k : 200;
-        memcpy(preview, cat, pl);
-        preview[pl] = 0;
-        for (char *p = preview; *p; p++) if (*p == '\n' || *p == '\r') *p = ' ';
-        bool has_mat = strstr(cat, "UnityPerMaterial") != NULL;
-        bool has_draw = strstr(cat, "UnityPerDraw") != NULL;
-        bool has_light = (strstr(cat, "Light") != NULL) || (strstr(cat, "light") != NULL);
-        bool has_shadow = (strstr(cat, "Shadow") != NULL) || (strstr(cat, "shadow") != NULL);
-        bool has_base = (strstr(cat, "_BaseColor") != NULL) || (strstr(cat, "_BaseMap") != NULL);
-        tl_log_line("gl: shader %u (%d bytes, mat=%d draw=%d light=%d shd=%d base=%d): %.160s",
-                    sh, (int)k, has_mat, has_draw, has_light, has_shadow, has_base, preview);
+        if (k < 1024) {
+            char flat[1025];
+            size_t fl = k < 1024 ? k : 1024;
+            memcpy(flat, cat, fl);
+            flat[fl] = 0;
+            for (char *p = flat; *p; p++) if (*p == '\n' || *p == '\r') *p = ' ';
+            tl_log_line("gl: shader %u (%d bytes): %s", sh, (int)k, flat);
+        } else {
+            char preview[201];
+            size_t pl = k < 200 ? k : 200;
+            memcpy(preview, cat, pl);
+            preview[pl] = 0;
+            for (char *p = preview; *p; p++) if (*p == '\n' || *p == '\r') *p = ' ';
+            bool has_mat = strstr(cat, "UnityPerMaterial") != NULL;
+            bool has_draw = strstr(cat, "UnityPerDraw") != NULL;
+            bool has_light = (strstr(cat, "Light") != NULL) || (strstr(cat, "light") != NULL);
+            bool has_shadow = (strstr(cat, "Shadow") != NULL) || (strstr(cat, "shadow") != NULL);
+            bool has_base = (strstr(cat, "_BaseColor") != NULL) || (strstr(cat, "_BaseMap") != NULL);
+            tl_log_line("gl: shader %u (%d bytes, mat=%d draw=%d light=%d shd=%d base=%d): %.160s",
+                        sh, (int)k, has_mat, has_draw, has_light, has_shadow, has_base, preview);
+        }
     }
     if (!g_es31_shim) {
         const char *one = cat; int one_len = (int)k;
