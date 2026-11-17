@@ -204,53 +204,6 @@ static EGLBoolean w_eglChooseConfig(EGLDisplay d, const EGLint *at, EGLConfig *c
     EGLBoolean ok = a_eglChooseConfig(d, at ? filtered : NULL, tmp, 256, &k);
     EGLint total = 0;
     if (ok) {
-        /* If the top config chosen by ANGLE lacks stencil (st == 0) because EGL sorts smaller stencil first,
-         * find a matching config in tmp with the EXACT same color depth, sample count, caveat, and surface
-         * types that includes stencil (st >= 8). This ensures games (like Unity UI using stencil masks for
-         * buttons and text) have an active stencil buffer without disrupting color/depth/sample compatibility. */
-        if (k > 1) {
-            EGLint st0 = 0;
-            a_eglGetConfigAttrib(d, tmp[0], 0x3026 /* EGL_STENCIL_SIZE */, &st0);
-            if (st0 == 0) {
-                EGLint r0 = 0, g0 = 0, b0 = 0, a0 = 0, dp0 = 0, sm0 = 0, cav0 = 0, stype0 = 0;
-                a_eglGetConfigAttrib(d, tmp[0], 0x3024 /* EGL_RED_SIZE */, &r0);
-                a_eglGetConfigAttrib(d, tmp[0], 0x3023 /* EGL_GREEN_SIZE */, &g0);
-                a_eglGetConfigAttrib(d, tmp[0], 0x3022 /* EGL_BLUE_SIZE */, &b0);
-                a_eglGetConfigAttrib(d, tmp[0], 0x3021 /* EGL_ALPHA_SIZE */, &a0);
-                a_eglGetConfigAttrib(d, tmp[0], 0x3025 /* EGL_DEPTH_SIZE */, &dp0);
-                a_eglGetConfigAttrib(d, tmp[0], 0x3031 /* EGL_SAMPLES */, &sm0);
-                a_eglGetConfigAttrib(d, tmp[0], 0x3027 /* EGL_CONFIG_CAVEAT */, &cav0);
-                a_eglGetConfigAttrib(d, tmp[0], 0x3033 /* EGL_SURFACE_TYPE */, &stype0);
-
-                int best_idx = -1;
-                for (int i = 1; i < k; i++) {
-                    EGLint r1 = 0, g1 = 0, b1 = 0, a1 = 0, dp1 = 0, st1 = 0, sm1 = 0, cav1 = 0, stype1 = 0;
-                    a_eglGetConfigAttrib(d, tmp[i], 0x3024, &r1);
-                    a_eglGetConfigAttrib(d, tmp[i], 0x3023, &g1);
-                    a_eglGetConfigAttrib(d, tmp[i], 0x3022, &b1);
-                    a_eglGetConfigAttrib(d, tmp[i], 0x3021, &a1);
-                    a_eglGetConfigAttrib(d, tmp[i], 0x3025, &dp1);
-                    a_eglGetConfigAttrib(d, tmp[i], 0x3026, &st1);
-                    a_eglGetConfigAttrib(d, tmp[i], 0x3031, &sm1);
-                    a_eglGetConfigAttrib(d, tmp[i], 0x3027, &cav1);
-                    a_eglGetConfigAttrib(d, tmp[i], 0x3033, &stype1);
-
-                    if (st1 >= 8 && r1 == r0 && g1 == g0 && b1 == b0 && a1 == a0 &&
-                        sm1 == sm0 && cav1 == cav0 && (stype1 & stype0) == stype0 &&
-                        dp1 >= dp0) {
-                        best_idx = i;
-                        break;
-                    }
-                }
-                if (best_idx > 0) {
-                    EGLConfig preferred = tmp[best_idx];
-                    for (int i = best_idx; i > 0; i--) tmp[i] = tmp[i - 1];
-                    tmp[0] = preferred;
-                    tl_log_line("egl: prioritized stencil config %p (dp=%d, st>=8) over %p",
-                                tmp[0], dp0, tmp[1]);
-                }
-            }
-        }
         EGLConfig all[512];
         for (int i = 0; i < k; i++) all[total++] = tmp[i];
         static int no_alias = -1;
@@ -995,23 +948,14 @@ static void w_glUniformMatrix4x3fv(int l, int c, unsigned t, const float *v) { r
 static void (*r_glSampleCoverage)(float, unsigned);
 static void w_glSampleCoverage(float v, unsigned i) { r_glSampleCoverage(v, i & 0xff); }
 
-static inline void set_r8_font_swizzle(unsigned target)
-{
-    static void (*fn_tex_parami)(unsigned, unsigned, int);
-    if (!fn_tex_parami) fn_tex_parami = gl_proc("glTexParameteri");
-    if (fn_tex_parami) {
-        fn_tex_parami(target, 0x8E42 /* GL_TEXTURE_SWIZZLE_R */, 0x1903 /* GL_RED */);
-        fn_tex_parami(target, 0x8E43 /* GL_TEXTURE_SWIZZLE_G */, 0x1903 /* GL_RED */);
-        fn_tex_parami(target, 0x8E44 /* GL_TEXTURE_SWIZZLE_B */, 0x1903 /* GL_RED */);
-        fn_tex_parami(target, 0x8E45 /* GL_TEXTURE_SWIZZLE_A */, 0x1903 /* GL_RED */);
-    }
-}
-
 static void (*r_glTexImage2D)(unsigned, int, int, int, int, int, unsigned, unsigned, const void *);
 static void w_glTexImage2D(unsigned target, int level, int internalformat, int width, int height, int border, unsigned format, unsigned type, const void *pixels)
 {
     if (!r_glTexImage2D) r_glTexImage2D = gl_proc("glTexImage2D");
     if (!r_glTexImage2D) return;
+
+    int cur_tex = 0;
+    a_glGetIntegerv(0x8069 /* GL_TEXTURE_BINDING_2D */, &cur_tex);
 
     while (gl_proc_get_error());
     r_glTexImage2D(target, level, internalformat, width, height, border, format, type, pixels);
@@ -1022,15 +966,12 @@ static void w_glTexImage2D(unsigned target, int level, int internalformat, int w
         err = gl_proc_get_error();
         tl_log_line("gl: glTexImage2D fallback intfmt 0x8C41 -> 0x8C43: err %#x", err);
     }
-    if (err == 0 && ((unsigned)internalformat == 0x8229 /* GL_R8 */ || format == 0x1903 /* GL_RED */)) {
-        set_r8_font_swizzle(target);
-    }
 
     static atomic_int count;
     int c = atomic_fetch_add(&count, 1);
-    if (c < 30 || (c % 100 == 0) || err != 0) {
-        tl_log_line("gl: glTexImage2D(target %#x, lvl %d, intfmt %#x, %dx%d, fmt %#x, type %#x) -> err %#x",
-                    target, level, internalformat, width, height, format, type, err);
+    if (c < 30 || (c % 100 == 0) || (unsigned)internalformat == 0x8229 || format == 0x1903 || width >= 512 || height >= 512 || err != 0) {
+        tl_log_line("gl: glTexImage2D(target %#x, tex %d, lvl %d, intfmt %#x, %dx%d, fmt %#x, type %#x, pix %p) -> err %#x",
+                    target, cur_tex, level, internalformat, width, height, format, type, pixels, err);
     }
 }
 
@@ -1039,6 +980,9 @@ static void w_glTexStorage2D(unsigned target, int levels, unsigned internalforma
 {
     if (!r_glTexStorage2D) r_glTexStorage2D = gl_proc("glTexStorage2D");
     if (!r_glTexStorage2D) return;
+
+    int cur_tex = 0;
+    a_glGetIntegerv(0x8069 /* GL_TEXTURE_BINDING_2D */, &cur_tex);
 
     while (gl_proc_get_error());
     r_glTexStorage2D(target, levels, internalformat, width, height);
@@ -1057,29 +1001,30 @@ static void w_glTexStorage2D(unsigned target, int levels, unsigned internalforma
         r_glTexStorage2D(target, levels, 0x8051 /* GL_RGB8 */, width, height);
         err = gl_proc_get_error();
     }
-    if (err == 0 && internalformat == 0x8229 /* GL_R8 */) {
-        set_r8_font_swizzle(target);
-    }
 
     static atomic_int count;
     int c = atomic_fetch_add(&count, 1);
-    if (c < 30 || (c % 100 == 0) || err != 0) {
-        tl_log_line("gl: glTexStorage2D(target %#x, lvls %d, intfmt %#x, %dx%d) -> err %#x",
-                    target, levels, internalformat, width, height, err);
+    if (c < 30 || (c % 100 == 0) || internalformat == 0x8229 /* GL_R8 */ || width >= 512 || height >= 512 || err != 0) {
+        tl_log_line("gl: glTexStorage2D(target %#x, tex %d, lvls %d, intfmt %#x, %dx%d) -> err %#x",
+                    target, cur_tex, levels, internalformat, width, height, err);
     }
 }
 
 static void (*r_glTexSubImage2D)(unsigned, int, int, int, int, int, unsigned, unsigned, const void *);
 static void w_glTexSubImage2D(unsigned target, int level, int xoffset, int yoffset, int width, int height, unsigned format, unsigned type, const void *pixels)
 {
+    int cur_tex = 0;
+    a_glGetIntegerv(0x8069 /* GL_TEXTURE_BINDING_2D */, &cur_tex);
+
+    while (gl_proc_get_error());
     r_glTexSubImage2D(target, level, xoffset, yoffset, width, height, format, type, pixels);
-    if (format == 0x1903 /* GL_RED */) {
-        set_r8_font_swizzle(target);
-    }
+    unsigned err = gl_proc_get_error();
+
     static atomic_int count;
     int c = atomic_fetch_add(&count, 1);
-    if (c < 30 || (c % 100 == 0)) {
-        tl_log_line("gl: glTexSubImage2D(target %#x, lvl %d, %dx%d, fmt %#x, type %#x)", target, level, width, height, format, type);
+    if (c < 30 || (c % 100 == 0) || format == 0x1903 /* GL_RED */ || width >= 512 || height >= 512 || err != 0) {
+        tl_log_line("gl: glTexSubImage2D(target %#x, tex %d, lvl %d, %dx%d, fmt %#x, type %#x, pix %p) -> err %#x",
+                    target, cur_tex, level, width, height, format, type, pixels, err);
     }
 }
 
@@ -1107,6 +1052,36 @@ static void w_glCompressedTexSubImage2D(unsigned target, int level, int xoffset,
     }
 }
 
+static void dump_program_info(unsigned program)
+{
+    void (*get_prog_iv)(unsigned, unsigned, int *) = gl_proc("glGetProgramiv");
+    void (*get_attrib)(unsigned, unsigned, int, int *, int *, unsigned *, char *) = gl_proc("glGetActiveAttrib");
+    void (*get_uniform)(unsigned, unsigned, int, int *, int *, unsigned *, char *) = gl_proc("glGetActiveUniform");
+    int (*get_attrib_loc)(unsigned, const char *) = gl_proc("glGetAttribLocation");
+    int (*get_uniform_loc)(unsigned, const char *) = gl_proc("glGetUniformLocation");
+    if (!get_prog_iv) return;
+
+    int n_attribs = 0, n_uniforms = 0, n_blocks = 0;
+    get_prog_iv(program, 0x8B89 /* GL_ACTIVE_ATTRIBUTES */, &n_attribs);
+    get_prog_iv(program, 0x8B86 /* GL_ACTIVE_UNIFORMS */, &n_uniforms);
+    get_prog_iv(program, 0x8A36 /* GL_ACTIVE_UNIFORM_BLOCKS */, &n_blocks);
+    tl_log_line("gl: prog %u info: %d attribs, %d uniforms, %d uniform blocks", program, n_attribs, n_uniforms, n_blocks);
+
+    char name[128];
+    for (int i = 0; i < n_attribs && i < 16; i++) {
+        int len = 0, sz = 0; unsigned type = 0; name[0] = 0;
+        if (get_attrib) get_attrib(program, (unsigned)i, sizeof(name), &len, &sz, &type, name);
+        int loc = get_attrib_loc ? get_attrib_loc(program, name) : -1;
+        tl_log_line("gl: prog %u attr[%d] '%s': loc %d, type %#x, sz %d", program, i, name, loc, type, sz);
+    }
+    for (int i = 0; i < n_uniforms && i < 32; i++) {
+        int len = 0, sz = 0; unsigned type = 0; name[0] = 0;
+        if (get_uniform) get_uniform(program, (unsigned)i, sizeof(name), &len, &sz, &type, name);
+        int loc = get_uniform_loc ? get_uniform_loc(program, name) : -1;
+        tl_log_line("gl: prog %u unif[%d] '%s': loc %d, type %#x, sz %d", program, i, name, loc, type, sz);
+    }
+}
+
 static void (*r_glProgramBinary)(unsigned, unsigned, const void *, int);
 static void w_glProgramBinary(unsigned program, unsigned binaryFormat, const void *binary, int length)
 {
@@ -1115,13 +1090,14 @@ static void w_glProgramBinary(unsigned program, unsigned binaryFormat, const voi
     if (r_glProgramBinary) r_glProgramBinary(program, binaryFormat, binary, length);
     static atomic_int count;
     int c = atomic_fetch_add(&count, 1);
-    if (c < 30) {
+    if (c < 40) {
         unsigned err = gl_proc_get_error();
         int link_ok = 0;
         void (*get_prog_iv)(unsigned, unsigned, int *) = gl_proc("glGetProgramiv");
         if (get_prog_iv) get_prog_iv(program, 0x8B82 /* GL_LINK_STATUS */, &link_ok);
         tl_log_line("gl: glProgramBinary(prog %u, binFmt %#x, len %d) -> err %#x, link_status %d",
                     program, binaryFormat, length, err, link_ok);
+        if (link_ok && program >= 20) dump_program_info(program);
     }
 }
 
@@ -1187,14 +1163,44 @@ static void (*r_glDrawElements)(unsigned, int, unsigned, const void *);
 static void w_glDrawElements(unsigned mode, int count, unsigned type, const void *indices)
 {
     if (!r_glDrawElements) r_glDrawElements = gl_proc("glDrawElements");
+
+    int cur_prog = 0, cur_tex = 0, cur_ibo = 0, cur_vao = 0;
+    a_glGetIntegerv(0x8B8D /* GL_CURRENT_PROGRAM */, &cur_prog);
+    a_glGetIntegerv(0x8069 /* GL_TEXTURE_BINDING_2D */, &cur_tex);
+    a_glGetIntegerv(0x8895 /* GL_ELEMENT_ARRAY_BUFFER_BINDING */, &cur_ibo);
+    a_glGetIntegerv(0x85B5 /* GL_VERTEX_ARRAY_BINDING */, &cur_vao);
+
+    while (gl_proc_get_error());
     if (r_glDrawElements) r_glDrawElements(mode, count, type, indices);
+    unsigned err = gl_proc_get_error();
+
+    static atomic_int de_logged;
+    int c = atomic_fetch_add(&de_logged, 1);
+    if (c < 30 || err != 0 || (cur_prog >= 24 && cur_prog <= 32 && c < 200)) {
+        tl_log_line("gl: DrawElements(mode %#x, cnt %d, type %#x, idx %p, prog %d, tex %d, vao %d, ibo %d) -> err %#x",
+                    mode, count, type, indices, cur_prog, cur_tex, cur_vao, cur_ibo, err);
+    }
 }
 
 static void (*r_glDrawArrays)(unsigned, int, int);
 static void w_glDrawArrays(unsigned mode, int first, int count)
 {
     if (!r_glDrawArrays) r_glDrawArrays = gl_proc("glDrawArrays");
+
+    int cur_prog = 0, cur_tex = 0;
+    a_glGetIntegerv(0x8B8D /* GL_CURRENT_PROGRAM */, &cur_prog);
+    a_glGetIntegerv(0x8069 /* GL_TEXTURE_BINDING_2D */, &cur_tex);
+
+    while (gl_proc_get_error());
     if (r_glDrawArrays) r_glDrawArrays(mode, first, count);
+    unsigned err = gl_proc_get_error();
+
+    static atomic_int da_logged;
+    int c = atomic_fetch_add(&da_logged, 1);
+    if (c < 20 || err != 0 || (cur_prog >= 24 && cur_prog <= 32 && c < 100)) {
+        tl_log_line("gl: DrawArrays(mode %#x, first %d, cnt %d, prog %d, tex %d) -> err %#x",
+                    mode, first, count, cur_prog, cur_tex, err);
+    }
 }
 
 static void (*r_glDrawElementsBaseVertex)(unsigned, int, unsigned, const void *, int);
@@ -1221,25 +1227,48 @@ static void resolve_base_vertex_procs(void)
     if (!r_glDrawElementsInstancedBaseVertex) r_glDrawElementsInstancedBaseVertex = gl_proc("glDrawElementsInstancedBaseVertexEXT");
     if (!r_glDrawElementsInstancedBaseVertex) r_glDrawElementsInstancedBaseVertex = gl_proc("glDrawElementsInstancedBaseVertexOES");
     if (!r_glDrawElementsInstancedBaseVertex) r_glDrawElementsInstancedBaseVertex = gl_proc("glDrawElementsInstancedBaseVertexANGLE");
+
+    tl_log_line("gl: resolve_base_vertex: bv=%p (ext=%p, oes=%p, angle=%p), inst_bv=%p (ext=%p, oes=%p, angle=%p)",
+                r_glDrawElementsBaseVertex,
+                gl_proc("glDrawElementsBaseVertexEXT"),
+                gl_proc("glDrawElementsBaseVertexOES"),
+                gl_proc("glDrawElementsBaseVertexANGLE"),
+                r_glDrawElementsInstancedBaseVertex,
+                gl_proc("glDrawElementsInstancedBaseVertexEXT"),
+                gl_proc("glDrawElementsInstancedBaseVertexOES"),
+                gl_proc("glDrawElementsInstancedBaseVertexANGLE"));
 }
 
 static void w_glDrawElementsBaseVertex(unsigned mode, int count, unsigned type, const void *indices, int basevertex)
 {
     resolve_base_vertex_procs();
-    if (r_glDrawElementsBaseVertex) {
-        r_glDrawElementsBaseVertex(mode, count, type, indices, basevertex);
-        return;
-    }
-    if (r_glDrawElementsInstancedBaseVertex) {
-        r_glDrawElementsInstancedBaseVertex(mode, count, type, indices, 1, basevertex);
-        return;
-    }
+
+    int cur_prog = 0, cur_tex = 0, cur_ibo = 0, cur_vao = 0;
+    a_glGetIntegerv(0x8B8D /* GL_CURRENT_PROGRAM */, &cur_prog);
+    a_glGetIntegerv(0x8069 /* GL_TEXTURE_BINDING_2D */, &cur_tex);
+    a_glGetIntegerv(0x8895 /* GL_ELEMENT_ARRAY_BUFFER_BINDING */, &cur_ibo);
+    a_glGetIntegerv(0x85B5 /* GL_VERTEX_ARRAY_BINDING */, &cur_vao);
+
+    while (gl_proc_get_error());
+
     if (basevertex == 0) {
         if (!r_glDrawElements) r_glDrawElements = gl_proc("glDrawElements");
         if (r_glDrawElements) r_glDrawElements(mode, count, type, indices);
+    } else if (r_glDrawElementsBaseVertex) {
+        r_glDrawElementsBaseVertex(mode, count, type, indices, basevertex);
+    } else if (r_glDrawElementsInstancedBaseVertex) {
+        r_glDrawElementsInstancedBaseVertex(mode, count, type, indices, 1, basevertex);
     } else {
         static int warned = 0;
         if (!warned++) tl_log_line("gl: glDrawElementsBaseVertex called with basevertex %d but no driver base vertex proc available", basevertex);
+    }
+
+    unsigned err = gl_proc_get_error();
+    static atomic_int bv_logged;
+    int c = atomic_fetch_add(&bv_logged, 1);
+    if (c < 40 || err != 0 || (cur_prog >= 24 && cur_prog <= 32 && c < 200)) {
+        tl_log_line("gl: DrawElementsBaseVertex(mode %#x, cnt %d, type %#x, idx %p, bv %d, prog %d, tex %d, vao %d, ibo %d) -> err %#x",
+                    mode, count, type, indices, basevertex, cur_prog, cur_tex, cur_vao, cur_ibo, err);
     }
 }
 
@@ -1247,41 +1276,67 @@ static void w_glDrawRangeElementsBaseVertex(unsigned mode, unsigned start, unsig
 {
     (void)start; (void)end;
     resolve_base_vertex_procs();
-    if (r_glDrawRangeElementsBaseVertex) {
-        r_glDrawRangeElementsBaseVertex(mode, start, end, count, type, indices, basevertex);
-        return;
-    }
-    if (r_glDrawElementsBaseVertex) {
-        r_glDrawElementsBaseVertex(mode, count, type, indices, basevertex);
-        return;
-    }
-    if (r_glDrawElementsInstancedBaseVertex) {
-        r_glDrawElementsInstancedBaseVertex(mode, count, type, indices, 1, basevertex);
-        return;
-    }
+
+    int cur_prog = 0, cur_tex = 0, cur_ibo = 0, cur_vao = 0;
+    a_glGetIntegerv(0x8B8D /* GL_CURRENT_PROGRAM */, &cur_prog);
+    a_glGetIntegerv(0x8069 /* GL_TEXTURE_BINDING_2D */, &cur_tex);
+    a_glGetIntegerv(0x8895 /* GL_ELEMENT_ARRAY_BUFFER_BINDING */, &cur_ibo);
+    a_glGetIntegerv(0x85B5 /* GL_VERTEX_ARRAY_BINDING */, &cur_vao);
+
+    while (gl_proc_get_error());
+
     if (basevertex == 0) {
         if (!r_glDrawElements) r_glDrawElements = gl_proc("glDrawElements");
         if (r_glDrawElements) r_glDrawElements(mode, count, type, indices);
+    } else if (r_glDrawRangeElementsBaseVertex) {
+        r_glDrawRangeElementsBaseVertex(mode, start, end, count, type, indices, basevertex);
+    } else if (r_glDrawElementsBaseVertex) {
+        r_glDrawElementsBaseVertex(mode, count, type, indices, basevertex);
+    } else if (r_glDrawElementsInstancedBaseVertex) {
+        r_glDrawElementsInstancedBaseVertex(mode, count, type, indices, 1, basevertex);
     } else {
         static int warned = 0;
         if (!warned++) tl_log_line("gl: glDrawRangeElementsBaseVertex called with basevertex %d but no driver base vertex proc available", basevertex);
+    }
+
+    unsigned err = gl_proc_get_error();
+    static atomic_int rbv_logged;
+    int c = atomic_fetch_add(&rbv_logged, 1);
+    if (c < 30 || err != 0 || (cur_prog >= 24 && cur_prog <= 32 && c < 150)) {
+        tl_log_line("gl: DrawRangeElementsBaseVertex(mode %#x, cnt %d, type %#x, idx %p, bv %d, prog %d, tex %d, vao %d, ibo %d) -> err %#x",
+                    mode, count, type, indices, basevertex, cur_prog, cur_tex, cur_vao, cur_ibo, err);
     }
 }
 
 static void w_glDrawElementsInstancedBaseVertex(unsigned mode, int count, unsigned type, const void *indices, int instancecount, int basevertex)
 {
     resolve_base_vertex_procs();
+
+    int cur_prog = 0, cur_tex = 0, cur_ibo = 0, cur_vao = 0;
+    a_glGetIntegerv(0x8B8D /* GL_CURRENT_PROGRAM */, &cur_prog);
+    a_glGetIntegerv(0x8069 /* GL_TEXTURE_BINDING_2D */, &cur_tex);
+    a_glGetIntegerv(0x8895 /* GL_ELEMENT_ARRAY_BUFFER_BINDING */, &cur_ibo);
+    a_glGetIntegerv(0x85B5 /* GL_VERTEX_ARRAY_BINDING */, &cur_vao);
+
+    while (gl_proc_get_error());
+
     if (r_glDrawElementsInstancedBaseVertex) {
         r_glDrawElementsInstancedBaseVertex(mode, count, type, indices, instancecount, basevertex);
-        return;
-    }
-    if (basevertex == 0) {
+    } else if (basevertex == 0) {
         static void (*fn_inst)(unsigned, int, unsigned, const void *, int);
         if (!fn_inst) fn_inst = gl_proc("glDrawElementsInstanced");
         if (fn_inst) fn_inst(mode, count, type, indices, instancecount);
     } else {
         static int warned = 0;
         if (!warned++) tl_log_line("gl: glDrawElementsInstancedBaseVertex called with basevertex %d but no driver base vertex proc available", basevertex);
+    }
+
+    unsigned err = gl_proc_get_error();
+    static atomic_int ibv_logged;
+    int c = atomic_fetch_add(&ibv_logged, 1);
+    if (c < 30 || err != 0 || (cur_prog >= 24 && cur_prog <= 32 && c < 150)) {
+        tl_log_line("gl: DrawElementsInstancedBaseVertex(mode %#x, cnt %d, type %#x, idx %p, inst %d, bv %d, prog %d, tex %d, vao %d, ibo %d) -> err %#x",
+                    mode, count, type, indices, instancecount, basevertex, cur_prog, cur_tex, cur_vao, cur_ibo, err);
     }
 }
 
