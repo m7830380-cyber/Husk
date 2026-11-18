@@ -146,6 +146,17 @@ static void w_glFramebufferTextureLayer(unsigned fbt, unsigned att, unsigned tex
     if (diag_on() && tex) atomic_fetch_add(&g_diag_arr_layer, 1);
 }
 
+static atomic_int g_diag_mips;
+static void (*r_glGenerateMipmap)(unsigned);
+static void w_glGenerateMipmap(unsigned target)
+{
+    r_glGenerateMipmap(target);
+    if (!diag_on()) return;
+    int n = atomic_fetch_add(&g_diag_mips, 1);
+    if (n < 40) tl_log_line("gldiag: glGenerateMipmap(%s, tex %d)", target == 0x8C1A ? "2D_ARRAY" : target == 0x8513 ? "CUBE" :
+                            target == 0x0DE1 ? "2D" : "3D", diag_bound(target));
+}
+
 /* ---- GL entry points of our own (ANGLE's, called directly) */
 static const char *diag_type(unsigned t)
 {
@@ -584,6 +595,21 @@ static void cap_post(unsigned mode, int count)
         tl_log_line("gldiag: cap%d #%d prog %d count %d: %d px, avg (%.3f %.3f %.3f), dark %d%%%s", C.k, idx, prog, count, changed,
                     s[0] / changed, s[1] / changed, s[2] / changed, dark * 100 / changed, err ? " GL error before" : "");
     }
+    bool arr = false;
+    if (changed >= 120 && prog > 0 && prog < DIAG_PROGS && !g_diag_dark_done[prog] && C.reports < 24) {
+        int nu = 0; DG.get_prog_iv((unsigned)prog, 0x8B86, &nu);
+        for (int i = 0; i < nu && i < 512 && !arr; i++) {
+            char nm[96]; int l = 0, sz = 0; unsigned ty = 0;
+            DG.get_active_u((unsigned)prog, (unsigned)i, sizeof(nm), &l, &sz, &ty, nm);
+            arr = ty == 0x8DC1;
+        }
+    }
+    if (arr) {
+        g_diag_dark_done[prog] = 1; C.reports++;
+        tl_log_line("gldiag: cap%d #%d: program %d samples a texture array and drew %d px (%d%% dark); its state:", C.k, idx, prog, changed, dark * 100 / changed);
+        diag_report_prog((unsigned)prog, mode, count, true);
+        diag_write_prog_src((unsigned)prog);
+    }
     if (changed >= 120 && dark * 10 >= changed * 6 && prog > 0 && prog < DIAG_PROGS && !g_diag_dark_done[prog] && C.reports < 24) {
         g_diag_dark_done[prog] = 1; C.reports++;
         tl_log_line("gldiag: cap%d #%d: program %d drew %d px, %d%% of them dark; its state:", C.k, idx, prog, changed, dark * 100 / changed);
@@ -701,8 +727,8 @@ static void diag_swap(unsigned long n)
             C.tmp_fb = 0; C.ndraw = C.lines = 0;
         }
     if (n == 600 || n == k_cap_frames[CAP_N - 1]) {
-        tl_log_line("gldiag: by swap #%lu: texture arrays/3D made %d, sub-image uploads %d (compressed %d), copies %d (into arrays %d, failed %d), render-to-layer %d",
-                    n, atomic_load(&g_diag_arr_storage), atomic_load(&g_diag_arr_sub), atomic_load(&g_diag_arr_csub), atomic_load(&g_diag_copy_n),
+        tl_log_line("gldiag: by swap #%lu: mipmap generations %d, texture arrays/3D made %d, sub-image uploads %d (compressed %d), copies %d (into arrays %d, failed %d), render-to-layer %d",
+                    n, atomic_load(&g_diag_mips), atomic_load(&g_diag_arr_storage), atomic_load(&g_diag_arr_sub), atomic_load(&g_diag_arr_csub), atomic_load(&g_diag_copy_n),
                     atomic_load(&g_diag_arr_copy_in), atomic_load(&g_diag_copy_fail), atomic_load(&g_diag_arr_layer));
         if (n == k_cap_frames[CAP_N - 1]) { atomic_store(&g_diag_done, true); tl_log_line("gldiag: done"); }
     }

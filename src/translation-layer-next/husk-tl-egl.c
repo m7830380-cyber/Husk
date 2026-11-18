@@ -814,7 +814,7 @@ static const struct { const char *name; void *wrap; void **real; } k_adapt[] = {
     ADAPT(glUniformMatrix3x4fv), ADAPT(glUniformMatrix4x3fv),
     ADAPT(glProgramBinary), { "glProgramBinaryOES", (void *)w_glProgramBinary, (void **)&r_glProgramBinary },
     ADAPT(glTexStorage3D), ADAPT(glTexImage3D), ADAPT(glFramebufferTextureLayer),
-    ADAPT(glDrawElements), ADAPT(glDrawElementsInstanced), ADAPT(glDrawRangeElements), ADAPT(glDrawArrays), ADAPT(glDrawArraysInstanced), ADAPT(glClear),
+    ADAPT(glDrawElements), ADAPT(glDrawElementsInstanced), ADAPT(glDrawRangeElements), ADAPT(glDrawArrays), ADAPT(glDrawArraysInstanced), ADAPT(glClear), ADAPT(glGenerateMipmap),
     { "glCopyImageSubDataEXT", (void *)w_glCopyImageSubData, (void **)&r_glCopyImageSubData },
     { "glCopyImageSubDataOES", (void *)w_glCopyImageSubData, (void **)&r_glCopyImageSubData }, ADAPT(glGetString), ADAPT(glGetStringi), ADAPT(glCompileShader), ADAPT(glShaderSource), ADAPT(glAttachShader), ADAPT(glLinkProgram), ADAPT(glGetIntegerv), ADAPT(glBindBufferBase), ADAPT(glBindBuffer), ADAPT(glBufferData), ADAPT(glBufferSubData), ADAPT(glBindBufferRange),
     ADAPT(glGetProgramInterfaceiv), ADAPT(glGetProgramResourceIndex), ADAPT(glGetProgramResourceName), ADAPT(glGetProgramResourceiv), ADAPT(glGetIntegeri_v),
