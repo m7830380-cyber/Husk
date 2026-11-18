@@ -113,6 +113,7 @@ static void w_glProgramBinary(unsigned prog, unsigned fmt, const void *bin, int 
 /* ---- texture arrays */
 static atomic_int g_diag_arr_storage, g_diag_arr_sub, g_diag_arr_csub, g_diag_arr_copy_in, g_diag_arr_layer, g_diag_copy_n, g_diag_copy_fail;
 
+static void diag_cube_mips_done(unsigned tex);
 static int diag_bound(unsigned target)
 {
     unsigned q = target == 0x8C1A ? 0x8C1D : target == 0x806F ? 0x806A : target == 0x8513 ? 0x8514 : 0x8069;
@@ -159,6 +160,7 @@ static void w_glGenerateMipmap(unsigned target)
     int n = target == 0x0DE1 ? atomic_fetch_add(&g_diag_mips_2d, 1) : target == 0x8C1A ? atomic_fetch_add(&g_diag_mips_arr, 1) : 0;
     if (n < 10) tl_log_line("gldiag: glGenerateMipmap(%s, tex %d)", target == 0x8C1A ? "2D_ARRAY" : target == 0x8513 ? "CUBE" :
                             target == 0x0DE1 ? "2D" : "3D", diag_bound(target));
+    if (target == 0x8513) diag_cube_mips_done((unsigned)diag_bound(target));
 }
 
 /* ---- GL entry points of our own (ANGLE's, called directly) */
@@ -252,14 +254,14 @@ static bool diag_load(void)
 static const char k_probe_vs[] =
     "#version 300 es\nvoid main() { gl_Position = vec4(gl_VertexID == 1 ? 3.0 : -1.0, gl_VertexID == 2 ? 3.0 : -1.0, 0.0, 1.0); }\n";
 static const char *const k_probe_fs[3] = {
-    "#version 300 es\nprecision highp float;\nuniform highp sampler2D s;\nuniform vec4 uv[4];\nout vec4 o;\n"
-    "void main() { int i = int(gl_FragCoord.x); o = textureLod(s, uv[i].xy, gl_FragCoord.y < 1.0 ? 0.0 : 4.0); }\n",
-    "#version 300 es\nprecision highp float;\nuniform highp samplerCube s;\nuniform vec4 uv[4];\nout vec4 o;\n"
-    "void main() { int i = int(gl_FragCoord.x); o = textureLod(s, uv[i].xyz, gl_FragCoord.y < 1.0 ? 0.0 : 4.0); }\n",
-    "#version 300 es\nprecision highp float;\nuniform highp sampler2DArray s;\nuniform vec4 uv[4];\nout vec4 o;\n"
-    "void main() { int i = int(gl_FragCoord.x); o = textureLod(s, vec3(uv[i].xy, 0.0), gl_FragCoord.y < 1.0 ? 0.0 : 4.0); }\n",
+    "#version 300 es\nprecision highp float;\nuniform highp sampler2D s;\nuniform vec4 uv[4];\nuniform float L;\nout vec4 o;\n"
+    "void main() { int i = int(gl_FragCoord.x); o = textureLod(s, uv[i].xy, gl_FragCoord.y < 1.0 ? 0.0 : L); }\n",
+    "#version 300 es\nprecision highp float;\nuniform highp samplerCube s;\nuniform vec4 uv[4];\nuniform float L;\nout vec4 o;\n"
+    "void main() { int i = int(gl_FragCoord.x); o = textureLod(s, uv[i].xyz, gl_FragCoord.y < 1.0 ? 0.0 : L); }\n",
+    "#version 300 es\nprecision highp float;\nuniform highp sampler2DArray s;\nuniform vec4 uv[4];\nuniform float L;\nout vec4 o;\n"
+    "void main() { int i = int(gl_FragCoord.x); o = textureLod(s, vec3(uv[i].xy, 0.0), gl_FragCoord.y < 1.0 ? 0.0 : L); }\n",
 };
-static struct { bool tried, ok, flt; unsigned prog[3], va, fb, tex; int loc_s[3], loc_uv[3]; int unit; } P;
+static struct { bool tried, ok, flt; unsigned prog[3], va, fb, tex; int loc_s[3], loc_uv[3], loc_l[3]; int unit; } P;
 
 static unsigned probe_shader(unsigned type, const char *src)
 {
@@ -283,7 +285,7 @@ static bool probe_init(void)
         P.prog[t] = DG.create_prog(); DG.attach(P.prog[t], vs); DG.attach(P.prog[t], fs); DG.link(P.prog[t]);
         int ok = 0; DG.get_prog_iv(P.prog[t], 0x8B82, &ok);
         if (!ok) { char log[512] = ""; DG.prog_log(P.prog[t], sizeof(log), NULL, log); tl_log_line("gldiag: probe link: %s", log); return false; }
-        P.loc_s[t] = DG.get_u_loc(P.prog[t], "s"); P.loc_uv[t] = DG.get_u_loc(P.prog[t], "uv");
+        P.loc_s[t] = DG.get_u_loc(P.prog[t], "s"); P.loc_uv[t] = DG.get_u_loc(P.prog[t], "uv"); P.loc_l[t] = DG.get_u_loc(P.prog[t], "L");
     }
     int units = 16; a_glGetIntegerv(0x8B4D /* MAX_COMBINED_TEXTURE_IMAGE_UNITS */, &units);
     P.unit = units > 1 ? units - 1 : 0;
@@ -308,7 +310,8 @@ static bool probe_init(void)
     return P.ok;
 }
 
-static void diag_probe(unsigned target, unsigned tex, unsigned samp)
+/* row 0 at lod 0, row 1 at lod `lod`; `why` (when set) heads the line instead of the plain texture line */
+static void diag_probe_at(unsigned target, unsigned tex, unsigned samp, int lod, const char *why)
 {
     int t = target == 0x8513 ? 1 : target == 0x8C1A ? 2 : target == 0x0DE1 ? 0 : -1;
     if (t < 0 || !tex || !probe_init()) return;
@@ -333,7 +336,7 @@ static void diag_probe(unsigned target, unsigned tex, unsigned samp)
     if (!cmp) {
         static const float uv2d[16] = { 0.25f, 0.25f, 0, 0, 0.5f, 0.5f, 0, 0, 0.75f, 0.75f, 0, 0, 0.3f, 0.7f, 0, 0 };
         static const float dirs[16] = { 1, 0, 0, 0, 0, 1, 0, 0, 0, -1, 0, 0, 0, 0, 1, 0 };   /* +X, +Y (up), -Y (down), +Z */
-        DG.use(P.prog[t]); DG.u1i(P.loc_s[t], P.unit); DG.u4fv(P.loc_uv[t], 4, t == 1 ? dirs : uv2d);
+        DG.use(P.prog[t]); DG.u1i(P.loc_s[t], P.unit); DG.u4fv(P.loc_uv[t], 4, t == 1 ? dirs : uv2d); DG.u1f(P.loc_l[t], (float)lod);
         DG.bind_va(P.va);
         a_glBindFramebuffer(0x8CA9, P.fb); DG.viewport(0, 0, 4, 2); DG.color_mask(1, 1, 1, 1);
         DG.draw_arrays(0x0004, 0, 3);
@@ -356,10 +359,37 @@ static void diag_probe(unsigned target, unsigned tex, unsigned samp)
     char px[600]; size_t k = 0; px[0] = 0;
     if (read)
         for (int i = 0; i < 8; i++)
-            k += (size_t)snprintf(px + k, sizeof(px) - k, "%s(%.3g %.3g %.3g %.3g)", i == 0 ? "lod0 " : i == 4 ? " | lod4 " : " ",
+            k += (size_t)snprintf(px + k, sizeof(px) - k, "%s(%.3g %.3g %.3g %.3g)", i == 0 ? "lod0 " : i == 4 ? " | lodN " : " ",
                                   out[i * 4], out[i * 4 + 1], out[i * 4 + 2], out[i * 4 + 3]);
+    if (read) { char *q = strstr(px, "lodN"); if (q) q[3] = lod < 10 ? (char)('0' + lod) : '+'; }
+    bool nan = false;
+    if (read) for (int i = 0; i < 32; i++) if (out[i] != out[i] || out[i] > 65000.0f || out[i] < -65000.0f) nan = true;
+    if (why) { tl_log_line("gldiag:     %s: tex %u%s; %s", why, tex, nan ? " HAS NaN/inf" : "", read ? px : "(not read)"); return; }
     tl_log_line("gldiag:     tex %u: base %d max %d min %#x mag %#x immutable %d (%d levels) compare %#x; %s", tex, base, maxl, minf, magf,
                 imm, imml, cmp, read ? px : "(depth compare: not read)");
+}
+static void diag_probe(unsigned target, unsigned tex, unsigned samp) { diag_probe_at(target, tex, samp, 4, NULL); }
+
+/* the reflection cube's lower mips read back NaN: whether glGenerateMipmap or the copies that follow put them there */
+static void diag_cube_mips_done(unsigned tex)
+{
+    static atomic_int n;
+    if (!diag_load() || atomic_fetch_add(&n, 1) >= 8) return;
+    unsigned err = DG.get_error();
+    char why[96]; snprintf(why, sizeof(why), "after glGenerateMipmap(CUBE)%s", err ? " (GL error)" : "");
+    diag_probe_at(0x8513, tex, 0, 4, why);
+}
+/* after a copy into a cube's level: that level read back, and the GL error the copy raised (if any) */
+static void diag_cube_copy_done(unsigned sn, unsigned st, int sl, unsigned dn, int dl, int face, int w, int h, unsigned err, int rfmt, int rtype)
+{
+    static atomic_int n;
+    if (!diag_load()) return;
+    int k = atomic_fetch_add(&n, 1);
+    if (k >= 48) return;
+    char why[200];
+    snprintf(why, sizeof(why), "copy %#x %u lvl %d -> cube %u lvl %d face %d, %dx%d, source reads as fmt %#x type %#x, GL error %#x",
+             st, sn, sl, dn, dl, face, w, h, rfmt, rtype, err);
+    if (face == 5 || err) diag_probe_at(0x8513, dn, 0, dl, why); else tl_log_line("gldiag:     %s", why);
 }
 
 static void diag_report_prog(unsigned prog, unsigned mode, int count, bool probe)
@@ -707,6 +737,32 @@ out:
     C.prev = C.cur = NULL; C.owner = NULL;
 }
 
+/* ---- blend state as the game sets it: the characters draw with blending on and both factors ZERO, which is black.
+ * Which call sets that (and whether it arrives through an indexed, per-draw-buffer call) is what these say. */
+static atomic_int g_diag_blend_calls[4], g_diag_blend_zero;
+static void diag_blend(int kind, int buf, unsigned s, unsigned d, unsigned sa, unsigned da)
+{
+    if (!diag_on()) return;
+    static const char *const names[4] = { "glBlendFunc", "glBlendFuncSeparate", "glBlendFunci", "glBlendFuncSeparatei" };
+    int n = atomic_fetch_add(&g_diag_blend_calls[kind], 1);
+    bool zero = s == 0 && d == 0;
+    int z = zero ? atomic_fetch_add(&g_diag_blend_zero, 1) : 0;
+    if (n < 6 || (zero && z < 16)) {
+        int prog = 0; if (a_glGetIntegerv) a_glGetIntegerv(0x8B8D, &prog);
+        int fb = 0; if (a_glGetIntegerv) a_glGetIntegerv(0x8CA6, &fb);
+        tl_log_line("gldiag: %s(%s%d%s%#x, %#x, %#x, %#x) #%d, program %d, fbo %d%s", names[kind], kind >= 2 ? "buf " : "", kind >= 2 ? buf : 0,
+                    kind >= 2 ? ", " : "", s, d, sa, da, n, prog, fb, zero ? "  <- ZERO,ZERO" : "");
+    }
+}
+static void (*r_glBlendFunc)(unsigned, unsigned);
+static void w_glBlendFunc(unsigned s, unsigned d) { r_glBlendFunc(s, d); diag_blend(0, 0, s, d, s, d); }
+static void (*r_glBlendFuncSeparate)(unsigned, unsigned, unsigned, unsigned);
+static void w_glBlendFuncSeparate(unsigned s, unsigned d, unsigned sa, unsigned da) { r_glBlendFuncSeparate(s, d, sa, da); diag_blend(1, 0, s, d, sa, da); }
+static void (*r_glBlendFunci)(unsigned, unsigned, unsigned);
+static void w_glBlendFunci(unsigned b, unsigned s, unsigned d) { r_glBlendFunci(b, s, d); diag_blend(2, (int)b, s, d, s, d); }
+static void (*r_glBlendFuncSeparatei)(unsigned, unsigned, unsigned, unsigned, unsigned);
+static void w_glBlendFuncSeparatei(unsigned b, unsigned s, unsigned d, unsigned sa, unsigned da) { r_glBlendFuncSeparatei(b, s, d, sa, da); diag_blend(3, (int)b, s, d, sa, da); }
+
 static void (*r_glDrawElements)(unsigned, int, unsigned, const void *);
 static void w_glDrawElements(unsigned mode, int count, unsigned type, const void *idx)
 { t_diag_draws++; bool c = cap_here(); if (c) cap_pre(); r_glDrawElements(mode, count, type, idx); if (c) cap_post(mode, count); }
@@ -731,6 +787,9 @@ static void diag_summary(unsigned long n)
     tl_log_line("gldiag: by swap #%lu: mipmap generations %d (arrays %d), texture arrays/3D made %d, sub-image uploads %d (compressed %d), copies %d (into arrays %d, failed %d), render-to-layer %d",
                 n, atomic_load(&g_diag_mips), atomic_load(&g_diag_mips_arr), atomic_load(&g_diag_arr_storage), atomic_load(&g_diag_arr_sub), atomic_load(&g_diag_arr_csub),
                 atomic_load(&g_diag_copy_n), atomic_load(&g_diag_arr_copy_in), atomic_load(&g_diag_copy_fail), atomic_load(&g_diag_arr_layer));
+    tl_log_line("gldiag: by swap #%lu: blend calls: BlendFunc %d, BlendFuncSeparate %d, indexed %d + %d; with both factors ZERO %d", n,
+                atomic_load(&g_diag_blend_calls[0]), atomic_load(&g_diag_blend_calls[1]), atomic_load(&g_diag_blend_calls[2]),
+                atomic_load(&g_diag_blend_calls[3]), atomic_load(&g_diag_blend_zero));
 }
 static void diag_swap(unsigned long n)
 {

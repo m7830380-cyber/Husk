@@ -599,8 +599,12 @@ static void copyimg_emulate(unsigned sn, unsigned st, int sl, int sx, int sy, in
         bool color = CI.status(READ) == COMPLETE;
         if (color && dt != CI_RENDERBUFFER && dt != CI_TEX_2D_MS) {
             if (!texbound) { CI.bind_tex(dt == CI_TEX_CUBE ? CI_TEX_CUBE : dt, dn); texbound = true; }
+            bool watch = dt == CI_TEX_CUBE && diag_on() && diag_load();
+            int rfmt = 0, rtype = 0;
+            if (watch) { (void)DG.get_error(); CI.get_iv(0x8B9B /* IMPLEMENTATION_COLOR_READ_FORMAT */, &rfmt); CI.get_iv(0x8B9A /* ..._TYPE */, &rtype); }
             if (dt == CI_TEX_3D || dt == CI_TEX_2D_ARRAY || dt == CI_TEX_CUBE_ARRAY) CI.copy3d(dt, dl, dx, dy, dly, sx, sy, w, h);
             else CI.copy2d(dt == CI_TEX_CUBE ? 0x8515u + (unsigned)dly : dt, dl, dx, dy, sx, sy, w, h);
+            if (watch) diag_cube_copy_done(sn, st, sl, dn, dl, dly, w, h, DG.get_error(), rfmt, rtype);
             continue;
         }
         /* depth/stencil, a renderbuffer or multisampled destination: a blit between two framebuffers */
@@ -733,6 +737,7 @@ static const unsigned char *w_glGetString(unsigned name)
         if (copyimg_extra()) for (int i = 0; i < COPYIMG_EXT_COUNT; i++) k += (size_t)snprintf(filtered + k, 62, "%s%s", k ? " " : "", k_copyimg_ext[i]);
         filtered[k] = 0;
         source = s;
+        if (diag_on()) for (size_t o = 0; o < k; o += 360) tl_log_line("gldiag: GL_EXTENSIONS[%zu]: %.360s", o, filtered + o);
     }
     pthread_mutex_unlock(&mu);
     return (const unsigned char *)filtered;
@@ -814,6 +819,10 @@ static const struct { const char *name; void *wrap; void **real; } k_adapt[] = {
     ADAPT(glUniformMatrix3x4fv), ADAPT(glUniformMatrix4x3fv),
     ADAPT(glProgramBinary), { "glProgramBinaryOES", (void *)w_glProgramBinary, (void **)&r_glProgramBinary },
     ADAPT(glTexStorage3D), ADAPT(glTexImage3D), ADAPT(glFramebufferTextureLayer),
+    ADAPT(glBlendFunc), ADAPT(glBlendFuncSeparate), ADAPT(glBlendFunci), ADAPT(glBlendFuncSeparatei),
+    { "glBlendFunciEXT", (void *)w_glBlendFunci, (void **)&r_glBlendFunci }, { "glBlendFunciOES", (void *)w_glBlendFunci, (void **)&r_glBlendFunci },
+    { "glBlendFuncSeparateiEXT", (void *)w_glBlendFuncSeparatei, (void **)&r_glBlendFuncSeparatei },
+    { "glBlendFuncSeparateiOES", (void *)w_glBlendFuncSeparatei, (void **)&r_glBlendFuncSeparatei },
     ADAPT(glDrawElements), ADAPT(glDrawElementsInstanced), ADAPT(glDrawRangeElements), ADAPT(glDrawArrays), ADAPT(glDrawArraysInstanced), ADAPT(glClear), ADAPT(glGenerateMipmap),
     { "glCopyImageSubDataEXT", (void *)w_glCopyImageSubData, (void **)&r_glCopyImageSubData },
     { "glCopyImageSubDataOES", (void *)w_glCopyImageSubData, (void **)&r_glCopyImageSubData }, ADAPT(glGetString), ADAPT(glGetStringi), ADAPT(glCompileShader), ADAPT(glShaderSource), ADAPT(glAttachShader), ADAPT(glLinkProgram), ADAPT(glGetIntegerv), ADAPT(glBindBufferBase), ADAPT(glBindBuffer), ADAPT(glBufferData), ADAPT(glBufferSubData), ADAPT(glBindBufferRange),
@@ -992,9 +1001,14 @@ static void *egl_resolve(const char *name)
         Dl_info di;
         if (real && dladdr(real, &di) && di.dli_fname && strcmp(di.dli_fname, E.gles_path) != 0 && strcmp(di.dli_fname, E.egl_path) != 0) real = NULL;
     }
-    if (!real) return NULL;
+    if (!real) {
+        static atomic_int missed;
+        if (diag_on() && atomic_fetch_add(&missed, 1) < 80) tl_log_line("gldiag: the game asked for %s: ANGLE has none (NULL returned)", name);
+        return NULL;
+    }
     static int trace = -1;
     if (trace < 0) trace = getenv("TL_GL_TRACE") ? 1 : 0;
+    if (diag_on() && (strstr(name, "Blend") || strstr(name, "Enablei") || strstr(name, "ColorMaski"))) tl_log_line("gldiag: the game resolved %s", name);
     for (size_t i = 0; i < sizeof(k_adapt) / sizeof(k_adapt[0]); i++) {
         if (!strcmp(k_adapt[i].name, name)) { *k_adapt[i].real = real; return trace ? glt_wrap(name, k_adapt[i].wrap) : k_adapt[i].wrap; }
     }
