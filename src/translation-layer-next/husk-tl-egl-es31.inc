@@ -141,6 +141,7 @@ static void w_glShaderSource(unsigned sh, int count, const char *const *str, con
     char *cat = malloc(total + 1); size_t k = 0;
     for (int i = 0; i < count; i++) if (str[i]) { size_t l = len && len[i] >= 0 ? (size_t)len[i] : strlen(str[i]); memcpy(cat + k, str[i], l); k += l; }
     cat[k] = 0;
+    diag_shader_source(sh, cat);
     char *ext = oes_external_rewrite(cat);
     if (ext) { free(cat); cat = ext; k = strlen(cat); }
     if (!g_es31_shim) {

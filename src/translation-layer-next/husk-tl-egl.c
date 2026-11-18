@@ -425,11 +425,13 @@ static void tex_swap(EGLDisplay d, EGLSurface s, void *win)
     a_glBindFramebuffer(0x8CA8, (unsigned)old_fb);
     tl_nwindow_post(win, buf, w, h, true);
 }
+static void diag_swap(unsigned long n);   /* husk-tl-egl-diag.inc */
 static EGLBoolean w_eglSwapBuffers(EGLDisplay d, EGLSurface s)
 {
     void *texwin = tex_window_of(s);
     if (texwin) { tex_swap(d, s, texwin); return EGL_TRUE; }
     unsigned long n = atomic_fetch_add(&E.presented, 1) + 1;
+    diag_swap(n);
     if (comp_surface(s)) {
         EGLint w = 0, h = 0;
         const uint8_t *px = read_back(d, s, &w, &h);
@@ -464,6 +466,8 @@ static EGLBoolean w_eglGetNextFrameIdANDROID(EGLDisplay d, EGLSurface s, uint64_
 static EGLBoolean w_eglGetFrameTimestampsANDROID(EGLDisplay d, EGLSurface s, uint64_t id, EGLint n, const EGLint *t, int64_t *v) { (void)d; (void)s; (void)id; (void)n; (void)t; (void)v; return EGL_FALSE; }
 static EGLBoolean w_eglGetCompositorTimingANDROID(EGLDisplay d, EGLSurface s, EGLint n, const EGLint *t, int64_t *v) { (void)d; (void)s; (void)n; (void)t; (void)v; return EGL_FALSE; }
 
+#include "husk-tl-egl-diag.inc"
+
 /* ------------------------------------------------- GLES: stack-argument fixes */
 
 /*
@@ -478,11 +482,11 @@ static void w_glBlitFramebuffer(int a0, int a1, int a2, int a3, int a4, int a5, 
 
 static void (*r_glTexSubImage3D)(unsigned, int, int, int, int, int, int, int, unsigned, unsigned, const void *);
 static void w_glTexSubImage3D(unsigned t, int l, int x, int y, int z, int w, int h, int d, uint64_t fmt, uint64_t type, const void *px)
-{ r_glTexSubImage3D(t, l, x, y, z, w, h, d, (unsigned)fmt, (unsigned)type, px); }
+{ r_glTexSubImage3D(t, l, x, y, z, w, h, d, (unsigned)fmt, (unsigned)type, px); if (diag_on()) atomic_fetch_add(&g_diag_arr_sub, 1); }
 
 static void (*r_glCompressedTexSubImage3D)(unsigned, int, int, int, int, int, int, int, unsigned, int, const void *);
 static void w_glCompressedTexSubImage3D(unsigned t, int l, int x, int y, int z, int w, int h, int d, uint64_t fmt, uint64_t size, const void *data)
-{ r_glCompressedTexSubImage3D(t, l, x, y, z, w, h, d, (unsigned)fmt, (int)size, data); }
+{ r_glCompressedTexSubImage3D(t, l, x, y, z, w, h, d, (unsigned)fmt, (int)size, data); if (diag_on()) atomic_fetch_add(&g_diag_arr_csub, 1); }
 
 /*
  * EXT_copy_image on ANGLE's Metal back end: the entry point is there, but TextureMtl has no copyTextureSubData, so the extension is
@@ -566,6 +570,11 @@ static void copyimg_emulate(unsigned sn, unsigned st, int sl, int sx, int sy, in
     static atomic_int said_fail, said_first;
     if (w <= 0 || h <= 0 || d <= 0 || !sn || !dn) return;
     if (!copyimg_load()) { if (!atomic_exchange(&said_fail, 1)) tl_log_line("gl: copy_image: ANGLE lacks what the emulation needs"); return; }
+    atomic_fetch_add(&g_diag_copy_n, 1);
+    if (dt == CI_TEX_2D_ARRAY || dt == CI_TEX_3D) {
+        int c = atomic_fetch_add(&g_diag_arr_copy_in, 1);
+        if (c < 8 && diag_on()) tl_log_line("gldiag: copy %#x %u lvl %d (%d,%d,%d) -> %#x %u lvl %d layer %d, %dx%dx%d", st, sn, sl, sx, sy, sz, dt, dn, dl, dz, w, h, d);
+    }
     if (!atomic_exchange(&said_first, 1))
         tl_log_line("gl: glCopyImageSubData emulated (ANGLE/Metal has no copy_image): first %#x %u lvl %d -> %#x %u lvl %d, %dx%dx%d",
                     st, sn, sl, dt, dn, dl, w, h, d);
@@ -611,6 +620,7 @@ static void copyimg_emulate(unsigned sn, unsigned st, int sl, int sx, int sy, in
                 if (atomic_fetch_add(&said, 1) < 4)
                     tl_log_line("gl: copy_image: %#x %u lvl %d cannot be read (compressed or not renderable): not copied", st, sn, sl);
                 failed = true;
+                atomic_fetch_add(&g_diag_copy_fail, 1);
                 break;
             }
         }
@@ -623,6 +633,7 @@ static void copyimg_emulate(unsigned sn, unsigned st, int sl, int sx, int sy, in
             if (scissor) CI.enable(0x0C11);
         } else {
             static atomic_int said;
+            atomic_fetch_add(&g_diag_copy_fail, 1);
             if (atomic_fetch_add(&said, 1) < 4) tl_log_line("gl: copy_image: destination %#x %u lvl %d cannot be drawn to: not copied", dt, dn, dl);
             failed = true;
         }
@@ -801,6 +812,9 @@ static const struct { const char *name; void *wrap; void **real; } k_adapt[] = {
     ADAPT(glUniformMatrix3fv), ADAPT(glUniformMatrix4fv), ADAPT(glSampleCoverage),
     ADAPT(glUniformMatrix2x3fv), ADAPT(glUniformMatrix3x2fv), ADAPT(glUniformMatrix2x4fv), ADAPT(glUniformMatrix4x2fv),
     ADAPT(glUniformMatrix3x4fv), ADAPT(glUniformMatrix4x3fv),
+    ADAPT(glProgramBinary), { "glProgramBinaryOES", (void *)w_glProgramBinary, (void **)&r_glProgramBinary },
+    ADAPT(glTexStorage3D), ADAPT(glTexImage3D), ADAPT(glFramebufferTextureLayer),
+    ADAPT(glDrawElements), ADAPT(glDrawElementsInstanced), ADAPT(glDrawRangeElements),
     { "glCopyImageSubDataEXT", (void *)w_glCopyImageSubData, (void **)&r_glCopyImageSubData },
     { "glCopyImageSubDataOES", (void *)w_glCopyImageSubData, (void **)&r_glCopyImageSubData }, ADAPT(glGetString), ADAPT(glGetStringi), ADAPT(glCompileShader), ADAPT(glShaderSource), ADAPT(glAttachShader), ADAPT(glLinkProgram), ADAPT(glGetIntegerv), ADAPT(glBindBufferBase), ADAPT(glBindBuffer), ADAPT(glBufferData), ADAPT(glBufferSubData), ADAPT(glBindBufferRange),
     ADAPT(glGetProgramInterfaceiv), ADAPT(glGetProgramResourceIndex), ADAPT(glGetProgramResourceName), ADAPT(glGetProgramResourceiv), ADAPT(glGetIntegeri_v),
