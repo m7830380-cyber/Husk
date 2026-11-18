@@ -231,6 +231,7 @@ static void w_glGetIntegerv(unsigned pname, int *data)
     if (g_es31_shim && data) *data = 0;   /* a 3.1-only limit is an error on the 3.0 context, which writes nothing */
     r_glGetIntegerv(pname, data);
     if (g_es31_shim && pname == 0x821C /* GL_MINOR_VERSION */ && data && *data == 0) *data = g_es3_minor;
+    if (pname == 0x821D /* GL_NUM_EXTENSIONS */ && data && *data > 0) *data += copyimg_extra();
 }
 
 /* The storage-buffer target (a block of the game's data) is a uniform buffer here; a buffer the game made for it is grown to what the

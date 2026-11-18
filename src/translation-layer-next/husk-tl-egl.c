@@ -484,10 +484,167 @@ static void (*r_glCompressedTexSubImage3D)(unsigned, int, int, int, int, int, in
 static void w_glCompressedTexSubImage3D(unsigned t, int l, int x, int y, int z, int w, int h, int d, uint64_t fmt, uint64_t size, const void *data)
 { r_glCompressedTexSubImage3D(t, l, x, y, z, w, h, d, (unsigned)fmt, (int)size, data); }
 
+/*
+ * EXT_copy_image on ANGLE's Metal back end: the entry point is there, but TextureMtl has no copyTextureSubData, so the extension is
+ * not offered and a call does nothing. Unity's Graphics.CopyTexture is that call -- it is how a game builds a texture array out of
+ * single textures at run time (GoreBox's character and terrain maps) and how reflection probes fill their mips -- and without it those
+ * textures stay empty. Here it is done with what ES 3.0 has: the source image is the read framebuffer's attachment, and the
+ * destination takes it by glCopyTexSubImage (colour), or by glBlitFramebuffer (depth/stencil, or a renderbuffer destination).
+ * Compressed images cannot be read back in ES 3.0 and are not copied.
+ */
+static int g_copyimg_native = -1;   /* -1: not looked yet; 1: ANGLE offers EXT/OES_copy_image itself */
+static bool copyimg_native(void)
+{
+    if (g_copyimg_native < 0 && a_eglGetProcAddress) {
+        const unsigned char *(*gs)(unsigned) = a_eglGetProcAddress("glGetString");
+        const char *s = gs ? (const char *)gs(0x1F03 /* GL_EXTENSIONS */) : NULL;
+        if (s) g_copyimg_native = (strstr(s, "GL_EXT_copy_image") || strstr(s, "GL_OES_copy_image")) ? 1 : 0;
+    }
+    return g_copyimg_native == 1;
+}
+static const char *const k_copyimg_ext[] = { "GL_EXT_copy_image", "GL_OES_copy_image" };
+#define COPYIMG_EXT_COUNT ((int)(sizeof(k_copyimg_ext) / sizeof(k_copyimg_ext[0])))
+static int copyimg_extra(void) { return copyimg_native() ? 0 : COPYIMG_EXT_COUNT; }
+
+static struct {
+    bool ok;
+    void (*gen_fb)(int, unsigned *), (*del_fb)(int, const unsigned *), (*bind_fb)(unsigned, unsigned);
+    void (*fb_tex2d)(unsigned, unsigned, unsigned, unsigned, int), (*fb_layer)(unsigned, unsigned, unsigned, int, int);
+    void (*fb_rb)(unsigned, unsigned, unsigned, unsigned);
+    unsigned (*status)(unsigned);
+    void (*bind_tex)(unsigned, unsigned), (*get_iv)(unsigned, int *);
+    void (*copy2d)(unsigned, int, int, int, int, int, int, int), (*copy3d)(unsigned, int, int, int, int, int, int, int, int);
+    void (*blit)(int, int, int, int, int, int, int, int, unsigned, unsigned);
+    unsigned char (*is_enabled)(unsigned);
+    void (*enable)(unsigned), (*disable)(unsigned);
+} CI;
+static bool copyimg_load(void)
+{
+    if (CI.ok) return true;
+    if (!a_eglGetProcAddress) return false;
+#define CIP(f, n) CI.f = a_eglGetProcAddress(n)
+    CIP(gen_fb, "glGenFramebuffers"); CIP(del_fb, "glDeleteFramebuffers"); CIP(bind_fb, "glBindFramebuffer");
+    CIP(fb_tex2d, "glFramebufferTexture2D"); CIP(fb_layer, "glFramebufferTextureLayer"); CIP(fb_rb, "glFramebufferRenderbuffer");
+    CIP(status, "glCheckFramebufferStatus"); CIP(bind_tex, "glBindTexture"); CIP(get_iv, "glGetIntegerv");
+    CIP(copy2d, "glCopyTexSubImage2D"); CIP(copy3d, "glCopyTexSubImage3D"); CIP(blit, "glBlitFramebuffer");
+    CIP(is_enabled, "glIsEnabled"); CIP(enable, "glEnable"); CIP(disable, "glDisable");
+#undef CIP
+    CI.ok = CI.gen_fb && CI.del_fb && CI.bind_fb && CI.fb_tex2d && CI.fb_layer && CI.fb_rb && CI.status && CI.bind_tex && CI.get_iv &&
+            CI.copy2d && CI.copy3d && CI.blit && CI.is_enabled && CI.enable && CI.disable;
+    return CI.ok;
+}
+
+#define CI_RENDERBUFFER 0x8D41u
+#define CI_TEX_2D 0x0DE1u
+#define CI_TEX_CUBE 0x8513u
+#define CI_TEX_3D 0x806Fu
+#define CI_TEX_2D_ARRAY 0x8C1Au
+#define CI_TEX_CUBE_ARRAY 0x9009u
+#define CI_TEX_2D_MS 0x9100u
+/* one image (level, layer/face) of a texture or a renderbuffer as attachment `att` of framebuffer target `fbt`; name 0 detaches */
+static void copyimg_attach(unsigned fbt, unsigned att, unsigned name, unsigned target, int level, int layer)
+{
+    if (target == CI_RENDERBUFFER) CI.fb_rb(fbt, att, CI_RENDERBUFFER, name);
+    else if (target == CI_TEX_CUBE) CI.fb_tex2d(fbt, att, 0x8515u /* GL_TEXTURE_CUBE_MAP_POSITIVE_X */ + (unsigned)layer, name, level);
+    else if (target == CI_TEX_3D || target == CI_TEX_2D_ARRAY || target == CI_TEX_CUBE_ARRAY) CI.fb_layer(fbt, att, name, level, layer);
+    else CI.fb_tex2d(fbt, att, target, name, level);
+}
+static unsigned copyimg_binding_query(unsigned target)
+{
+    switch (target) {
+    case CI_TEX_2D: return 0x8069;        /* GL_TEXTURE_BINDING_2D */
+    case CI_TEX_CUBE: return 0x8514;      /* GL_TEXTURE_BINDING_CUBE_MAP */
+    case CI_TEX_3D: return 0x806A;        /* GL_TEXTURE_BINDING_3D */
+    case CI_TEX_2D_ARRAY: return 0x8C1D;  /* GL_TEXTURE_BINDING_2D_ARRAY */
+    default: return 0;
+    }
+}
+
+static void copyimg_emulate(unsigned sn, unsigned st, int sl, int sx, int sy, int sz, unsigned dn, unsigned dt,
+                            int dl, int dx, int dy, int dz, int w, int h, int d)
+{
+    static atomic_int said_fail, said_first;
+    if (w <= 0 || h <= 0 || d <= 0 || !sn || !dn) return;
+    if (!copyimg_load()) { if (!atomic_exchange(&said_fail, 1)) tl_log_line("gl: copy_image: ANGLE lacks what the emulation needs"); return; }
+    if (!atomic_exchange(&said_first, 1))
+        tl_log_line("gl: glCopyImageSubData emulated (ANGLE/Metal has no copy_image): first %#x %u lvl %d -> %#x %u lvl %d, %dx%dx%d",
+                    st, sn, sl, dt, dn, dl, w, h, d);
+
+    int old_read = 0, old_draw = 0, old_tex = 0;
+    CI.get_iv(0x8CAA /* GL_READ_FRAMEBUFFER_BINDING */, &old_read);
+    CI.get_iv(0x8CA6 /* GL_DRAW_FRAMEBUFFER_BINDING */, &old_draw);
+    unsigned bq = dt != CI_RENDERBUFFER ? copyimg_binding_query(dt) : 0;
+    if (bq) CI.get_iv(bq, &old_tex);
+    bool scissor = CI.is_enabled(0x0C11 /* GL_SCISSOR_TEST */) != 0;
+
+    unsigned fb[2] = { 0, 0 };
+    CI.gen_fb(2, fb);
+    const unsigned READ = 0x8CA8, DRAW = 0x8CA9, COLOR0 = 0x8CE0, COMPLETE = 0x8CD5;
+    CI.bind_fb(READ, fb[0]);
+    bool texbound = false, failed = false;
+
+    for (int i = 0; i < d && !failed; i++) {
+        int sly = sz + i, dly = dz + i;
+        /* colour: the source as the read framebuffer's colour attachment */
+        copyimg_attach(READ, COLOR0, sn, st, sl, sly);
+        bool color = CI.status(READ) == COMPLETE;
+        if (color && dt != CI_RENDERBUFFER && dt != CI_TEX_2D_MS) {
+            if (!texbound) { CI.bind_tex(dt == CI_TEX_CUBE ? CI_TEX_CUBE : dt, dn); texbound = true; }
+            if (dt == CI_TEX_3D || dt == CI_TEX_2D_ARRAY || dt == CI_TEX_CUBE_ARRAY) CI.copy3d(dt, dl, dx, dy, dly, sx, sy, w, h);
+            else CI.copy2d(dt == CI_TEX_CUBE ? 0x8515u + (unsigned)dly : dt, dl, dx, dy, sx, sy, w, h);
+            continue;
+        }
+        /* depth/stencil, a renderbuffer or multisampled destination: a blit between two framebuffers */
+        unsigned att = COLOR0, mask = 0x4000 /* GL_COLOR_BUFFER_BIT */;
+        if (!color) {
+            copyimg_attach(READ, COLOR0, 0, st, sl, sly);
+            static const unsigned atts[3] = { 0x821A /* DEPTH_STENCIL */, 0x8D00 /* DEPTH */, 0x8D20 /* STENCIL */ };
+            static const unsigned masks[3] = { 0x0100 | 0x0400, 0x0100, 0x0400 };
+            att = 0;
+            for (int k = 0; k < 3; k++) {
+                copyimg_attach(READ, atts[k], sn, st, sl, sly);
+                if (CI.status(READ) == COMPLETE) { att = atts[k]; mask = masks[k]; break; }
+                copyimg_attach(READ, atts[k], 0, st, sl, sly);
+            }
+            if (!att) {
+                static atomic_int said;
+                if (atomic_fetch_add(&said, 1) < 4)
+                    tl_log_line("gl: copy_image: %#x %u lvl %d cannot be read (compressed or not renderable): not copied", st, sn, sl);
+                failed = true;
+                break;
+            }
+        }
+        if (!fb[1]) break;
+        CI.bind_fb(DRAW, fb[1]);
+        copyimg_attach(DRAW, att, dn, dt, dl, dly);
+        if (CI.status(DRAW) == COMPLETE) {
+            if (scissor) CI.disable(0x0C11);
+            CI.blit(sx, sy, sx + w, sy + h, dx, dy, dx + w, dy + h, mask, 0x2600 /* GL_NEAREST */);
+            if (scissor) CI.enable(0x0C11);
+        } else {
+            static atomic_int said;
+            if (atomic_fetch_add(&said, 1) < 4) tl_log_line("gl: copy_image: destination %#x %u lvl %d cannot be drawn to: not copied", dt, dn, dl);
+            failed = true;
+        }
+        copyimg_attach(DRAW, att, 0, dt, dl, dly);
+        if (att != COLOR0) copyimg_attach(READ, att, 0, st, sl, sly);
+    }
+
+    CI.bind_fb(READ, (unsigned)old_read);
+    CI.bind_fb(DRAW, (unsigned)old_draw);
+    if (texbound) CI.bind_tex(dt == CI_TEX_CUBE ? CI_TEX_CUBE : dt, (unsigned)old_tex);
+    CI.del_fb(2, fb);
+}
+
 static void (*r_glCopyImageSubData)(unsigned, unsigned, int, int, int, int, unsigned, unsigned, int, int, int, int, int, int, int);
 static void w_glCopyImageSubData(unsigned sn, unsigned st, int sl, int sx, int sy, int sz, unsigned dn, unsigned dt,
                                  uint64_t dl, uint64_t dx, uint64_t dy, uint64_t dz, uint64_t w, uint64_t h, uint64_t d)
-{ r_glCopyImageSubData(sn, st, sl, sx, sy, sz, dn, dt, (int)dl, (int)dx, (int)dy, (int)dz, (int)w, (int)h, (int)d); }
+{
+    if (r_glCopyImageSubData && copyimg_native())
+        r_glCopyImageSubData(sn, st, sl, sx, sy, sz, dn, dt, (int)dl, (int)dx, (int)dy, (int)dz, (int)w, (int)h, (int)d);
+    else
+        copyimg_emulate(sn, st, sl, sx, sy, sz, dn, dt, (int)dl, (int)dx, (int)dy, (int)dz, (int)w, (int)h, (int)d);
+}
 
 /* GLboolean arguments: AAPCS64 callers do not extend them, Apple's callee may assume they are. */
 static void (*r_glColorMask)(unsigned, unsigned, unsigned, unsigned);
@@ -504,6 +661,11 @@ static void (*r_glUniformMatrix4fv)(int, int, unsigned, const float *);
 static void w_glUniformMatrix4fv(int l, int c, unsigned t, const float *v) { r_glUniformMatrix4fv(l, c, t & 0xff, v); }
 static void (*r_glSampleCoverage)(float, unsigned);
 static void w_glSampleCoverage(float v, unsigned i) { r_glSampleCoverage(v, i & 0xff); }
+/* the ES 3.0 non-square matrix uploads carry the same GLboolean transpose */
+#define UMAT_NS(n) static void (*r_glUniformMatrix##n##fv)(int, int, unsigned, const float *); \
+    static void w_glUniformMatrix##n##fv(int l, int c, unsigned t, const float *v) { r_glUniformMatrix##n##fv(l, c, t & 0xff, v); }
+UMAT_NS(2x3) UMAT_NS(3x2) UMAT_NS(2x4) UMAT_NS(4x2) UMAT_NS(3x4) UMAT_NS(4x3)
+#undef UMAT_NS
 
 
 /*
@@ -546,7 +708,7 @@ static const unsigned char *w_glGetString(unsigned name)
     if (source != s) {
         free(filtered);
         size_t len = strlen((const char *)s);
-        filtered = malloc(len + 64);
+        filtered = malloc(len + 192);
         size_t k = 0;
         for (const char *p = (const char *)s; *p;) {
             const char *e = strchr(p, ' ');
@@ -556,6 +718,8 @@ static const unsigned char *w_glGetString(unsigned name)
         }
         /* The engines that need ES 3.1 buffer textures check for the extension before asking for its entry points. */
         if (g_es31_shim) { k += (size_t)snprintf(filtered + k, 62, "%sGL_EXT_texture_buffer", k ? " " : ""); }
+        /* copy_image, done by copyimg_emulate where ANGLE does not */
+        if (copyimg_extra()) for (int i = 0; i < COPYIMG_EXT_COUNT; i++) k += (size_t)snprintf(filtered + k, 62, "%s%s", k ? " " : "", k_copyimg_ext[i]);
         filtered[k] = 0;
         source = s;
     }
@@ -566,6 +730,11 @@ static const unsigned char *w_glGetString(unsigned name)
 static const unsigned char *(*r_glGetStringi)(unsigned, unsigned);
 static const unsigned char *w_glGetStringi(unsigned name, unsigned index)
 {
+    if (name == 0x1F03 && copyimg_extra() && a_glGetIntegerv) {
+        int n = 0;
+        a_glGetIntegerv(0x821D /* GL_NUM_EXTENSIONS */, &n);
+        if (n > 0 && index >= (unsigned)n && index < (unsigned)n + COPYIMG_EXT_COUNT) return (const unsigned char *)k_copyimg_ext[index - (unsigned)n];
+    }
     const unsigned char *s = r_glGetStringi ? r_glGetStringi(name, index) : NULL;
     if (name == 0x1F03 && s && ext_hidden((const char *)s, strlen((const char *)s))) return (const unsigned char *)"GL_ANGLE_husk_hidden_extension";
     return s;
@@ -629,7 +798,11 @@ static EGLBoolean w_eglDestroySync(EGLDisplay d, void *s) { return s ? r_eglDest
 static const struct { const char *name; void *wrap; void **real; } k_adapt[] = {
     ADAPT(glBlitFramebuffer), ADAPT(glTexSubImage3D), ADAPT(glCompressedTexSubImage3D), ADAPT(glCopyImageSubData),
     ADAPT(glColorMask), ADAPT(glDepthMask), ADAPT(glVertexAttribPointer), ADAPT(glUniformMatrix2fv),
-    ADAPT(glUniformMatrix3fv), ADAPT(glUniformMatrix4fv), ADAPT(glSampleCoverage), ADAPT(glGetString), ADAPT(glGetStringi), ADAPT(glCompileShader), ADAPT(glShaderSource), ADAPT(glAttachShader), ADAPT(glLinkProgram), ADAPT(glGetIntegerv), ADAPT(glBindBufferBase), ADAPT(glBindBuffer), ADAPT(glBufferData), ADAPT(glBufferSubData), ADAPT(glBindBufferRange),
+    ADAPT(glUniformMatrix3fv), ADAPT(glUniformMatrix4fv), ADAPT(glSampleCoverage),
+    ADAPT(glUniformMatrix2x3fv), ADAPT(glUniformMatrix3x2fv), ADAPT(glUniformMatrix2x4fv), ADAPT(glUniformMatrix4x2fv),
+    ADAPT(glUniformMatrix3x4fv), ADAPT(glUniformMatrix4x3fv),
+    { "glCopyImageSubDataEXT", (void *)w_glCopyImageSubData, (void **)&r_glCopyImageSubData },
+    { "glCopyImageSubDataOES", (void *)w_glCopyImageSubData, (void **)&r_glCopyImageSubData }, ADAPT(glGetString), ADAPT(glGetStringi), ADAPT(glCompileShader), ADAPT(glShaderSource), ADAPT(glAttachShader), ADAPT(glLinkProgram), ADAPT(glGetIntegerv), ADAPT(glBindBufferBase), ADAPT(glBindBuffer), ADAPT(glBufferData), ADAPT(glBufferSubData), ADAPT(glBindBufferRange),
     ADAPT(glGetProgramInterfaceiv), ADAPT(glGetProgramResourceIndex), ADAPT(glGetProgramResourceName), ADAPT(glGetProgramResourceiv), ADAPT(glGetIntegeri_v),
     ADAPT(eglClientWaitSyncKHR), ADAPT(eglDestroySyncKHR), ADAPT(eglGetSyncAttribKHR), ADAPT(eglClientWaitSync), ADAPT(eglDestroySync),
 };
