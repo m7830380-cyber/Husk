@@ -186,6 +186,7 @@ static void (*r_glAttachShader)(unsigned, unsigned);
 static void w_glAttachShader(unsigned prog, unsigned sh)
 {
     r_glAttachShader(prog, sh);
+    diag_attach(prog, sh);
     if (!g_es31_shim) return;
     pthread_mutex_lock(&g_es31_mu);
     g_es31_att[g_es31_natt % ES31_ATTACHED].prog = prog; g_es31_att[g_es31_natt % ES31_ATTACHED].shader = sh; g_es31_natt++;

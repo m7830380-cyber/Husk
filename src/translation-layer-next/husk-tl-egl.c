@@ -478,7 +478,7 @@ static EGLBoolean w_eglGetCompositorTimingANDROID(EGLDisplay d, EGLSurface s, EG
  */
 static void (*r_glBlitFramebuffer)(int, int, int, int, int, int, int, int, unsigned, unsigned);
 static void w_glBlitFramebuffer(int a0, int a1, int a2, int a3, int a4, int a5, int a6, int a7, uint64_t mask, uint64_t filter)
-{ r_glBlitFramebuffer(a0, a1, a2, a3, a4, a5, a6, a7, (unsigned)mask, (unsigned)filter); }
+{ r_glBlitFramebuffer(a0, a1, a2, a3, a4, a5, a6, a7, (unsigned)mask, (unsigned)filter); cap_dirty(); }
 
 static void (*r_glTexSubImage3D)(unsigned, int, int, int, int, int, int, int, unsigned, unsigned, const void *);
 static void w_glTexSubImage3D(unsigned t, int l, int x, int y, int z, int w, int h, int d, uint64_t fmt, uint64_t type, const void *px)
@@ -814,7 +814,7 @@ static const struct { const char *name; void *wrap; void **real; } k_adapt[] = {
     ADAPT(glUniformMatrix3x4fv), ADAPT(glUniformMatrix4x3fv),
     ADAPT(glProgramBinary), { "glProgramBinaryOES", (void *)w_glProgramBinary, (void **)&r_glProgramBinary },
     ADAPT(glTexStorage3D), ADAPT(glTexImage3D), ADAPT(glFramebufferTextureLayer),
-    ADAPT(glDrawElements), ADAPT(glDrawElementsInstanced), ADAPT(glDrawRangeElements),
+    ADAPT(glDrawElements), ADAPT(glDrawElementsInstanced), ADAPT(glDrawRangeElements), ADAPT(glDrawArrays), ADAPT(glDrawArraysInstanced), ADAPT(glClear),
     { "glCopyImageSubDataEXT", (void *)w_glCopyImageSubData, (void **)&r_glCopyImageSubData },
     { "glCopyImageSubDataOES", (void *)w_glCopyImageSubData, (void **)&r_glCopyImageSubData }, ADAPT(glGetString), ADAPT(glGetStringi), ADAPT(glCompileShader), ADAPT(glShaderSource), ADAPT(glAttachShader), ADAPT(glLinkProgram), ADAPT(glGetIntegerv), ADAPT(glBindBufferBase), ADAPT(glBindBuffer), ADAPT(glBufferData), ADAPT(glBufferSubData), ADAPT(glBindBufferRange),
     ADAPT(glGetProgramInterfaceiv), ADAPT(glGetProgramResourceIndex), ADAPT(glGetProgramResourceName), ADAPT(glGetProgramResourceiv), ADAPT(glGetIntegeri_v),
