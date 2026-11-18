@@ -143,17 +143,21 @@ static void (*r_glFramebufferTextureLayer)(unsigned, unsigned, unsigned, int, in
 static void w_glFramebufferTextureLayer(unsigned fbt, unsigned att, unsigned tex, int level, int layer)
 {
     r_glFramebufferTextureLayer(fbt, att, tex, level, layer);
-    if (diag_on() && tex) atomic_fetch_add(&g_diag_arr_layer, 1);
+    if (diag_on() && tex) {
+        int n = atomic_fetch_add(&g_diag_arr_layer, 1);
+        if (n < 40) tl_log_line("gldiag: glFramebufferTextureLayer(%#x, att %#x, tex %u, level %d, layer %d)", fbt, att, tex, level, layer);
+    }
 }
 
-static atomic_int g_diag_mips;
+static atomic_int g_diag_mips, g_diag_mips_arr, g_diag_mips_2d;
 static void (*r_glGenerateMipmap)(unsigned);
 static void w_glGenerateMipmap(unsigned target)
 {
     r_glGenerateMipmap(target);
     if (!diag_on()) return;
-    int n = atomic_fetch_add(&g_diag_mips, 1);
-    if (n < 40) tl_log_line("gldiag: glGenerateMipmap(%s, tex %d)", target == 0x8C1A ? "2D_ARRAY" : target == 0x8513 ? "CUBE" :
+    atomic_fetch_add(&g_diag_mips, 1);
+    int n = target == 0x0DE1 ? atomic_fetch_add(&g_diag_mips_2d, 1) : target == 0x8C1A ? atomic_fetch_add(&g_diag_mips_arr, 1) : 0;
+    if (n < 10) tl_log_line("gldiag: glGenerateMipmap(%s, tex %d)", target == 0x8C1A ? "2D_ARRAY" : target == 0x8513 ? "CUBE" :
                             target == 0x0DE1 ? "2D" : "3D", diag_bound(target));
 }
 
@@ -444,6 +448,8 @@ static const unsigned long k_cap_frames[] = { 900, 1800, 2700, 3600, 4800 };
 #define CAP_N (sizeof(k_cap_frames) / sizeof(k_cap_frames[0]))
 static struct {
     int k;                                   /* capture number (1-based) of the frame being captured, 0 none */
+    unsigned next;                           /* how many captures have been started */
+    pthread_t thr;                           /* the thread whose frame is captured: the one that draws the scene */
     bool active, chosen, dirty, tracked, failed;
     unsigned fbo; int w, h; bool flt, srgb, ms;
     unsigned tmp_fb;
@@ -453,6 +459,9 @@ static struct {
     struct { unsigned prog, mode; int count, changed; } d[CAP_DRAWS];
 } C;
 static unsigned char g_diag_dark_done[DIAG_PROGS];
+static __thread unsigned long t_diag_draws;   /* draws by this thread since its last swap */
+/* a capture follows one thread: other threads present their own surfaces (the app's UI) and draw nothing of the scene */
+static inline bool cap_here(void) { if (!C.active) return false; return pthread_equal(pthread_self(), C.thr); }
 
 static void cap_px(const uint8_t *buf, size_t i, float rgb[3])
 {
@@ -557,7 +566,7 @@ static int cap_diff(uint16_t owner, double sum[3], int *dark)
     return changed;
 }
 
-static void cap_dirty(void) { if (C.active) C.dirty = true; }
+static void cap_dirty(void) { if (cap_here()) C.dirty = true; }
 
 static void cap_pre(void)
 {
@@ -700,36 +709,43 @@ out:
 
 static void (*r_glDrawElements)(unsigned, int, unsigned, const void *);
 static void w_glDrawElements(unsigned mode, int count, unsigned type, const void *idx)
-{ bool c = C.active; if (c) cap_pre(); r_glDrawElements(mode, count, type, idx); if (c) cap_post(mode, count); }
+{ t_diag_draws++; bool c = cap_here(); if (c) cap_pre(); r_glDrawElements(mode, count, type, idx); if (c) cap_post(mode, count); }
 static void (*r_glDrawElementsInstanced)(unsigned, int, unsigned, const void *, int);
 static void w_glDrawElementsInstanced(unsigned mode, int count, unsigned type, const void *idx, int inst)
-{ bool c = C.active; if (c) cap_pre(); r_glDrawElementsInstanced(mode, count, type, idx, inst); if (c) cap_post(mode, count); }
+{ t_diag_draws++; bool c = cap_here(); if (c) cap_pre(); r_glDrawElementsInstanced(mode, count, type, idx, inst); if (c) cap_post(mode, count); }
 static void (*r_glDrawRangeElements)(unsigned, unsigned, unsigned, int, unsigned, const void *);
 static void w_glDrawRangeElements(unsigned mode, unsigned s, unsigned e, int count, unsigned type, const void *idx)
-{ bool c = C.active; if (c) cap_pre(); r_glDrawRangeElements(mode, s, e, count, type, idx); if (c) cap_post(mode, count); }
+{ t_diag_draws++; bool c = cap_here(); if (c) cap_pre(); r_glDrawRangeElements(mode, s, e, count, type, idx); if (c) cap_post(mode, count); }
 static void (*r_glDrawArrays)(unsigned, int, int);
 static void w_glDrawArrays(unsigned mode, int first, int count)
-{ bool c = C.active; if (c) cap_pre(); r_glDrawArrays(mode, first, count); if (c) cap_post(mode, count); }
+{ t_diag_draws++; bool c = cap_here(); if (c) cap_pre(); r_glDrawArrays(mode, first, count); if (c) cap_post(mode, count); }
 static void (*r_glDrawArraysInstanced)(unsigned, int, int, int);
 static void w_glDrawArraysInstanced(unsigned mode, int first, int count, int inst)
-{ bool c = C.active; if (c) cap_pre(); r_glDrawArraysInstanced(mode, first, count, inst); if (c) cap_post(mode, count); }
+{ t_diag_draws++; bool c = cap_here(); if (c) cap_pre(); r_glDrawArraysInstanced(mode, first, count, inst); if (c) cap_post(mode, count); }
 static void (*r_glClear)(unsigned);
 static void w_glClear(unsigned mask) { r_glClear(mask); cap_dirty(); }
 
 /* at each swap: a capture starts with the frame after a listed one's predecessor, and ends at that frame's swap */
+static void diag_summary(unsigned long n)
+{
+    tl_log_line("gldiag: by swap #%lu: mipmap generations %d (arrays %d), texture arrays/3D made %d, sub-image uploads %d (compressed %d), copies %d (into arrays %d, failed %d), render-to-layer %d",
+                n, atomic_load(&g_diag_mips), atomic_load(&g_diag_mips_arr), atomic_load(&g_diag_arr_storage), atomic_load(&g_diag_arr_sub), atomic_load(&g_diag_arr_csub),
+                atomic_load(&g_diag_copy_n), atomic_load(&g_diag_arr_copy_in), atomic_load(&g_diag_copy_fail), atomic_load(&g_diag_arr_layer));
+}
 static void diag_swap(unsigned long n)
 {
     if (!diag_on()) return;
-    if (C.active) cap_finish();
-    for (unsigned i = 0; i < CAP_N; i++)
-        if (n + 1 == k_cap_frames[i]) {
-            C.k = (int)i + 1; C.active = true; C.chosen = C.dirty = C.tracked = C.failed = C.ms = false;
-            C.tmp_fb = 0; C.ndraw = C.lines = 0;
-        }
-    if (n == 600 || n == k_cap_frames[CAP_N - 1]) {
-        tl_log_line("gldiag: by swap #%lu: mipmap generations %d, texture arrays/3D made %d, sub-image uploads %d (compressed %d), copies %d (into arrays %d, failed %d), render-to-layer %d",
-                    n, atomic_load(&g_diag_mips), atomic_load(&g_diag_arr_storage), atomic_load(&g_diag_arr_sub), atomic_load(&g_diag_arr_csub), atomic_load(&g_diag_copy_n),
-                    atomic_load(&g_diag_arr_copy_in), atomic_load(&g_diag_copy_fail), atomic_load(&g_diag_arr_layer));
-        if (n == k_cap_frames[CAP_N - 1]) { atomic_store(&g_diag_done, true); tl_log_line("gldiag: done"); }
+    unsigned long drew = t_diag_draws; t_diag_draws = 0;
+    if (cap_here()) {
+        cap_finish();
+        if (C.next >= CAP_N) { diag_summary(n); atomic_store(&g_diag_done, true); tl_log_line("gldiag: done"); return; }
     }
+    /* the next capture: the first frame, from the listed swap on, of a thread that drew a scene's worth in its last one */
+    if (!C.active && C.next < CAP_N && n + 1 >= k_cap_frames[C.next] && drew >= 40) {
+        C.k = (int)++C.next; C.thr = pthread_self(); C.chosen = C.dirty = C.tracked = C.failed = C.ms = false;
+        C.tmp_fb = 0; C.ndraw = C.lines = 0; C.active = true;
+        tl_log_line("gldiag: cap%d: capturing the next frame of a thread that drew %lu times in its last one", C.k, drew);
+    }
+    if (n == 600) diag_summary(n);
+    if (n >= 20000) { diag_summary(n); atomic_store(&g_diag_done, true); tl_log_line("gldiag: done (not every capture found a scene)"); }
 }
