@@ -132,6 +132,87 @@ static char *oes_external_rewrite(const char *src)
     return out;
 }
 
+/*
+ * IEEE maths in fragment shaders. ANGLE's Metal back end compiles a shader with fast math unless the shader calls isnan()/isinf()
+ * (ProgramMtl: disableFastMath = hasIsnanOrIsinf). Fast math lets the Metal compiler assume no NaN or infinity anywhere: pow(0, 0),
+ * x/0 and 0*inf, which a GL driver evaluates by IEEE rules, come out as NaN instead -- and a NaN in a render target spreads through
+ * every pass that reads it. Unity's reflection probe convolution is the case seen: its lower mips came out NaN, and everything
+ * lit by the probe drew black. A GL driver is IEEE here, so the shader gets a call that is never true and changes nothing,
+ * `if (isnan(gl_FragCoord.x)) <output> = <output>;`, after a renamed main(), which is what turns fast math off for it.
+ * Only ES 3.00+ fragment shaders (isnan is not in GLSL ES 1.00), and only when the shape is plain: one main(), a declared output.
+ * A rewrite that does not compile is undone in glCompileShader. TL_GL_FAST_MATH=1 leaves shaders alone.
+ */
+static int g_ieee = -1;
+static bool ieee_on(void) { if (g_ieee < 0) { const char *e = getenv("TL_GL_FAST_MATH"); g_ieee = !(e && *e == '1'); } return g_ieee == 1; }
+static const char *ieee_skip_ws(const char *p) { while (*p == ' ' || *p == '\t' || *p == '\r' || *p == '\n') p++; return p; }
+static bool ieee_word(const char *s, const char *p, const char *w)
+{ size_t n = strlen(w); return !strncmp(p, w, n) && (p == s || !es31_ident((unsigned char)p[-1])) && !es31_ident((unsigned char)p[n]); }
+static char *ieee_rewrite(const char *src, unsigned type)
+{
+    if (type != 0x8B30 /* GL_FRAGMENT_SHADER */ || !ieee_on()) return NULL;
+    const char *v = ieee_skip_ws(src);
+    if (strncmp(v, "#version", 8)) return NULL;
+    int ver = atoi(ieee_skip_ws(v + 8));
+    if (ver < 300 || !strstr(v, " es")) return NULL;
+    /* main: exactly one definition "void main ( [void] ) {" */
+    const char *mainp = NULL; int mains = 0;
+    for (const char *p = src; (p = strstr(p, "main")); p += 4) {
+        if (!ieee_word(src, p, "main")) continue;
+        const char *b = p; while (b > src && (b[-1] == ' ' || b[-1] == '\t')) b--;
+        if (b - src < 4 || !ieee_word(src, b - 4, "void")) continue;
+        mains++; mainp = p;
+    }
+    if (mains != 1) return NULL;
+    /* the output: "out" as a word at the start of a declaration, after an optional layout(...); its name is the word before ';' */
+    char out[96] = "";
+    for (const char *p = src; !out[0] && (p = strstr(p, "out")); p += 3) {
+        if (!ieee_word(src, p, "out")) continue;
+        const char *l = p; while (l > src && l[-1] != '\n' && l[-1] != ';' && l[-1] != '}') l--;
+        l = ieee_skip_ws(l);
+        if (l != p && strncmp(l, "layout", 6)) continue;            /* a parameter ("in out", "out float x") or "inout" */
+        if (l != p) { const char *c = strchr(l, ')'); if (!c || ieee_skip_ws(c + 1) != p) continue; }
+        const char *semi = strchr(p, ';'), *brace = strchr(p, '{'), *paren = strchr(p, '(');
+        if (!semi || (brace && brace < semi) || (paren && paren < semi)) continue;
+        const char *e = semi; while (e > p && (e[-1] == ' ' || e[-1] == '\t')) e--;
+        if (e > p && e[-1] == ']') continue;                           /* an array: leave it */
+        const char *b = e; while (b > p && es31_ident((unsigned char)b[-1])) b--;
+        if (e - b <= 0 || e - b >= (long)sizeof(out)) continue;
+        memcpy(out, b, (size_t)(e - b)); out[e - b] = 0;
+    }
+    if (!out[0]) return NULL;
+    size_t n = strlen(src), extra = 2 * strlen(out) + 128;
+    char *r = malloc(n + extra);
+    size_t at = (size_t)(mainp - src);
+    memcpy(r, src, at); memcpy(r + at, "husk_main_", 10); memcpy(r + at + 10, mainp + 4, n - at - 4);
+    size_t k = n + 6;
+    k += (size_t)snprintf(r + k, extra, "\nvoid main() { husk_main_(); if (isnan(gl_FragCoord.x)) %s = %s; }\n", out, out);
+    r[k] = 0;
+    return r;
+}
+/* the source a rewritten shader had, to compile instead if the rewrite fails */
+#define IEEE_KEPT 64
+static struct { unsigned sh; char *src; } g_ieee_kept[IEEE_KEPT];
+static pthread_mutex_t g_ieee_mu = PTHREAD_MUTEX_INITIALIZER;
+static void ieee_keep(unsigned sh, const char *orig)
+{
+    pthread_mutex_lock(&g_ieee_mu);
+    int slot = (int)(sh % IEEE_KEPT);
+    free(g_ieee_kept[slot].src);
+    g_ieee_kept[slot].sh = sh; g_ieee_kept[slot].src = orig ? strdup(orig) : NULL;
+    pthread_mutex_unlock(&g_ieee_mu);
+}
+static char *ieee_take(unsigned sh)
+{
+    pthread_mutex_lock(&g_ieee_mu);
+    int slot = (int)(sh % IEEE_KEPT);
+    char *s = NULL;
+    if (g_ieee_kept[slot].sh == sh) { s = g_ieee_kept[slot].src; g_ieee_kept[slot].src = NULL; g_ieee_kept[slot].sh = 0; }
+    pthread_mutex_unlock(&g_ieee_mu);
+    return s;
+}
+static atomic_int g_ieee_done, g_ieee_undone;
+static _Thread_local bool t_ieee_off;   /* set while the shader is given back its source as written */
+
 static void (*r_glShaderSource)(unsigned, int, const char *const *, const int *);
 static void w_glShaderSource(unsigned sh, int count, const char *const *str, const int *len)
 {
@@ -144,6 +225,14 @@ static void w_glShaderSource(unsigned sh, int count, const char *const *str, con
     diag_shader_source(sh, cat);
     char *ext = oes_external_rewrite(cat);
     if (ext) { free(cat); cat = ext; k = strlen(cat); }
+    if (ieee_on() && !t_ieee_off) {
+        static void (*getiv)(unsigned, unsigned, int *);
+        if (!getiv && a_eglGetProcAddress) getiv = a_eglGetProcAddress("glGetShaderiv");
+        int type = 0; if (getiv) getiv(sh, 0x8B4F /* GL_SHADER_TYPE */, &type);
+        char *ieee = ieee_rewrite(cat, (unsigned)type);
+        ieee_keep(sh, ieee ? cat : NULL);
+        if (ieee) { free(cat); cat = ieee; k = strlen(cat); atomic_fetch_add(&g_ieee_done, 1); }
+    }
     if (!g_es31_shim) {
         const char *one = cat; int one_len = (int)k;
         r_glShaderSource(sh, 1, &one, &one_len);

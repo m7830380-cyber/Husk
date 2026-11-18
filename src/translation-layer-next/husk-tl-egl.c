@@ -764,9 +764,30 @@ static void w_glCompileShader(unsigned sh)
     static atomic_int reported;
     r_glCompileShader(sh);
     if (!getiv && a_eglGetProcAddress) { getiv = a_eglGetProcAddress("glGetShaderiv"); getlog = a_eglGetProcAddress("glGetShaderInfoLog"); getsrc = a_eglGetProcAddress("glGetShaderSource"); }
-    if (!getiv || !getlog || !getsrc) return;
+    char *orig = ieee_take(sh);
+    if (!getiv || !getlog || !getsrc) { free(orig); return; }
     int ok = 1;
     getiv(sh, 0x8B81 /* GL_COMPILE_STATUS */, &ok);
+    if (!ok && orig) {
+        /* the IEEE rewrite (ieee_rewrite) did not compile: the shader as the app wrote it, with fast math */
+        int u = atomic_fetch_add(&g_ieee_undone, 1);
+        if (u < 4) {
+            int len = 0; getiv(sh, 0x8B84, &len);
+            char *log = calloc(1, (size_t)len + 2); int got = 0;
+            if (len > 0) getlog(sh, len, &got, log);
+            for (char *q = log; *q; q++) if (*q == '\n') *q = '|';
+            tl_log_line("gl: shader %u: the IEEE-maths rewrite did not compile, so it is compiled as written: %.300s", sh, log);
+            free(log);
+        }
+        const char *one = orig; int one_len = (int)strlen(orig);
+        t_ieee_off = true; w_glShaderSource(sh, 1, &one, &one_len); t_ieee_off = false;
+        r_glCompileShader(sh);
+        getiv(sh, 0x8B81, &ok);
+    } else if (ok && orig) {
+        static atomic_int said;
+        if (!atomic_exchange(&said, 1)) tl_log_line("gl: fragment shaders get an isnan() call, so ANGLE compiles them for Metal with IEEE maths, not fast math (TL_GL_FAST_MATH=1: off)");
+    }
+    free(orig);
     if (ok) return;
     int n = atomic_fetch_add(&reported, 1);
     if (n >= 8) return;
@@ -817,9 +838,9 @@ static const struct { const char *name; void *wrap; void **real; } k_adapt[] = {
     ADAPT(glUniformMatrix3fv), ADAPT(glUniformMatrix4fv), ADAPT(glSampleCoverage),
     ADAPT(glUniformMatrix2x3fv), ADAPT(glUniformMatrix3x2fv), ADAPT(glUniformMatrix2x4fv), ADAPT(glUniformMatrix4x2fv),
     ADAPT(glUniformMatrix3x4fv), ADAPT(glUniformMatrix4x3fv),
-    ADAPT(glProgramBinary), { "glProgramBinaryOES", (void *)w_glProgramBinary, (void **)&r_glProgramBinary },
+    ADAPT(glProgramBinary), { "glProgramBinaryOES", (void *)w_glProgramBinary, (void **)&r_glProgramBinary }, ADAPT(glGetProgramBinary), { "glGetProgramBinaryOES", (void *)w_glGetProgramBinary, (void **)&r_glGetProgramBinary },
     ADAPT(glTexStorage3D), ADAPT(glTexImage3D), ADAPT(glFramebufferTextureLayer),
-    ADAPT(glBlendFunc), ADAPT(glBlendFuncSeparate), ADAPT(glBlendFunci), ADAPT(glBlendFuncSeparatei),
+    ADAPT(glBlendFunc), ADAPT(glEnable), ADAPT(glDisable), ADAPT(glUseProgram), ADAPT(glBlendEquation), ADAPT(glBlendEquationSeparate), ADAPT(glBlendFuncSeparate), ADAPT(glBlendFunci), ADAPT(glBlendFuncSeparatei),
     { "glBlendFunciEXT", (void *)w_glBlendFunci, (void **)&r_glBlendFunci }, { "glBlendFunciOES", (void *)w_glBlendFunci, (void **)&r_glBlendFunci },
     { "glBlendFuncSeparateiEXT", (void *)w_glBlendFuncSeparatei, (void **)&r_glBlendFuncSeparatei },
     { "glBlendFuncSeparateiOES", (void *)w_glBlendFuncSeparatei, (void **)&r_glBlendFuncSeparatei },

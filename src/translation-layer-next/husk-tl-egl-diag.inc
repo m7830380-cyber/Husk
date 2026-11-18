@@ -99,6 +99,20 @@ static void diag_write_prog_src(unsigned prog)
     pthread_mutex_unlock(&g_diag_mu);
 }
 
+/*
+ * Program binaries carry what Husk did to their shaders' source (the IEEE-maths rewrite, ieee_rewrite): one cached by an engine
+ * before a change would bring the old shader back. So the format an engine is handed for a binary is tagged with HUSK_BIN_REV,
+ * and a binary without the current tag is refused -- the program stays unlinked, and the engine, seeing LINK_STATUS false (as
+ * after a driver update), compiles it from source again.
+ */
+#define HUSK_BIN_REV 1u   /* bumped whenever a shader rewrite changes */
+#define HUSK_BIN_TAG (0x48000000u | (HUSK_BIN_REV << 16))
+static void (*r_glGetProgramBinary)(unsigned, int, int *, unsigned *, void *);
+static void w_glGetProgramBinary(unsigned prog, int size, int *len, unsigned *fmt, void *bin)
+{
+    r_glGetProgramBinary(prog, size, len, fmt, bin);
+    if (fmt && *fmt && *fmt <= 0xFFFFu) *fmt |= HUSK_BIN_TAG;
+}
 static void (*r_glProgramBinary)(unsigned, unsigned, const void *, int);
 static void w_glProgramBinary(unsigned prog, unsigned fmt, const void *bin, int len)
 {
@@ -107,7 +121,12 @@ static void w_glProgramBinary(unsigned prog, unsigned fmt, const void *bin, int 
         if (!atomic_exchange(&said, 1)) tl_log_line("gldiag: program binaries refused on this launch, so shaders are compiled from source");
         return;   /* the program stays unlinked: the engine sees LINK_STATUS false and compiles it */
     }
-    r_glProgramBinary(prog, fmt, bin, len);
+    if ((fmt & 0xFFFF0000u) != HUSK_BIN_TAG) {
+        static atomic_int said;
+        if (!atomic_exchange(&said, 1)) tl_log_line("gl: program binaries cached before this Husk's shader changes are refused once; the app compiles them again");
+        return;
+    }
+    r_glProgramBinary(prog, fmt & 0xFFFFu, bin, len);
 }
 
 /* ---- texture arrays */
@@ -389,7 +408,11 @@ static void diag_cube_copy_done(unsigned sn, unsigned st, int sl, unsigned dn, i
     char why[200];
     snprintf(why, sizeof(why), "copy %#x %u lvl %d -> cube %u lvl %d face %d, %dx%d, source reads as fmt %#x type %#x, GL error %#x",
              st, sn, sl, dn, dl, face, w, h, rfmt, rtype, err);
-    if (face == 5 || err) diag_probe_at(0x8513, dn, 0, dl, why); else tl_log_line("gldiag:     %s", why);
+    if (face == 5 || err) {
+        diag_probe_at(0x8513, dn, 0, dl, why);
+        snprintf(why, sizeof(why), "  ... and its source, %#x %u at lvl %d (before the copy it is what was rendered)", st, sn, sl);
+        if (st == 0x8513 || st == 0x0DE1) diag_probe_at(st, sn, 0, sl, why);
+    } else tl_log_line("gldiag:     %s", why);
 }
 
 static void diag_report_prog(unsigned prog, unsigned mode, int count, bool probe)
@@ -740,6 +763,19 @@ out:
 /* ---- blend state as the game sets it: the characters draw with blending on and both factors ZERO, which is black.
  * Which call sets that (and whether it arrives through an indexed, per-draw-buffer call) is what these say. */
 static atomic_int g_diag_blend_calls[4], g_diag_blend_zero;
+/* After the first ZERO,ZERO blend (past the first frames), the next events that decide what a draw blends with, in order: which
+ * call leaves a draw blending with ZERO,ZERO -- the engine asking for it, or a glDisable(GL_BLEND) that it thinks it made. */
+static atomic_int g_bt_left = -1;       /* -1: not started; >0: events still to log */
+static bool bt_on(void) { return atomic_load(&g_bt_left) > 0; }
+static void bt_log(const char *what)
+{
+    if (atomic_fetch_sub(&g_bt_left, 1) <= 0) return;
+    int prog = 0, fb = 0; if (a_glGetIntegerv) { a_glGetIntegerv(0x8B8D, &prog); a_glGetIntegerv(0x8CA6, &fb); }
+    int s = 0, d = 0, sa = 0, da = 0, cm[4] = {0};
+    if (a_glGetIntegerv) { a_glGetIntegerv(0x80C9, &s); a_glGetIntegerv(0x80C8, &d); a_glGetIntegerv(0x80CB, &sa); a_glGetIntegerv(0x80CA, &da); a_glGetIntegerv(0x0C23, cm); }
+    unsigned char on = DG.is_enabled ? DG.is_enabled(0x0BE2) : 2;
+    tl_log_line("gldiag: trace %-34s | now: program %d fbo %d blend %d (%#x,%#x / %#x,%#x) colormask %d%d%d%d", what, prog, fb, on, s, d, sa, da, cm[0], cm[1], cm[2], cm[3]);
+}
 static void diag_blend(int kind, int buf, unsigned s, unsigned d, unsigned sa, unsigned da)
 {
     if (!diag_on()) return;
@@ -747,6 +783,8 @@ static void diag_blend(int kind, int buf, unsigned s, unsigned d, unsigned sa, u
     int n = atomic_fetch_add(&g_diag_blend_calls[kind], 1);
     bool zero = s == 0 && d == 0;
     int z = zero ? atomic_fetch_add(&g_diag_blend_zero, 1) : 0;
+    if (zero) { int want = -1; if (atomic_compare_exchange_strong(&g_bt_left, &want, 200)) diag_load(); }
+    if (bt_on()) { char w[80]; snprintf(w, sizeof(w), "%s(%#x,%#x,%#x,%#x)", names[kind], s, d, sa, da); bt_log(w); }
     if (n < 6 || (zero && z < 16)) {
         int prog = 0; if (a_glGetIntegerv) a_glGetIntegerv(0x8B8D, &prog);
         int fb = 0; if (a_glGetIntegerv) a_glGetIntegerv(0x8CA6, &fb);
@@ -762,22 +800,33 @@ static void (*r_glBlendFunci)(unsigned, unsigned, unsigned);
 static void w_glBlendFunci(unsigned b, unsigned s, unsigned d) { r_glBlendFunci(b, s, d); diag_blend(2, (int)b, s, d, s, d); }
 static void (*r_glBlendFuncSeparatei)(unsigned, unsigned, unsigned, unsigned, unsigned);
 static void w_glBlendFuncSeparatei(unsigned b, unsigned s, unsigned d, unsigned sa, unsigned da) { r_glBlendFuncSeparatei(b, s, d, sa, da); diag_blend(3, (int)b, s, d, sa, da); }
+static void (*r_glEnable)(unsigned);
+static void w_glEnable(unsigned cap) { r_glEnable(cap); if (cap == 0x0BE2 && bt_on()) bt_log("glEnable(GL_BLEND)"); }
+static void (*r_glDisable)(unsigned);
+static void w_glDisable(unsigned cap) { r_glDisable(cap); if (cap == 0x0BE2 && bt_on()) bt_log("glDisable(GL_BLEND)"); }
+static void (*r_glUseProgram)(unsigned);
+static void w_glUseProgram(unsigned p) { r_glUseProgram(p); if (bt_on()) { char w[40]; snprintf(w, sizeof(w), "glUseProgram(%u)", p); bt_log(w); } }
+static void (*r_glBlendEquationSeparate)(unsigned, unsigned);
+static void w_glBlendEquationSeparate(unsigned c, unsigned a) { r_glBlendEquationSeparate(c, a); if (bt_on()) { char w[60]; snprintf(w, sizeof(w), "glBlendEquationSeparate(%#x,%#x)", c, a); bt_log(w); } }
+static void (*r_glBlendEquation)(unsigned);
+static void w_glBlendEquation(unsigned m) { r_glBlendEquation(m); if (bt_on()) { char w[60]; snprintf(w, sizeof(w), "glBlendEquation(%#x)", m); bt_log(w); } }
+static void bt_draw(unsigned mode, int count) { if (bt_on()) { char w[60]; snprintf(w, sizeof(w), "  draw mode %#x count %d", mode, count); bt_log(w); } }
 
 static void (*r_glDrawElements)(unsigned, int, unsigned, const void *);
 static void w_glDrawElements(unsigned mode, int count, unsigned type, const void *idx)
-{ t_diag_draws++; bool c = cap_here(); if (c) cap_pre(); r_glDrawElements(mode, count, type, idx); if (c) cap_post(mode, count); }
+{ t_diag_draws++; bt_draw(mode, count); bool c = cap_here(); if (c) cap_pre(); r_glDrawElements(mode, count, type, idx); if (c) cap_post(mode, count); }
 static void (*r_glDrawElementsInstanced)(unsigned, int, unsigned, const void *, int);
 static void w_glDrawElementsInstanced(unsigned mode, int count, unsigned type, const void *idx, int inst)
-{ t_diag_draws++; bool c = cap_here(); if (c) cap_pre(); r_glDrawElementsInstanced(mode, count, type, idx, inst); if (c) cap_post(mode, count); }
+{ t_diag_draws++; bt_draw(mode, count); bool c = cap_here(); if (c) cap_pre(); r_glDrawElementsInstanced(mode, count, type, idx, inst); if (c) cap_post(mode, count); }
 static void (*r_glDrawRangeElements)(unsigned, unsigned, unsigned, int, unsigned, const void *);
 static void w_glDrawRangeElements(unsigned mode, unsigned s, unsigned e, int count, unsigned type, const void *idx)
-{ t_diag_draws++; bool c = cap_here(); if (c) cap_pre(); r_glDrawRangeElements(mode, s, e, count, type, idx); if (c) cap_post(mode, count); }
+{ t_diag_draws++; bt_draw(mode, count); bool c = cap_here(); if (c) cap_pre(); r_glDrawRangeElements(mode, s, e, count, type, idx); if (c) cap_post(mode, count); }
 static void (*r_glDrawArrays)(unsigned, int, int);
 static void w_glDrawArrays(unsigned mode, int first, int count)
-{ t_diag_draws++; bool c = cap_here(); if (c) cap_pre(); r_glDrawArrays(mode, first, count); if (c) cap_post(mode, count); }
+{ t_diag_draws++; bt_draw(mode, count); bool c = cap_here(); if (c) cap_pre(); r_glDrawArrays(mode, first, count); if (c) cap_post(mode, count); }
 static void (*r_glDrawArraysInstanced)(unsigned, int, int, int);
 static void w_glDrawArraysInstanced(unsigned mode, int first, int count, int inst)
-{ t_diag_draws++; bool c = cap_here(); if (c) cap_pre(); r_glDrawArraysInstanced(mode, first, count, inst); if (c) cap_post(mode, count); }
+{ t_diag_draws++; bt_draw(mode, count); bool c = cap_here(); if (c) cap_pre(); r_glDrawArraysInstanced(mode, first, count, inst); if (c) cap_post(mode, count); }
 static void (*r_glClear)(unsigned);
 static void w_glClear(unsigned mask) { r_glClear(mask); cap_dirty(); }
 
