@@ -3,6 +3,7 @@
 #include "husk-tl-egl.h"
 
 #include <dlfcn.h>
+#include <math.h>
 #include <pthread.h>
 #include <stdatomic.h>
 #include <stdint.h>
@@ -785,7 +786,7 @@ static void w_glCompileShader(unsigned sh)
         getiv(sh, 0x8B81, &ok);
     } else if (ok && orig) {
         static atomic_int said;
-        if (!atomic_exchange(&said, 1)) tl_log_line("gl: fragment shaders get an isnan() call, so ANGLE compiles them for Metal with IEEE maths, not fast math (TL_GL_FAST_MATH=1: off)");
+        if (!atomic_exchange(&said, 1)) tl_log_line("gl: fragment shaders get an isnan() call, so ANGLE compiles them for Metal with IEEE maths, not fast math, and a NaN they write is written as 0 (TL_GL_FAST_MATH=1, TL_GL_KEEP_NAN=1: off)");
     }
     free(orig);
     if (ok) return;

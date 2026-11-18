@@ -66,10 +66,10 @@ static char *g_diag_prog_src[DIAG_PROGS][2];    /* [0] vertex, [1] fragment */
 
 static void diag_shader_source(unsigned sh, const char *src)
 {
-    if (!src || sh >= DIAG_SH || !diag_on() || !diag_dumping()) return;
+    if (!src || sh >= DIAG_SH || !diag_on() || atomic_load(&g_diag_done)) return;   /* kept for the cube-draw reports too */
     size_t len = strlen(src);
     pthread_mutex_lock(&g_diag_mu);
-    if (g_diag_src_bytes + len < (64u << 20)) {
+    if (g_diag_src_bytes + len < (24u << 20)) {
         char *c = malloc(len + 1);
         if (c) { memcpy(c, src, len + 1); g_diag_src[sh] = c; g_diag_src_bytes += len; }
     }
@@ -105,7 +105,7 @@ static void diag_write_prog_src(unsigned prog)
  * and a binary without the current tag is refused -- the program stays unlinked, and the engine, seeing LINK_STATUS false (as
  * after a driver update), compiles it from source again.
  */
-#define HUSK_BIN_REV 1u   /* bumped whenever a shader rewrite changes */
+#define HUSK_BIN_REV 2u   /* bumped whenever a shader rewrite changes */
 #define HUSK_BIN_TAG (0x48000000u | (HUSK_BIN_REV << 16))
 static void (*r_glGetProgramBinary)(unsigned, int, int *, unsigned *, void *);
 static void w_glGetProgramBinary(unsigned prog, int size, int *len, unsigned *fmt, void *bin)
@@ -415,6 +415,53 @@ static void diag_cube_copy_done(unsigned sn, unsigned st, int sl, unsigned dn, i
     } else tl_log_line("gldiag:     %s", why);
 }
 
+/* the values in a uniform block, as the buffer holds them now: material properties (UnityPerMaterial) the engine filled in */
+static void diag_block_values(unsigned prog, unsigned blk, unsigned ubo, int off, int size)
+{
+    static void *(*map)(unsigned, intptr_t, intptr_t, unsigned);
+    static unsigned char (*unmap)(unsigned);
+    static void (*buf_iv)(unsigned, unsigned, int *);
+    if (!map) { *(void **)&map = a_eglGetProcAddress("glMapBufferRange"); *(void **)&unmap = a_eglGetProcAddress("glUnmapBuffer");
+                *(void **)&buf_iv = a_eglGetProcAddress("glGetBufferParameteriv"); }
+    if (!map || !unmap || !buf_iv) return;
+    while (DG.get_error()) {}
+    int prev = 0; a_glGetIntegerv(0x8F36 /* COPY_READ_BUFFER_BINDING */, &prev);
+    DG.bind_buffer(0x8F36, ubo);
+    int total = 0, mapped = 0; buf_iv(0x8F36, 0x8764 /* BUFFER_SIZE */, &total); buf_iv(0x8F36, 0x88BC /* BUFFER_MAPPED */, &mapped);
+    int len = total - off < size ? total - off : size;
+    const uint8_t *m = NULL; uint8_t copy[4096];
+    if (!mapped && len > 0 && len <= (int)sizeof(copy)) {
+        m = map(0x8F36, off, len, 0x0001 /* MAP_READ_BIT */);
+        if (m) { memcpy(copy, m, (size_t)len); unmap(0x8F36); m = copy; }
+    }
+    DG.bind_buffer(0x8F36, (unsigned)prev);
+    while (DG.get_error()) {}
+    if (!m) { tl_log_line("gldiag:     (buffer %u not readable: %s, size %d)", ubo, mapped ? "mapped by the app" : "map failed", total); return; }
+    int n = 0; DG.get_prog_iv(prog, 0x8B86, &n);
+    char line[1400]; size_t k = 0; line[0] = 0;
+    for (int i = 0; i < n && i < 1024; i++) {
+        unsigned idx = (unsigned)i; int ub = -1, uo = -1;
+        DG.get_uiv(prog, 1, &idx, 0x8A3A /* UNIFORM_BLOCK_INDEX */, &ub);
+        if (ub != (int)blk) continue;
+        DG.get_uiv(prog, 1, &idx, 0x8A3B /* UNIFORM_OFFSET */, &uo);
+        char name[96] = ""; int l = 0, sz = 0; unsigned ty = 0;
+        DG.get_active_u(prog, idx, sizeof(name), &l, &sz, &ty, name);
+        int c = ty == 0x1406 || ty == 0x1404 || ty == 0x1405 ? 1 : ty == 0x8B50 ? 2 : ty == 0x8B51 ? 3 : ty == 0x8B52 ? 4 : ty == 0x8B5C ? 4 : 0;
+        if (uo < 0 || uo + 4 * c > len) continue;
+        char one[200]; int w = snprintf(one, sizeof(one), "%s=(", name);
+        if (!c) w += snprintf(one + w, sizeof(one) - (size_t)w, "%s", diag_type(ty));
+        for (int j = 0; j < c; j++) {
+            if (ty == 0x1404 || ty == 0x1405) { int32_t v; memcpy(&v, m + uo + 4 * j, 4); w += snprintf(one + w, sizeof(one) - (size_t)w, "%s%d", j ? "," : "", v); }
+            else { float v; memcpy(&v, m + uo + 4 * j, 4); w += snprintf(one + w, sizeof(one) - (size_t)w, "%s%g", j ? "," : "", v); }
+        }
+        snprintf(one + w, sizeof(one) - (size_t)w, ") ");
+        size_t ol = strlen(one);
+        if (k + ol >= 1200) { tl_log_line("gldiag:     %s", line); k = 0; line[0] = 0; }
+        memcpy(line + k, one, ol + 1); k += ol;
+    }
+    if (k) tl_log_line("gldiag:     %s", line);
+}
+
 static void diag_report_prog(unsigned prog, unsigned mode, int count, bool probe)
 {
     char line[1400]; size_t k;
@@ -445,6 +492,7 @@ static void diag_report_prog(unsigned prog, unsigned mode, int count, bool probe
             DG.get_i_v(0x8A2A /* UNIFORM_BUFFER_SIZE */, (unsigned)bind, &bsz);
         }
         tl_log_line("gldiag:   block '%s': %d bytes, binding %d -> buffer %d (offset %d, size %d)", name, size, bind, ubo, off, bsz);
+        if (ubo > 0 && size > 0 && strcmp(name, "UnityPerDraw")) diag_block_values(prog, (unsigned)b, (unsigned)ubo, off, size);
     }
     int active = 0; a_glGetIntegerv(0x84E0 /* ACTIVE_TEXTURE */, &active);
     k = 0; line[0] = 0;
@@ -812,21 +860,137 @@ static void (*r_glBlendEquation)(unsigned);
 static void w_glBlendEquation(unsigned m) { r_glBlendEquation(m); if (bt_on()) { char w[60]; snprintf(w, sizeof(w), "glBlendEquation(%#x)", m); bt_log(w); } }
 static void bt_draw(unsigned mode, int count) { if (bt_on()) { char w[60]; snprintf(w, sizeof(w), "  draw mode %#x count %d", mode, count); bt_log(w); } }
 
+/* ---- draws into a cube map's face: reflection probes and their convolution. The convolution writes NaN (alpha 1) into every
+ * level, and the characters and terrain that sample those levels come out black. Each program that draws into a cube face is
+ * reported once: its state and uniforms (with the textures it samples read back), its vertex attributes, its source, and the
+ * pixel at the viewport's centre before and after the draw. */
+static unsigned char g_cube_done[DIAG_PROGS];
+static atomic_int g_cube_n;
+static __thread bool t_cube_post;
+static struct {
+    bool tried, ok;
+    void (*get_attr)(unsigned, unsigned, int, int *, int *, unsigned *, char *);
+    int (*attr_loc)(unsigned, const char *);
+    void (*va_iv)(unsigned, unsigned, int *), (*va_fv)(unsigned, unsigned, float *), (*va_ptr)(unsigned, unsigned, void **);
+} DA;
+static float cube_h2f(uint16_t h)
+{
+    unsigned e = (h >> 10) & 31, m = h & 1023; float f;
+    if (e == 31) f = m ? NAN : INFINITY;
+    else if (!e) f = ldexpf((float)m, -24);
+    else f = ldexpf((float)(m | 1024), (int)e - 25);
+    return (h & 0x8000) ? -f : f;
+}
+static void cube_px(const char *when)
+{
+    int pbo = 0; a_glGetIntegerv(0x88ED /* PIXEL_PACK_BUFFER_BINDING */, &pbo);
+    if (pbo) { tl_log_line("gldiag:   %s: not read (a pack buffer is bound)", when); return; }
+    int fb = 0, rfb = 0, vp[4] = {0}, fmt = 0, type = 0;
+    a_glGetIntegerv(0x8CA6, &fb); a_glGetIntegerv(0x8CAA /* READ_FRAMEBUFFER_BINDING */, &rfb); a_glGetIntegerv(0x0BA2, vp);
+    if (rfb != fb) a_glBindFramebuffer(0x8CA8 /* READ_FRAMEBUFFER */, (unsigned)fb);
+    a_glGetIntegerv(0x8B9B /* IMPLEMENTATION_COLOR_READ_FORMAT */, &fmt); a_glGetIntegerv(0x8B9A /* ..._TYPE */, &type);
+    float c[4] = {0}; uint8_t b[32] = {0};
+    int x = vp[0] + vp[2] / 2, y = vp[1] + vp[3] / 2;
+    if (fmt == 0x1908 && (type == 0x140B || type == 0x8D61 || type == 0x1406)) {
+        a_glReadPixels(x, y, 1, 1, 0x1908, (unsigned)type, b);
+        for (int j = 0; j < 4; j++) {
+            if (type == 0x1406) memcpy(&c[j], b + 4 * j, 4);
+            else { uint16_t h; memcpy(&h, b + 2 * j, 2); c[j] = cube_h2f(h); }
+        }
+    } else {
+        a_glReadPixels(x, y, 1, 1, 0x1908, 0x1401, b); type = 0x1401;
+        for (int j = 0; j < 4; j++) c[j] = b[j] / 255.0f;
+    }
+    if (rfb != fb) a_glBindFramebuffer(0x8CA8, (unsigned)rfb);
+    tl_log_line("gldiag:   %s: centre pixel (%g %g %g %g) [read as type %#x]", when, c[0], c[1], c[2], c[3], type);
+}
+static void cube_attrs(unsigned prog)
+{
+    if (!DA.tried) {
+        DA.tried = true;
+        *(void **)&DA.get_attr = a_eglGetProcAddress("glGetActiveAttrib"); *(void **)&DA.attr_loc = a_eglGetProcAddress("glGetAttribLocation");
+        *(void **)&DA.va_iv = a_eglGetProcAddress("glGetVertexAttribiv"); *(void **)&DA.va_fv = a_eglGetProcAddress("glGetVertexAttribfv");
+        *(void **)&DA.va_ptr = a_eglGetProcAddress("glGetVertexAttribPointerv");
+        DA.ok = DA.get_attr && DA.attr_loc && DA.va_iv && DA.va_fv && DA.va_ptr;
+    }
+    if (!DA.ok) return;
+    int n = 0, vao = 0, ebo = 0; DG.get_prog_iv(prog, 0x8B89 /* ACTIVE_ATTRIBUTES */, &n);
+    a_glGetIntegerv(0x85B5 /* VERTEX_ARRAY_BINDING */, &vao); a_glGetIntegerv(0x8895 /* ELEMENT_ARRAY_BUFFER_BINDING */, &ebo);
+    tl_log_line("gldiag:   %d attributes, vertex array %d, index buffer %d", n, vao, ebo);
+    for (int i = 0; i < n && i < 16; i++) {
+        char name[96] = ""; int l = 0, sz = 0; unsigned ty = 0;
+        DA.get_attr(prog, (unsigned)i, sizeof(name), &l, &sz, &ty, name);
+        int loc = DA.attr_loc(prog, name);
+        if (loc < 0) { tl_log_line("gldiag:   attrib %s (%s): no location", name, diag_type(ty)); continue; }
+        int en = 0, size = 0, stride = 0, type = 0, norm = 0, buf = 0, integer = 0, div = 0; void *off = NULL; float cur[4] = {0};
+        DA.va_iv((unsigned)loc, 0x8622, &en); DA.va_iv((unsigned)loc, 0x8623, &size); DA.va_iv((unsigned)loc, 0x8624, &stride);
+        DA.va_iv((unsigned)loc, 0x8625, &type); DA.va_iv((unsigned)loc, 0x886A, &norm); DA.va_iv((unsigned)loc, 0x889F, &buf);
+        DA.va_iv((unsigned)loc, 0x88FD, &integer); DA.va_iv((unsigned)loc, 0x88FE, &div);
+        DA.va_ptr((unsigned)loc, 0x8645, &off); DA.va_fv((unsigned)loc, 0x8626, cur);
+        tl_log_line("gldiag:   attrib %s (%s) loc %d: %s size %d type %#x norm %d int %d stride %d buffer %d offset %p divisor %d; current (%g %g %g %g)",
+                    name, diag_type(ty), loc, en ? "array" : "OFF", size, type, norm, integer, stride, buf, off, div, cur[0], cur[1], cur[2], cur[3]);
+    }
+}
+static void cube_src(unsigned prog)
+{
+    if (prog >= DIAG_PROGS) return;
+    for (int k = 0; k < 2; k++) {
+        pthread_mutex_lock(&g_diag_mu);
+        const char *s = g_diag_prog_src[prog][k];
+        pthread_mutex_unlock(&g_diag_mu);
+        if (!s) { tl_log_line("gldiag:   %s source: not seen (the program came from a binary)", k ? "fragment" : "vertex"); continue; }
+        tl_log_line("gldiag:   %s source (%zu bytes):", k ? "fragment" : "vertex", strlen(s));
+        int lines = 0;
+        for (const char *p = s; *p && lines < 600; lines++) {
+            const char *e = strchr(p, '\n'); size_t l = e ? (size_t)(e - p) : strlen(p);
+            if (l > 1900) l = 1900;
+            tl_log_line("gldiag:src| %.*s", (int)l, p);
+            if (!e) break;
+            p = e + 1;
+        }
+    }
+}
+static void cube_pre(unsigned mode, int count)
+{
+    if (!diag_on() || atomic_load(&g_diag_done) || atomic_load(&g_cube_n) >= 40 || !a_glGetIntegerv) return;
+    int fb = 0; a_glGetIntegerv(0x8CA6, &fb);
+    if (!fb || !diag_load()) return;
+    int ot = 0, face = 0, name = 0, lvl = 0;
+    DG.fb_att_iv(0x8CA9 /* DRAW_FRAMEBUFFER */, 0x8CE0, 0x8CD0 /* OBJECT_TYPE */, &ot);
+    if (ot != 0x1702) return;
+    DG.fb_att_iv(0x8CA9, 0x8CE0, 0x8CD3 /* TEXTURE_CUBE_MAP_FACE */, &face);
+    if (!face) return;
+    int prog = 0; a_glGetIntegerv(0x8B8D, &prog);
+    if (prog <= 0 || prog >= DIAG_PROGS || g_cube_done[prog]) return;
+    g_cube_done[prog] = 1;
+    if (atomic_fetch_add(&g_cube_n, 1) >= 40) return;
+    DG.fb_att_iv(0x8CA9, 0x8CE0, 0x8CD1 /* OBJECT_NAME */, &name); DG.fb_att_iv(0x8CA9, 0x8CE0, 0x8CD2 /* TEXTURE_LEVEL */, &lvl);
+    tl_log_line("gldiag: cube draw: program %d into cube %d face %#x level %d", prog, name, face, lvl);
+    diag_report_prog((unsigned)prog, mode, count, true);
+    cube_attrs((unsigned)prog);
+    cube_src((unsigned)prog);
+    cube_px("before the draw");
+    t_cube_post = true;
+}
+static void cube_post(void) { if (t_cube_post) { t_cube_post = false; cube_px("after the draw"); } }
+#define CUBE_PRE(m, c) cube_pre(m, c)
+#define CUBE_POST() cube_post()
+
 static void (*r_glDrawElements)(unsigned, int, unsigned, const void *);
 static void w_glDrawElements(unsigned mode, int count, unsigned type, const void *idx)
-{ t_diag_draws++; bt_draw(mode, count); bool c = cap_here(); if (c) cap_pre(); r_glDrawElements(mode, count, type, idx); if (c) cap_post(mode, count); }
+{ t_diag_draws++; bt_draw(mode, count); CUBE_PRE(mode, count); bool c = cap_here(); if (c) cap_pre(); r_glDrawElements(mode, count, type, idx); CUBE_POST(); if (c) cap_post(mode, count); }
 static void (*r_glDrawElementsInstanced)(unsigned, int, unsigned, const void *, int);
 static void w_glDrawElementsInstanced(unsigned mode, int count, unsigned type, const void *idx, int inst)
-{ t_diag_draws++; bt_draw(mode, count); bool c = cap_here(); if (c) cap_pre(); r_glDrawElementsInstanced(mode, count, type, idx, inst); if (c) cap_post(mode, count); }
+{ t_diag_draws++; bt_draw(mode, count); CUBE_PRE(mode, count); bool c = cap_here(); if (c) cap_pre(); r_glDrawElementsInstanced(mode, count, type, idx, inst); CUBE_POST(); if (c) cap_post(mode, count); }
 static void (*r_glDrawRangeElements)(unsigned, unsigned, unsigned, int, unsigned, const void *);
 static void w_glDrawRangeElements(unsigned mode, unsigned s, unsigned e, int count, unsigned type, const void *idx)
-{ t_diag_draws++; bt_draw(mode, count); bool c = cap_here(); if (c) cap_pre(); r_glDrawRangeElements(mode, s, e, count, type, idx); if (c) cap_post(mode, count); }
+{ t_diag_draws++; bt_draw(mode, count); CUBE_PRE(mode, count); bool c = cap_here(); if (c) cap_pre(); r_glDrawRangeElements(mode, s, e, count, type, idx); CUBE_POST(); if (c) cap_post(mode, count); }
 static void (*r_glDrawArrays)(unsigned, int, int);
 static void w_glDrawArrays(unsigned mode, int first, int count)
-{ t_diag_draws++; bt_draw(mode, count); bool c = cap_here(); if (c) cap_pre(); r_glDrawArrays(mode, first, count); if (c) cap_post(mode, count); }
+{ t_diag_draws++; bt_draw(mode, count); CUBE_PRE(mode, count); bool c = cap_here(); if (c) cap_pre(); r_glDrawArrays(mode, first, count); CUBE_POST(); if (c) cap_post(mode, count); }
 static void (*r_glDrawArraysInstanced)(unsigned, int, int, int);
 static void w_glDrawArraysInstanced(unsigned mode, int first, int count, int inst)
-{ t_diag_draws++; bt_draw(mode, count); bool c = cap_here(); if (c) cap_pre(); r_glDrawArraysInstanced(mode, first, count, inst); if (c) cap_post(mode, count); }
+{ t_diag_draws++; bt_draw(mode, count); CUBE_PRE(mode, count); bool c = cap_here(); if (c) cap_pre(); r_glDrawArraysInstanced(mode, first, count, inst); CUBE_POST(); if (c) cap_post(mode, count); }
 static void (*r_glClear)(unsigned);
 static void w_glClear(unsigned mask) { r_glClear(mask); cap_dirty(); }
 

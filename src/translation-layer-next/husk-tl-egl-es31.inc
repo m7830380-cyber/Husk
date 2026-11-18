@@ -142,7 +142,9 @@ static char *oes_external_rewrite(const char *src)
  * Only ES 3.00+ fragment shaders (isnan is not in GLSL ES 1.00), and only when the shape is plain: one main(), a declared output.
  * A rewrite that does not compile is undone in glCompileShader. TL_GL_FAST_MATH=1 leaves shaders alone.
  */
-static int g_ieee = -1;
+static int g_ieee = -1, g_nan_keep = -1;
+/* TL_GL_KEEP_NAN=1: a fragment shader's NaN output is written as it is, not as 0 */
+static bool nan_scrub_on(void) { if (g_nan_keep < 0) { const char *e = getenv("TL_GL_KEEP_NAN"); g_nan_keep = e && *e == '1'; } return !g_nan_keep; }
 static bool ieee_on(void) { if (g_ieee < 0) { const char *e = getenv("TL_GL_FAST_MATH"); g_ieee = !(e && *e == '1'); } return g_ieee == 1; }
 static const char *ieee_skip_ws(const char *p) { while (*p == ' ' || *p == '\t' || *p == '\r' || *p == '\n') p++; return p; }
 static bool ieee_word(const char *s, const char *p, const char *w)
@@ -164,7 +166,7 @@ static char *ieee_rewrite(const char *src, unsigned type)
     }
     if (mains != 1) return NULL;
     /* the output: "out" as a word at the start of a declaration, after an optional layout(...); its name is the word before ';' */
-    char out[96] = "";
+    char out[96] = "", otype[16] = "";
     for (const char *p = src; !out[0] && (p = strstr(p, "out")); p += 3) {
         if (!ieee_word(src, p, "out")) continue;
         const char *l = p; while (l > src && l[-1] != '\n' && l[-1] != ';' && l[-1] != '}') l--;
@@ -178,14 +180,33 @@ static char *ieee_rewrite(const char *src, unsigned type)
         const char *b = e; while (b > p && es31_ident((unsigned char)b[-1])) b--;
         if (e - b <= 0 || e - b >= (long)sizeof(out)) continue;
         memcpy(out, b, (size_t)(e - b)); out[e - b] = 0;
+        /* its type: the word after "out" and any precision */
+        const char *t = ieee_skip_ws(p + 3);
+        for (int q = 0; q < 2; q++) {
+            const char *w = t; while (es31_ident((unsigned char)*w)) w++;
+            size_t wl = (size_t)(w - t);
+            if ((wl == 5 && !strncmp(t, "highp", 5)) || (wl == 7 && !strncmp(t, "mediump", 7)) || (wl == 4 && !strncmp(t, "lowp", 4))) { t = ieee_skip_ws(w); continue; }
+            if (wl < sizeof(otype)) { memcpy(otype, t, wl); otype[wl] = 0; }
+            break;
+        }
     }
     if (!out[0]) return NULL;
-    size_t n = strlen(src), extra = 2 * strlen(out) + 128;
+    /* A NaN the shader writes is written as 0. A NaN in a float target spreads: through blending, filtering and every shader that
+     * samples it (Unity's reflection-probe convolution writes NaN, and all that reflects it -- characters, terrain -- turns black
+     * through it). The isnan() also makes ANGLE compile the shader with IEEE maths. Integer outputs only get the never-true test. */
+    bool vec = !strcmp(otype, "vec2") || !strcmp(otype, "vec3") || !strcmp(otype, "vec4"), flt = !strcmp(otype, "float");
+    bool scrub = nan_scrub_on() && (vec || flt);
+    size_t n = strlen(src), extra = 4 * strlen(out) + 192;
     char *r = malloc(n + extra);
     size_t at = (size_t)(mainp - src);
     memcpy(r, src, at); memcpy(r + at, "husk_main_", 10); memcpy(r + at + 10, mainp + 4, n - at - 4);
     size_t k = n + 6;
-    k += (size_t)snprintf(r + k, extra, "\nvoid main() { husk_main_(); if (isnan(gl_FragCoord.x)) %s = %s; }\n", out, out);
+    if (scrub && vec)
+        k += (size_t)snprintf(r + k, extra, "\nvoid main() { husk_main_(); %s = mix(%s, %s(0.0), isnan(%s)); }\n", out, out, otype, out);
+    else if (scrub)
+        k += (size_t)snprintf(r + k, extra, "\nvoid main() { husk_main_(); %s = isnan(%s) ? 0.0 : %s; }\n", out, out, out);
+    else
+        k += (size_t)snprintf(r + k, extra, "\nvoid main() { husk_main_(); if (isnan(gl_FragCoord.x)) %s = %s; }\n", out, out);
     r[k] = 0;
     return r;
 }
