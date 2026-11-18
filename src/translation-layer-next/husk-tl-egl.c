@@ -77,44 +77,6 @@ static void (*a_glGetIntegerv)(unsigned, int *);
 static void (*a_glBindFramebuffer)(unsigned, unsigned);
 static void (*a_glPixelStorei)(unsigned, int);
 
-static void *gl_proc(const char *name)
-{
-    if (!name) return NULL;
-    void *p = a_eglGetProcAddress ? a_eglGetProcAddress(name) : NULL;
-    if (!p && E.gles) p = dlsym(E.gles, name);
-    if (p) return p;
-
-    size_t len = strlen(name);
-    char buf[128];
-    if (len >= 4 && (!strcmp(name + len - 3, "EXT") || !strcmp(name + len - 3, "OES") || !strcmp(name + len - 3, "KHR"))) {
-        if (len - 3 < sizeof(buf)) {
-            memcpy(buf, name, len - 3);
-            buf[len - 3] = '\0';
-            p = a_eglGetProcAddress ? a_eglGetProcAddress(buf) : NULL;
-            if (!p && E.gles) p = dlsym(E.gles, buf);
-            if (p) return p;
-        }
-    } else {
-        static const char *const sfx[] = { "EXT", "OES", "KHR" };
-        for (int i = 0; i < 3; i++) {
-            if (snprintf(buf, sizeof(buf), "%s%s", name, sfx[i]) < (int)sizeof(buf)) {
-                p = a_eglGetProcAddress ? a_eglGetProcAddress(buf) : NULL;
-                if (!p && E.gles) p = dlsym(E.gles, buf);
-                if (p) return p;
-            }
-        }
-    }
-    return NULL;
-}
-
-static unsigned gl_proc_get_error(void)
-{
-    static unsigned (*fn)(void);
-    if (!fn) fn = gl_proc("glGetError");
-    return fn ? fn() : 0;
-}
-
-static void adapt_init(void);
 #define LOAD(lib, name) do { a_##name = dlsym(lib, #name); if (!a_##name) tl_log_line("egl: ANGLE does not export " #name); } while (0)
 
 bool tl_egl_init(const char *egl_path, const char *gles_path, const char *frame_dir, int frame_every)
@@ -143,11 +105,8 @@ bool tl_egl_init(const char *egl_path, const char *gles_path, const char *frame_
     a_glPixelStorei = a_eglGetProcAddress("glPixelStorei");
     if (frame_dir) { snprintf(E.frame_dir, sizeof(E.frame_dir), "%s", frame_dir); E.latest_only = frame_every < 0; E.frame_every = frame_every != 0 ? (frame_every < 0 ? -frame_every : frame_every) : 60; }
     E.ready = true;
-    adapt_init();
     pthread_mutex_unlock(&E.lock);
-    tl_log_line("egl: ANGLE loaded%s%s (core UBO: range=%p, base=%p, blockbind=%p)",
-                frame_dir ? ", off-screen, frames to " : "", frame_dir ? frame_dir : "",
-                gl_proc("glBindBufferRange"), gl_proc("glBindBufferBase"), gl_proc("glUniformBlockBinding"));
+    tl_log_line("egl: ANGLE loaded%s%s", frame_dir ? ", off-screen, frames to " : "", frame_dir ? frame_dir : "");
     return true;
 }
 
@@ -229,10 +188,7 @@ static EGLBoolean w_eglChooseConfig(EGLDisplay d, const EGLint *at, EGLConfig *c
 }
 static EGLBoolean w_eglGetConfigAttrib(EGLDisplay d, EGLConfig c, EGLint at, EGLint *v)
 {
-    if (at == 0x3142 /* EGL_RECORDABLE_ANDROID */ || at == 0x3147 /* EGL_FRAMEBUFFER_TARGET_ANDROID */) {
-        if (v) *v = 1;
-        return EGL_TRUE;
-    }
+    if (at == 0x3142 /* EGL_RECORDABLE_ANDROID */) { if (v) *v = 1; return EGL_TRUE; }
     bool alias = cfg_alias(c);
     EGLBoolean ok = a_eglGetConfigAttrib(d, cfg_real(c), at, v);
     if (ok && alias && v) { if (at == 0x3021 /* ALPHA_SIZE */) *v = 0; else if (at == 0x3020 /* BUFFER_SIZE */) *v = 24; else if (at == 0x302E /* NATIVE_VISUAL_ID */) *v = 2; }
@@ -264,42 +220,12 @@ PASS_BOOL(eglWaitGL, (void), ())
 PASS_BOOL(eglWaitNative, (EGLint e), (e))
 PASS_BOOL(eglReleaseThread, (void), ())
 
-static const char *w_eglQueryString(EGLDisplay d, EGLint name)
-{
-    const char *s = a_eglQueryString(d, name);
-    if (name == 0x3055 /* EGL_EXTENSIONS */ && s) {
-        static pthread_mutex_t mu = PTHREAD_MUTEX_INITIALIZER;
-        static const char *last_s = NULL;
-        static char *ext_buf = NULL;
-        pthread_mutex_lock(&mu);
-        if (last_s != s) {
-            free(ext_buf);
-            size_t len = strlen(s);
-            ext_buf = malloc(len + 256);
-            strcpy(ext_buf, s);
-            if (!strstr(ext_buf, "EGL_ANDROID_presentation_time")) {
-                strcat(ext_buf, " EGL_ANDROID_presentation_time");
-            }
-            if (!strstr(ext_buf, "EGL_KHR_swap_buffers_with_damage")) {
-                strcat(ext_buf, " EGL_KHR_swap_buffers_with_damage");
-            }
-            if (!strstr(ext_buf, "EGL_EXT_swap_buffers_with_damage")) {
-                strcat(ext_buf, " EGL_EXT_swap_buffers_with_damage");
-            }
-            last_s = s;
-        }
-        const char *ret = ext_buf;
-        pthread_mutex_unlock(&mu);
-        return ret;
-    }
-    return s;
-}
+static const char *w_eglQueryString(EGLDisplay d, EGLint name) { return a_eglQueryString(d, name); }
 static bool g_es31_shim;           /* defined with the rest of the shim, below */
 static EGLContext w_eglCreateContext(EGLDisplay d, EGLConfig c, EGLContext share, const EGLint *at)
 {
-    /* A game that insists on ES 3.1 or 3.2 (Unity, Unreal Engine try 3.2, then 3.1) is given the 3.0 context ANGLE can make: the version it is then told is the shim's. */
+    /* A game that insists on ES 3.1 or 3.2 (Unreal Engine tries 3.2, then 3.1) is given the 3.0 context ANGLE can make: the version it is then told is the shim's. */
     EGLint patched[40];
-    const EGLint *req = at;
     if (g_es31_shim && at) {
         int n = 0;
         for (; at[n] != EGL_NONE && n < 36; n += 2) {
@@ -307,41 +233,9 @@ static EGLContext w_eglCreateContext(EGLDisplay d, EGLConfig c, EGLContext share
             if (at[n] == 0x30fb /* EGL_CONTEXT_MINOR_VERSION */ && at[n + 1] > 0) patched[n + 1] = 0;
         }
         patched[n] = EGL_NONE;
-        req = patched;
+        at = patched;
     }
-    EGLContext ctx = a_eglCreateContext(d, cfg_real(c), share, req);
-    if (!ctx && at) {
-        /* If ANGLE rejected the context because of minor version (e.g. 3.1, 3.2) or unsupported attributes,
-         * clamp minor version to 0 and retry. */
-        int n = 0;
-        bool has_minor = false;
-        for (; at[n] != EGL_NONE && n < 36; n += 2) {
-            patched[n] = at[n]; patched[n + 1] = at[n + 1];
-            if (at[n] == 0x30fb /* EGL_CONTEXT_MINOR_VERSION */ && at[n + 1] > 0) {
-                patched[n + 1] = 0;
-                has_minor = true;
-            }
-        }
-        patched[n] = EGL_NONE;
-        if (has_minor) {
-            ctx = a_eglCreateContext(d, cfg_real(c), share, patched);
-            if (ctx) {
-                tl_log_line("egl: eglCreateContext fallback succeeded with clamped EGL_CONTEXT_MINOR_VERSION=0 -> %p", ctx);
-            }
-        }
-        if (!ctx) {
-            /* Fallback to minimal compliant context attributes for client version */
-            int client_ver = 3;
-            for (int i = 0; at[i] != EGL_NONE && i < 36; i += 2) {
-                if (at[i] == 0x3098 /* EGL_CONTEXT_CLIENT_VERSION */) client_ver = at[i + 1];
-            }
-            const EGLint fallback_at[] = { 0x3098, client_ver, EGL_NONE };
-            ctx = a_eglCreateContext(d, cfg_real(c), share, fallback_at);
-            if (ctx) {
-                tl_log_line("egl: eglCreateContext fallback succeeded with basic client version %d -> %p", client_ver, ctx);
-            }
-        }
-    }
+    EGLContext ctx = a_eglCreateContext(d, cfg_real(c), share, at);
     static int trace = -1;
     if (trace < 0) trace = getenv("TL_EGL_TRACE") ? 1 : 0;
     if (trace || !ctx) {
@@ -388,55 +282,6 @@ static bool comp_surface(EGLSurface s)
     pthread_mutex_unlock(&g_tex_lock);
     return r;
 }
-/* Pixel readback helper: safely unbinds PBOs, aligns pixel packing, and retries read buffer on offscreen surfaces */
-static void read_pixels_fbo0(void *buf, int w, int h)
-{
-    static void (*fn_bind_buffer)(unsigned, unsigned);
-    if (!fn_bind_buffer) fn_bind_buffer = gl_proc("glBindBuffer");
-    static void (*fn_read_buffer)(unsigned);
-    if (!fn_read_buffer) fn_read_buffer = gl_proc("glReadBuffer");
-
-    int old_fb = 0, old_pack = 0, old_pbo = 0, old_row_len = 0, old_skip_rows = 0, old_skip_pixels = 0, old_read_buf = 0;
-    a_glGetIntegerv(0x8CAA /* GL_READ_FRAMEBUFFER_BINDING */, &old_fb);
-    a_glGetIntegerv(0x0D05 /* GL_PACK_ALIGNMENT */, &old_pack);
-    a_glGetIntegerv(0x88ED /* GL_PIXEL_PACK_BUFFER_BINDING */, &old_pbo);
-    a_glGetIntegerv(0x0D02 /* GL_PACK_ROW_LENGTH */, &old_row_len);
-    a_glGetIntegerv(0x0D03 /* GL_PACK_SKIP_ROWS */, &old_skip_rows);
-    a_glGetIntegerv(0x0D04 /* GL_PACK_SKIP_PIXELS */, &old_skip_pixels);
-    a_glGetIntegerv(0x0C02 /* GL_READ_BUFFER */, &old_read_buf);
-
-    if (old_pbo && fn_bind_buffer) fn_bind_buffer(0x88EB /* GL_PIXEL_PACK_BUFFER */, 0);
-    a_glBindFramebuffer(0x8CA8 /* GL_READ_FRAMEBUFFER */, 0);
-    a_glPixelStorei(0x0D05 /* GL_PACK_ALIGNMENT */, 1);
-    if (old_row_len != 0) a_glPixelStorei(0x0D02, 0);
-    if (old_skip_rows != 0) a_glPixelStorei(0x0D03, 0);
-    if (old_skip_pixels != 0) a_glPixelStorei(0x0D04, 0);
-
-    while (gl_proc_get_error());
-    a_glReadPixels(0, 0, w, h, 0x1908 /* GL_RGBA */, 0x1401 /* GL_UNSIGNED_BYTE */, buf);
-    unsigned err = gl_proc_get_error();
-    if (err != 0 && fn_read_buffer) {
-        fn_read_buffer(0x0404 /* GL_FRONT */);
-        while (gl_proc_get_error());
-        a_glReadPixels(0, 0, w, h, 0x1908, 0x1401, buf);
-        err = gl_proc_get_error();
-        if (err != 0) {
-            fn_read_buffer(0x0405 /* GL_BACK */);
-            while (gl_proc_get_error());
-            a_glReadPixels(0, 0, w, h, 0x1908, 0x1401, buf);
-            err = gl_proc_get_error();
-        }
-    }
-
-    if (old_read_buf && fn_read_buffer) fn_read_buffer((unsigned)old_read_buf);
-    a_glPixelStorei(0x0D05, old_pack);
-    if (old_row_len != 0) a_glPixelStorei(0x0D02, old_row_len);
-    if (old_skip_rows != 0) a_glPixelStorei(0x0D03, old_skip_rows);
-    if (old_skip_pixels != 0) a_glPixelStorei(0x0D04, old_skip_pixels);
-    if (old_pbo && fn_bind_buffer) fn_bind_buffer(0x88EB, (unsigned)old_pbo);
-    a_glBindFramebuffer(0x8CA8, (unsigned)old_fb);
-}
-
 /* The current frame of a surface, read back (bottom-up RGBA, in a buffer of this thread's). */
 static const uint8_t *read_back(EGLDisplay d, EGLSurface s, EGLint *pw, EGLint *ph)
 {
@@ -447,7 +292,14 @@ static const uint8_t *read_back(EGLDisplay d, EGLSurface s, EGLint *pw, EGLint *
     size_t need = (size_t)w * h * 4;
     if (need > cap) { free(buf); buf = malloc(need); cap = buf ? need : 0; }
     if (!buf) return NULL;
-    read_pixels_fbo0(buf, w, h);
+    int old_fb = 0, old_pack = 0;
+    a_glGetIntegerv(0x8CAA /* GL_READ_FRAMEBUFFER_BINDING */, &old_fb);
+    a_glGetIntegerv(0x0D05 /* GL_PACK_ALIGNMENT */, &old_pack);
+    a_glBindFramebuffer(0x8CA8 /* GL_READ_FRAMEBUFFER */, 0);
+    a_glPixelStorei(0x0D05, 1);
+    a_glReadPixels(0, 0, w, h, 0x1908 /* GL_RGBA */, 0x1401 /* GL_UNSIGNED_BYTE */, buf);
+    a_glPixelStorei(0x0D05, old_pack);
+    a_glBindFramebuffer(0x8CA8, (unsigned)old_fb);
     *pw = w; *ph = h;
     return buf;
 }
@@ -473,10 +325,7 @@ static EGLSurface w_eglCreateWindowSurface(EGLDisplay d, EGLConfig cfg, void *wi
             for (int i = 0; i < MAX_COMP_SURFACES; i++) if (!g_comp_surf[i]) { g_comp_surf[i] = s; break; }
             pthread_mutex_unlock(&g_tex_lock);
         }
-        EGLint s_dp = 0, s_st = 0;
-        a_eglGetConfigAttrib(d, cfg, 0x3025, &s_dp);
-        a_eglGetConfigAttrib(d, cfg, 0x3026, &s_st);
-        tl_log_line("egl: window %dx%d -> surface %p (depth %d, stencil %d), composited under the app's views", pb[1], pb[3], s, s_dp, s_st);
+        tl_log_line("egl: window %dx%d -> surface %p, composited under the app's views", pb[1], pb[3], s);
         return s;
     }
     if (E.frame_dir[0] || g_offscreen_windows) {
@@ -518,8 +367,14 @@ static void save_frame(EGLDisplay d, EGLSurface s, unsigned long n)
     a_eglQuerySurface(d, s, EGL_HEIGHT, &h);
     if (w <= 0 || h <= 0 || !a_glReadPixels) return;
     uint8_t *rgba = malloc((size_t)w * h * 4);
-    if (!rgba) return;
-    read_pixels_fbo0(rgba, w, h);
+    int old_fb = 0, old_pack = 0;
+    a_glGetIntegerv(0x8CAA /* GL_READ_FRAMEBUFFER_BINDING */, &old_fb);
+    a_glGetIntegerv(0x0D05 /* GL_PACK_ALIGNMENT */, &old_pack);
+    a_glBindFramebuffer(0x8CA8 /* GL_READ_FRAMEBUFFER */, 0);
+    a_glPixelStorei(0x0D05, 1);
+    a_glReadPixels(0, 0, w, h, 0x1908 /* GL_RGBA */, 0x1401 /* GL_UNSIGNED_BYTE */, rgba);
+    a_glPixelStorei(0x0D05, old_pack);
+    a_glBindFramebuffer(0x8CA8, (unsigned)old_fb);
     char path[700], final_path[700] = "";
     if (E.latest_only) {
         snprintf(final_path, sizeof(final_path), "%s/latest.bmp", E.frame_dir);
@@ -560,10 +415,16 @@ static void tex_swap(EGLDisplay d, EGLSurface s, void *win)
     size_t need = (size_t)w * h * 4;
     if (need > cap) { free(buf); buf = malloc(need); cap = buf ? need : 0; }
     if (!buf) return;
-    read_pixels_fbo0(buf, w, h);
+    int old_fb = 0, old_pack = 0;
+    a_glGetIntegerv(0x8CAA /* GL_READ_FRAMEBUFFER_BINDING */, &old_fb);
+    a_glGetIntegerv(0x0D05 /* GL_PACK_ALIGNMENT */, &old_pack);
+    a_glBindFramebuffer(0x8CA8 /* GL_READ_FRAMEBUFFER */, 0);
+    a_glPixelStorei(0x0D05, 1);
+    a_glReadPixels(0, 0, w, h, 0x1908 /* GL_RGBA */, 0x1401 /* GL_UNSIGNED_BYTE */, buf);
+    a_glPixelStorei(0x0D05, old_pack);
+    a_glBindFramebuffer(0x8CA8, (unsigned)old_fb);
     tl_nwindow_post(win, buf, w, h, true);
 }
-
 static EGLBoolean w_eglSwapBuffers(EGLDisplay d, EGLSurface s)
 {
     void *texwin = tex_window_of(s);
@@ -573,11 +434,7 @@ static EGLBoolean w_eglSwapBuffers(EGLDisplay d, EGLSurface s)
         EGLint w = 0, h = 0;
         const uint8_t *px = read_back(d, s, &w, &h);
         if (px && tl_javaapp_app_pixels) tl_javaapp_app_pixels(px, w, h);
-        if (n <= 3 || n % 600 == 0) {
-            unsigned err = gl_proc_get_error();
-            if (err) tl_log_line("gl: swap #%lu (composited) GL error: %#x", n, err);
-            else tl_log_line("egl: swap #%lu (composited)", n);
-        }
+        if (n <= 3 || n % 600 == 0) tl_log_line("egl: swap #%lu (composited)", n);
         return EGL_TRUE;
     }
     if (n <= 3 || n % 600 == 0) {
@@ -619,306 +476,18 @@ static void (*r_glBlitFramebuffer)(int, int, int, int, int, int, int, int, unsig
 static void w_glBlitFramebuffer(int a0, int a1, int a2, int a3, int a4, int a5, int a6, int a7, uint64_t mask, uint64_t filter)
 { r_glBlitFramebuffer(a0, a1, a2, a3, a4, a5, a6, a7, (unsigned)mask, (unsigned)filter); }
 
-static void (*r_glTexImage3D)(unsigned, int, int, int, int, int, int, unsigned, unsigned, const void *);
-static void w_glTexImage3D(unsigned target, int level, int internalformat, int width, int height, int depth, int border, unsigned format, uint64_t type, const void *pixels)
-{
-    if (!r_glTexImage3D) r_glTexImage3D = gl_proc("glTexImage3D");
-    if (r_glTexImage3D) r_glTexImage3D(target, level, internalformat, width, height, depth, border, format, (unsigned)type, pixels);
-    tl_log_line("gl: glTexImage3D(target %#x, lvl %d, intfmt %#x, %dx%dx%d, fmt %#x, type %#x) -> err %#x",
-                target, level, internalformat, width, height, depth, format, (unsigned)type, gl_proc_get_error());
-}
-
-static void (*r_glCompressedTexImage3D)(unsigned, int, unsigned, int, int, int, int, int, const void *);
-static void w_glCompressedTexImage3D(unsigned target, int level, unsigned internalformat, int width, int height, int depth, int border, int imageSize, const void *data)
-{
-    if (!r_glCompressedTexImage3D) r_glCompressedTexImage3D = gl_proc("glCompressedTexImage3D");
-    if (r_glCompressedTexImage3D) r_glCompressedTexImage3D(target, level, internalformat, width, height, depth, border, imageSize, data);
-    tl_log_line("gl: glCompressedTexImage3D(target %#x, lvl %d, intfmt %#x, %dx%dx%d, sz %d) -> err %#x",
-                target, level, internalformat, width, height, depth, imageSize, gl_proc_get_error());
-}
-
 static void (*r_glTexSubImage3D)(unsigned, int, int, int, int, int, int, int, unsigned, unsigned, const void *);
-static void (*r_glTexStorage3D)(unsigned, int, unsigned, int, int, int);
-static void w_glTexStorage3D(unsigned target, int levels, unsigned internalformat, int width, int height, int depth)
-{
-    if (!r_glTexStorage3D) r_glTexStorage3D = gl_proc("glTexStorage3D");
-    if (!r_glTexStorage3D) return;
-    while (gl_proc_get_error());
-    r_glTexStorage3D(target, levels, internalformat, width, height, depth);
-    unsigned err = gl_proc_get_error();
-    if (err != 0 && internalformat == 0x8C41 /* GL_SRGB8 */) {
-        while (gl_proc_get_error());
-        r_glTexStorage3D(target, levels, 0x8C43 /* GL_SRGB8_ALPHA8 */, width, height, depth);
-        err = gl_proc_get_error();
-        tl_log_line("gl: glTexStorage3D fallback intfmt 0x8C41 -> 0x8C43: err %#x", err);
-    }
-    static atomic_int count;
-    if (atomic_fetch_add(&count, 1) < 20 || err != 0) {
-        tl_log_line("gl: glTexStorage3D(target %#x, lvls %d, intfmt %#x, %dx%dx%d) -> err %#x",
-                    target, levels, internalformat, width, height, depth, err);
-    }
-}
-
-static void (*r_glBindTexture)(unsigned, unsigned);
-static void w_glBindTexture(unsigned target, unsigned texture)
-{
-    if (!r_glBindTexture) r_glBindTexture = gl_proc("glBindTexture");
-    if (r_glBindTexture) r_glBindTexture(target, texture);
-    static atomic_int count_3d;
-    if (target == 0x8C1A /* GL_TEXTURE_2D_ARRAY */ || target == 0x806F /* GL_TEXTURE_3D */) {
-        if (atomic_fetch_add(&count_3d, 1) < 50)
-            tl_log_line("gl: glBindTexture(target %#x, tex %u)", target, texture);
-    }
-}
-
 static void w_glTexSubImage3D(unsigned t, int l, int x, int y, int z, int w, int h, int d, uint64_t fmt, uint64_t type, const void *px)
-{
-    if (!r_glTexSubImage3D) r_glTexSubImage3D = gl_proc("glTexSubImage3D");
-    if (r_glTexSubImage3D) r_glTexSubImage3D(t, l, x, y, z, w, h, d, (unsigned)fmt, (unsigned)type, px);
-    static atomic_int count;
-    if (atomic_fetch_add(&count, 1) < 50)
-        tl_log_line("gl: glTexSubImage3D(target %#x, lvl %d, off %d,%d,%d, %dx%dx%d, fmt %#x, type %#x) -> err %#x",
-                    t, l, x, y, z, w, h, d, (unsigned)fmt, (unsigned)type, gl_proc_get_error());
-}
+{ r_glTexSubImage3D(t, l, x, y, z, w, h, d, (unsigned)fmt, (unsigned)type, px); }
 
 static void (*r_glCompressedTexSubImage3D)(unsigned, int, int, int, int, int, int, int, unsigned, int, const void *);
 static void w_glCompressedTexSubImage3D(unsigned t, int l, int x, int y, int z, int w, int h, int d, uint64_t fmt, uint64_t size, const void *data)
-{
-    if (!r_glCompressedTexSubImage3D) r_glCompressedTexSubImage3D = gl_proc("glCompressedTexSubImage3D");
-    if (r_glCompressedTexSubImage3D) r_glCompressedTexSubImage3D(t, l, x, y, z, w, h, d, (unsigned)fmt, (int)size, data);
-    static atomic_int count;
-    if (atomic_fetch_add(&count, 1) < 50)
-        tl_log_line("gl: glCompressedTexSubImage3D(target %#x, lvl %d, off %d,%d,%d, %dx%dx%d, fmt %#x, sz %d) -> err %#x",
-                    t, l, x, y, z, w, h, d, (unsigned)fmt, (int)size, gl_proc_get_error());
-}
-
-static void (*r_glCopyTexSubImage3D)(unsigned, int, int, int, int, int, int, int, int);
-static void w_glCopyTexSubImage3D(unsigned target, int level, int xoffset, int yoffset, int zoffset, int x, int y, int width, uint64_t height)
-{
-    if (!r_glCopyTexSubImage3D) r_glCopyTexSubImage3D = gl_proc("glCopyTexSubImage3D");
-    if (r_glCopyTexSubImage3D) r_glCopyTexSubImage3D(target, level, xoffset, yoffset, zoffset, x, y, width, (int)height);
-    static atomic_int count;
-    if (atomic_fetch_add(&count, 1) < 20) {
-        tl_log_line("gl: glCopyTexSubImage3D(target %#x, lvl %d, off %d,%d,%d, src %d,%d, %dx%d) -> err %#x",
-                    target, level, xoffset, yoffset, zoffset, x, y, width, (int)height, gl_proc_get_error());
-    }
-}
-
-static void gles_copy_image_sub_data_fallback(
-    unsigned srcName, unsigned srcTarget, int srcLevel, int srcX, int srcY, int srcZ,
-    unsigned dstName, unsigned dstTarget, int dstLevel, int dstX, int dstY, int dstZ,
-    int width, int height, int depth)
-{
-    static void (*bind_fb)(unsigned, unsigned);
-    static void (*gen_fb)(int, unsigned *);
-    static void (*fb_tex2d)(unsigned, unsigned, unsigned, unsigned, int);
-    static void (*fb_tex_layer)(unsigned, unsigned, unsigned, int, int);
-    static void (*fb_rb)(unsigned, unsigned, unsigned, unsigned);
-    static void (*bind_tex)(unsigned, unsigned);
-    static void (*copy_sub2d)(unsigned, int, int, int, int, int, int, int);
-    static void (*copy_sub3d)(unsigned, int, int, int, int, int, int, int, int);
-    static void (*blit_fb)(int, int, int, int, int, int, int, int, unsigned, unsigned);
-    static unsigned (*check_fb)(unsigned);
-    static unsigned char (*is_en)(unsigned);
-    static void (*fn_en)(unsigned);
-    static void (*fn_dis)(unsigned);
-
-    if (!bind_fb) {
-        bind_fb = gl_proc("glBindFramebuffer");
-        gen_fb = gl_proc("glGenFramebuffers");
-        fb_tex2d = gl_proc("glFramebufferTexture2D");
-        fb_tex_layer = gl_proc("glFramebufferTextureLayer");
-        fb_rb = gl_proc("glFramebufferRenderbuffer");
-        bind_tex = gl_proc("glBindTexture");
-        copy_sub2d = gl_proc("glCopyTexSubImage2D");
-        copy_sub3d = gl_proc("glCopyTexSubImage3D");
-        if (!copy_sub3d) copy_sub3d = gl_proc("glCopyTexSubImage3DEXT");
-        if (!copy_sub3d) copy_sub3d = gl_proc("glCopyTexSubImage3DOES");
-        blit_fb = gl_proc("glBlitFramebuffer");
-        check_fb = gl_proc("glCheckFramebufferStatus");
-        is_en = gl_proc("glIsEnabled");
-        fn_en = gl_proc("glEnable");
-        fn_dis = gl_proc("glDisable");
-    }
-
-    if (!bind_fb || !gen_fb || !fb_tex2d || !bind_tex || !copy_sub2d) {
-        tl_log_line("gl: copy_image fallback unavailable (missing GL entry points)");
-        return;
-    }
-
-    static unsigned s_copy_fbo_src = 0;
-    static pthread_mutex_t s_copy_mu = PTHREAD_MUTEX_INITIALIZER;
-
-    pthread_mutex_lock(&s_copy_mu);
-
-    if (s_copy_fbo_src == 0) {
-        gen_fb(1, &s_copy_fbo_src);
-    }
-
-    int prev_read_fb = 0;
-    a_glGetIntegerv(0x8CAA /* GL_READ_FRAMEBUFFER_BINDING */, &prev_read_fb);
-
-    int scissor_en = is_en ? is_en(0x0C11 /* GL_SCISSOR_TEST */) : 0;
-    if (scissor_en && fn_dis) fn_dis(0x0C11);
-
-    bind_fb(0x8CA8 /* GL_READ_FRAMEBUFFER */, s_copy_fbo_src);
-
-    /* Determine destination binding target and query current texture binding to restore */
-    unsigned dst_bind_target = 0x0DE1 /* GL_TEXTURE_2D */;
-    unsigned dst_query_target = 0x8069 /* GL_TEXTURE_BINDING_2D */;
-    bool dst_is_3d = false;
-
-    if (dstTarget == 0x8C1A /* GL_TEXTURE_2D_ARRAY */) {
-        dst_bind_target = 0x8C1A;
-        dst_query_target = 0x8C1D /* GL_TEXTURE_BINDING_2D_ARRAY */;
-        dst_is_3d = true;
-    } else if (dstTarget == 0x806F /* GL_TEXTURE_3D */) {
-        dst_bind_target = 0x806F;
-        dst_query_target = 0x806A /* GL_TEXTURE_BINDING_3D */;
-        dst_is_3d = true;
-    } else if (dstTarget == 0x8513 /* GL_TEXTURE_CUBE_MAP */ || (dstTarget >= 0x8515 && dstTarget <= 0x851A)) {
-        dst_bind_target = 0x8513 /* GL_TEXTURE_CUBE_MAP */;
-        dst_query_target = 0x8514 /* GL_TEXTURE_BINDING_CUBE_MAP */;
-    }
-
-    int prev_tex_binding = 0;
-    a_glGetIntegerv(dst_query_target, &prev_tex_binding);
-    bind_tex(dst_bind_target, dstName);
-
-    for (int slice = 0; slice < depth; slice++) {
-        /* Attach source slice to READ_FRAMEBUFFER */
-        if (srcTarget == 0x0DE1 /* GL_TEXTURE_2D */) {
-            fb_tex2d(0x8CA8, 0x8CE0 /* GL_COLOR_ATTACHMENT0 */, 0x0DE1, srcName, srcLevel);
-        } else if (srcTarget == 0x8C1A /* GL_TEXTURE_2D_ARRAY */ || srcTarget == 0x806F /* GL_TEXTURE_3D */) {
-            if (fb_tex_layer) {
-                fb_tex_layer(0x8CA8, 0x8CE0, srcName, srcLevel, srcZ + slice);
-            }
-        } else if (srcTarget >= 0x8515 && srcTarget <= 0x851A) {
-            fb_tex2d(0x8CA8, 0x8CE0, srcTarget, srcName, srcLevel);
-        } else if (srcTarget == 0x8513 /* GL_TEXTURE_CUBE_MAP */) {
-            fb_tex2d(0x8CA8, 0x8CE0, 0x8515 + (unsigned)(srcZ + slice), srcName, srcLevel);
-        } else if (srcTarget == 0x8D41 /* GL_RENDERBUFFER */ && fb_rb) {
-            fb_rb(0x8CA8, 0x8CE0, 0x8D41, srcName);
-        }
-
-        /* Check framebuffer completeness */
-        if (check_fb && check_fb(0x8CA8) != 0x8CD5 /* GL_FRAMEBUFFER_COMPLETE */) {
-            /* If color attachment is incomplete (e.g. depth texture), try fallback to depth blit */
-            if (blit_fb) {
-                static unsigned s_copy_fbo_dst = 0;
-                if (!s_copy_fbo_dst) gen_fb(1, &s_copy_fbo_dst);
-                int prev_draw_fb = 0;
-                a_glGetIntegerv(0x8CA6 /* GL_DRAW_FRAMEBUFFER_BINDING */, &prev_draw_fb);
-                bind_fb(0x8CA9 /* GL_DRAW_FRAMEBUFFER */, s_copy_fbo_dst);
-
-                fb_tex2d(0x8CA8, 0x8CE0, 0x0DE1, 0, 0);
-                if (srcTarget == 0x0DE1) fb_tex2d(0x8CA8, 0x8D00 /* GL_DEPTH_ATTACHMENT */, 0x0DE1, srcName, srcLevel);
-                else if (fb_tex_layer && (srcTarget == 0x8C1A || srcTarget == 0x806F)) fb_tex_layer(0x8CA8, 0x8D00, srcName, srcLevel, srcZ + slice);
-
-                if (dstTarget == 0x0DE1) fb_tex2d(0x8CA9, 0x8D00, 0x0DE1, dstName, dstLevel);
-                else if (fb_tex_layer && (dstTarget == 0x8C1A || dstTarget == 0x806F)) fb_tex_layer(0x8CA9, 0x8D00, dstName, dstLevel, dstZ + slice);
-
-                blit_fb(srcX, srcY, srcX + width, srcY + height,
-                        dstX, dstY, dstX + width, dstY + height,
-                        0x0100 /* GL_DEPTH_BUFFER_BIT */, 0x2600 /* GL_NEAREST */);
-
-                fb_tex2d(0x8CA8, 0x8D00, 0x0DE1, 0, 0);
-                fb_tex2d(0x8CA9, 0x8D00, 0x0DE1, 0, 0);
-                bind_fb(0x8CA9, (unsigned)prev_draw_fb);
-            }
-            continue;
-        }
-
-        /* Perform copy from READ_FRAMEBUFFER directly into destination texture */
-        if (dst_is_3d && copy_sub3d) {
-            copy_sub3d(dst_bind_target, dstLevel, dstX, dstY, dstZ + slice, srcX, srcY, width, height);
-        } else if (dstTarget == 0x8513 /* GL_TEXTURE_CUBE_MAP */) {
-            copy_sub2d(0x8515 + (unsigned)(dstZ + slice), dstLevel, dstX, dstY, srcX, srcY, width, height);
-        } else if (dstTarget >= 0x8515 && dstTarget <= 0x851A) {
-            copy_sub2d(dstTarget, dstLevel, dstX, dstY, srcX, srcY, width, height);
-        } else {
-            copy_sub2d(0x0DE1 /* GL_TEXTURE_2D */, dstLevel, dstX, dstY, srcX, srcY, width, height);
-        }
-    }
-
-    /* Detach source attachment */
-    fb_tex2d(0x8CA8, 0x8CE0, 0x0DE1, 0, 0);
-
-    /* Restore bindings and state */
-    bind_tex(dst_bind_target, (unsigned)prev_tex_binding);
-    bind_fb(0x8CA8, (unsigned)prev_read_fb);
-
-    if (scissor_en && fn_en) fn_en(0x0C11);
-
-    /* Clear any latched errors from fallback probe */
-    while (gl_proc_get_error());
-
-    pthread_mutex_unlock(&s_copy_mu);
-}
+{ r_glCompressedTexSubImage3D(t, l, x, y, z, w, h, d, (unsigned)fmt, (int)size, data); }
 
 static void (*r_glCopyImageSubData)(unsigned, unsigned, int, int, int, int, unsigned, unsigned, int, int, int, int, int, int, int);
 static void w_glCopyImageSubData(unsigned sn, unsigned st, int sl, int sx, int sy, int sz, unsigned dn, unsigned dt,
                                  uint64_t dl, uint64_t dx, uint64_t dy, uint64_t dz, uint64_t w, uint64_t h, uint64_t d)
-{
-    static atomic_int count;
-    int c = atomic_fetch_add(&count, 1);
-    if (c < 30 || (c % 100 == 0)) {
-        tl_log_line("gl: glCopyImageSubData(src %u [%#x] lvl %d (%d,%d,%d) -> dst %u [%#x] lvl %d (%d,%d,%d), %dx%dx%d)",
-                    sn, st, sl, sx, sy, sz, dn, dt, (int)dl, (int)dx, (int)dy, (int)dz, (int)w, (int)h, (int)d);
-    }
-
-    if (!r_glCopyImageSubData) {
-        r_glCopyImageSubData = gl_proc("glCopyImageSubData");
-        if (!r_glCopyImageSubData) r_glCopyImageSubData = gl_proc("glCopyImageSubDataEXT");
-        if (!r_glCopyImageSubData) r_glCopyImageSubData = gl_proc("glCopyImageSubDataOES");
-    }
-
-    if (r_glCopyImageSubData) {
-        while (gl_proc_get_error());
-        r_glCopyImageSubData(sn, st, sl, sx, sy, sz, dn, dt, (int)dl, (int)dx, (int)dy, (int)dz, (int)w, (int)h, (int)d);
-        unsigned err = gl_proc_get_error();
-        if (err == 0) return;
-        if (c < 10) tl_log_line("gl: host glCopyImageSubData returned err %#x, running copy fallback", err);
-    }
-    gles_copy_image_sub_data_fallback(sn, st, sl, sx, sy, sz, dn, dt, (int)dl, (int)dx, (int)dy, (int)dz, (int)w, (int)h, (int)d);
-}
-
-/* Clean GLenum and state parameters from AAPCS64 callers to Darwin ARM64 */
-static void (*r_glBlendFunc)(unsigned, unsigned);
-static void w_glBlendFunc(unsigned s, unsigned d) {
-    if (!r_glBlendFunc) r_glBlendFunc = gl_proc("glBlendFunc");
-    if (r_glBlendFunc) r_glBlendFunc(s, d);
-}
-
-static void (*r_glBlendFuncSeparate)(unsigned, unsigned, unsigned, unsigned);
-static void w_glBlendFuncSeparate(unsigned sr, unsigned dr, unsigned sa, unsigned da) {
-    if (!r_glBlendFuncSeparate) r_glBlendFuncSeparate = gl_proc("glBlendFuncSeparate");
-    if (r_glBlendFuncSeparate) r_glBlendFuncSeparate(sr, dr, sa, da);
-}
-
-static void (*r_glBlendEquation)(unsigned);
-static void w_glBlendEquation(unsigned m) {
-    if (!r_glBlendEquation) r_glBlendEquation = gl_proc("glBlendEquation");
-    if (r_glBlendEquation) r_glBlendEquation(m);
-}
-
-static void (*r_glBlendEquationSeparate)(unsigned, unsigned);
-static void w_glBlendEquationSeparate(unsigned mr, unsigned ma) {
-    if (!r_glBlendEquationSeparate) r_glBlendEquationSeparate = gl_proc("glBlendEquationSeparate");
-    if (r_glBlendEquationSeparate) r_glBlendEquationSeparate(mr, ma);
-}
-
-static void (*r_glEnable)(unsigned);
-static void w_glEnable(unsigned c) {
-    if (!r_glEnable) r_glEnable = gl_proc("glEnable");
-    if (r_glEnable) r_glEnable(c);
-}
-
-static void (*r_glDisable)(unsigned);
-static void w_glDisable(unsigned c) {
-    if (!r_glDisable) r_glDisable = gl_proc("glDisable");
-    if (r_glDisable) r_glDisable(c);
-}
+{ r_glCopyImageSubData(sn, st, sl, sx, sy, sz, dn, dt, (int)dl, (int)dx, (int)dy, (int)dz, (int)w, (int)h, (int)d); }
 
 /* GLboolean arguments: AAPCS64 callers do not extend them, Apple's callee may assume they are. */
 static void (*r_glColorMask)(unsigned, unsigned, unsigned, unsigned);
@@ -933,412 +502,8 @@ static void (*r_glUniformMatrix3fv)(int, int, unsigned, const float *);
 static void w_glUniformMatrix3fv(int l, int c, unsigned t, const float *v) { r_glUniformMatrix3fv(l, c, t & 0xff, v); }
 static void (*r_glUniformMatrix4fv)(int, int, unsigned, const float *);
 static void w_glUniformMatrix4fv(int l, int c, unsigned t, const float *v) { r_glUniformMatrix4fv(l, c, t & 0xff, v); }
-static void (*r_glUniformMatrix2x3fv)(int, int, unsigned, const float *);
-static void w_glUniformMatrix2x3fv(int l, int c, unsigned t, const float *v) { r_glUniformMatrix2x3fv(l, c, t & 0xff, v); }
-static void (*r_glUniformMatrix3x2fv)(int, int, unsigned, const float *);
-static void w_glUniformMatrix3x2fv(int l, int c, unsigned t, const float *v) { r_glUniformMatrix3x2fv(l, c, t & 0xff, v); }
-static void (*r_glUniformMatrix2x4fv)(int, int, unsigned, const float *);
-static void w_glUniformMatrix2x4fv(int l, int c, unsigned t, const float *v) { r_glUniformMatrix2x4fv(l, c, t & 0xff, v); }
-static void (*r_glUniformMatrix4x2fv)(int, int, unsigned, const float *);
-static void w_glUniformMatrix4x2fv(int l, int c, unsigned t, const float *v) { r_glUniformMatrix4x2fv(l, c, t & 0xff, v); }
-static void (*r_glUniformMatrix3x4fv)(int, int, unsigned, const float *);
-static void w_glUniformMatrix3x4fv(int l, int c, unsigned t, const float *v) { r_glUniformMatrix3x4fv(l, c, t & 0xff, v); }
-static void (*r_glUniformMatrix4x3fv)(int, int, unsigned, const float *);
-static void w_glUniformMatrix4x3fv(int l, int c, unsigned t, const float *v) { r_glUniformMatrix4x3fv(l, c, t & 0xff, v); }
 static void (*r_glSampleCoverage)(float, unsigned);
 static void w_glSampleCoverage(float v, unsigned i) { r_glSampleCoverage(v, i & 0xff); }
-
-static void (*r_glTexImage2D)(unsigned, int, int, int, int, int, unsigned, unsigned, const void *);
-static void w_glTexImage2D(unsigned target, int level, int internalformat, int width, int height, int border, unsigned format, unsigned type, const void *pixels)
-{
-    if (!r_glTexImage2D) r_glTexImage2D = gl_proc("glTexImage2D");
-    if (!r_glTexImage2D) return;
-
-    int cur_tex = 0;
-    a_glGetIntegerv(0x8069 /* GL_TEXTURE_BINDING_2D */, &cur_tex);
-
-    while (gl_proc_get_error());
-    r_glTexImage2D(target, level, internalformat, width, height, border, format, type, pixels);
-    unsigned err = gl_proc_get_error();
-    if (err != 0 && (unsigned)internalformat == 0x8C41 /* GL_SRGB8 */) {
-        while (gl_proc_get_error());
-        r_glTexImage2D(target, level, 0x8C43 /* GL_SRGB8_ALPHA8 */, width, height, border, format, type, pixels);
-        err = gl_proc_get_error();
-        tl_log_line("gl: glTexImage2D fallback intfmt 0x8C41 -> 0x8C43: err %#x", err);
-    }
-
-    static atomic_int count;
-    int c = atomic_fetch_add(&count, 1);
-    if (c < 30 || (c % 100 == 0) || (unsigned)internalformat == 0x8229 || format == 0x1903 || width >= 512 || height >= 512 || err != 0) {
-        tl_log_line("gl: glTexImage2D(target %#x, tex %d, lvl %d, intfmt %#x, %dx%d, fmt %#x, type %#x, pix %p) -> err %#x",
-                    target, cur_tex, level, internalformat, width, height, format, type, pixels, err);
-    }
-}
-
-static void (*r_glTexStorage2D)(unsigned, int, unsigned, int, int);
-static void w_glTexStorage2D(unsigned target, int levels, unsigned internalformat, int width, int height)
-{
-    if (!r_glTexStorage2D) r_glTexStorage2D = gl_proc("glTexStorage2D");
-    if (!r_glTexStorage2D) return;
-
-    int cur_tex = 0;
-    a_glGetIntegerv(0x8069 /* GL_TEXTURE_BINDING_2D */, &cur_tex);
-
-    while (gl_proc_get_error());
-    r_glTexStorage2D(target, levels, internalformat, width, height);
-    unsigned err = gl_proc_get_error();
-    if (err != 0 && internalformat == 0x8C41 /* GL_SRGB8 */) {
-        while (gl_proc_get_error());
-        r_glTexStorage2D(target, levels, 0x8C43 /* GL_SRGB8_ALPHA8 */, width, height);
-        err = gl_proc_get_error();
-        tl_log_line("gl: glTexStorage2D fallback intfmt 0x8C41 -> 0x8C43: err %#x", err);
-    } else if (err != 0 && internalformat == 0x1908 /* GL_RGBA un-sized */) {
-        while (gl_proc_get_error());
-        r_glTexStorage2D(target, levels, 0x8058 /* GL_RGBA8 */, width, height);
-        err = gl_proc_get_error();
-    } else if (err != 0 && internalformat == 0x1907 /* GL_RGB un-sized */) {
-        while (gl_proc_get_error());
-        r_glTexStorage2D(target, levels, 0x8051 /* GL_RGB8 */, width, height);
-        err = gl_proc_get_error();
-    }
-
-    static atomic_int count;
-    int c = atomic_fetch_add(&count, 1);
-    if (c < 30 || (c % 100 == 0) || internalformat == 0x8229 /* GL_R8 */ || width >= 512 || height >= 512 || err != 0) {
-        tl_log_line("gl: glTexStorage2D(target %#x, tex %d, lvls %d, intfmt %#x, %dx%d) -> err %#x",
-                    target, cur_tex, levels, internalformat, width, height, err);
-    }
-}
-
-static void (*r_glTexSubImage2D)(unsigned, int, int, int, int, int, unsigned, unsigned, const void *);
-static void w_glTexSubImage2D(unsigned target, int level, int xoffset, int yoffset, int width, int height, unsigned format, unsigned type, const void *pixels)
-{
-    int cur_tex = 0;
-    a_glGetIntegerv(0x8069 /* GL_TEXTURE_BINDING_2D */, &cur_tex);
-
-    while (gl_proc_get_error());
-    r_glTexSubImage2D(target, level, xoffset, yoffset, width, height, format, type, pixels);
-    unsigned err = gl_proc_get_error();
-
-    static atomic_int count;
-    int c = atomic_fetch_add(&count, 1);
-    if (c < 30 || (c % 100 == 0) || format == 0x1903 /* GL_RED */ || width >= 512 || height >= 512 || err != 0) {
-        tl_log_line("gl: glTexSubImage2D(target %#x, tex %d, lvl %d, %dx%d, fmt %#x, type %#x, pix %p) -> err %#x",
-                    target, cur_tex, level, width, height, format, type, pixels, err);
-    }
-}
-
-static void (*r_glCompressedTexImage2D)(unsigned, int, unsigned, int, int, int, int, const void *);
-static void w_glCompressedTexImage2D(unsigned target, int level, unsigned internalformat, int width, int height, int border, int size, const void *data)
-{
-    r_glCompressedTexImage2D(target, level, internalformat, width, height, border, size, data);
-    static atomic_int count;
-    int c = atomic_fetch_add(&count, 1);
-    if (c < 50 || (c % 100 == 0)) {
-        unsigned err = gl_proc_get_error();
-        tl_log_line("gl: glCompressedTexImage2D(target %#x, lvl %d, intfmt %#x, %dx%d, sz %d) -> err %#x", target, level, internalformat, width, height, size, err);
-    }
-}
-
-static void (*r_glCompressedTexSubImage2D)(unsigned, int, int, int, int, int, unsigned, int, const void *);
-static void w_glCompressedTexSubImage2D(unsigned target, int level, int xoffset, int yoffset, int width, int height, unsigned format, int imageSize, const void *data)
-{
-    r_glCompressedTexSubImage2D(target, level, xoffset, yoffset, width, height, format, imageSize, data);
-    static atomic_int count;
-    int c = atomic_fetch_add(&count, 1);
-    if (c < 50 || (c % 100 == 0)) {
-        unsigned err = gl_proc_get_error();
-        tl_log_line("gl: glCompressedTexSubImage2D(target %#x, lvl %d, %dx%d, fmt %#x, sz %d) -> err %#x", target, level, width, height, format, imageSize, err);
-    }
-}
-
-static void dump_program_info(unsigned program)
-{
-    void (*get_prog_iv)(unsigned, unsigned, int *) = gl_proc("glGetProgramiv");
-    void (*get_attrib)(unsigned, unsigned, int, int *, int *, unsigned *, char *) = gl_proc("glGetActiveAttrib");
-    void (*get_uniform)(unsigned, unsigned, int, int *, int *, unsigned *, char *) = gl_proc("glGetActiveUniform");
-    int (*get_attrib_loc)(unsigned, const char *) = gl_proc("glGetAttribLocation");
-    int (*get_uniform_loc)(unsigned, const char *) = gl_proc("glGetUniformLocation");
-    if (!get_prog_iv) return;
-
-    int n_attribs = 0, n_uniforms = 0, n_blocks = 0;
-    get_prog_iv(program, 0x8B89 /* GL_ACTIVE_ATTRIBUTES */, &n_attribs);
-    get_prog_iv(program, 0x8B86 /* GL_ACTIVE_UNIFORMS */, &n_uniforms);
-    get_prog_iv(program, 0x8A36 /* GL_ACTIVE_UNIFORM_BLOCKS */, &n_blocks);
-    tl_log_line("gl: prog %u info: %d attribs, %d uniforms, %d uniform blocks", program, n_attribs, n_uniforms, n_blocks);
-
-    char name[128];
-    for (int i = 0; i < n_attribs && i < 16; i++) {
-        int len = 0, sz = 0; unsigned type = 0; name[0] = 0;
-        if (get_attrib) get_attrib(program, (unsigned)i, sizeof(name), &len, &sz, &type, name);
-        int loc = get_attrib_loc ? get_attrib_loc(program, name) : -1;
-        tl_log_line("gl: prog %u attr[%d] '%s': loc %d, type %#x, sz %d", program, i, name, loc, type, sz);
-    }
-    for (int i = 0; i < n_uniforms && i < 32; i++) {
-        int len = 0, sz = 0; unsigned type = 0; name[0] = 0;
-        if (get_uniform) get_uniform(program, (unsigned)i, sizeof(name), &len, &sz, &type, name);
-        int loc = get_uniform_loc ? get_uniform_loc(program, name) : -1;
-        tl_log_line("gl: prog %u unif[%d] '%s': loc %d, type %#x, sz %d", program, i, name, loc, type, sz);
-    }
-}
-
-static void (*r_glProgramBinary)(unsigned, unsigned, const void *, int);
-static void w_glProgramBinary(unsigned program, unsigned binaryFormat, const void *binary, int length)
-{
-    if (!r_glProgramBinary) r_glProgramBinary = gl_proc("glProgramBinary");
-    while (gl_proc_get_error());
-    if (r_glProgramBinary) r_glProgramBinary(program, binaryFormat, binary, length);
-    static atomic_int count;
-    int c = atomic_fetch_add(&count, 1);
-    if (c < 40) {
-        unsigned err = gl_proc_get_error();
-        int link_ok = 0;
-        void (*get_prog_iv)(unsigned, unsigned, int *) = gl_proc("glGetProgramiv");
-        if (get_prog_iv) get_prog_iv(program, 0x8B82 /* GL_LINK_STATUS */, &link_ok);
-        tl_log_line("gl: glProgramBinary(prog %u, binFmt %#x, len %d) -> err %#x, link_status %d",
-                    program, binaryFormat, length, err, link_ok);
-        if (link_ok && program >= 20) dump_program_info(program);
-    }
-}
-
-static void (*r_glShaderBinary)(int, const unsigned *, unsigned, const void *, int);
-static void w_glShaderBinary(int count, const unsigned *shaders, unsigned binaryFormat, const void *binary, int length)
-{
-    if (!r_glShaderBinary) r_glShaderBinary = gl_proc("glShaderBinary");
-    if (r_glShaderBinary) r_glShaderBinary(count, shaders, binaryFormat, binary, length);
-    static atomic_int count_sb;
-    if (atomic_fetch_add(&count_sb, 1) < 30) {
-        unsigned err = gl_proc_get_error();
-        tl_log_line("gl: glShaderBinary(n %d, binFmt %#x, len %d) -> err %#x", count, binaryFormat, length, err);
-    }
-}
-
-static unsigned (*r_glCreateShaderProgramv)(unsigned, int, const char *const *);
-static unsigned w_glCreateShaderProgramv(unsigned type, int count, const char *const *strings)
-{
-    if (!r_glCreateShaderProgramv) r_glCreateShaderProgramv = gl_proc("glCreateShaderProgramv");
-    unsigned p = r_glCreateShaderProgramv ? r_glCreateShaderProgramv(type, count, strings) : 0;
-    static atomic_int count_sp;
-    int c = atomic_fetch_add(&count_sp, 1);
-    if (c < 20 && count > 0 && strings && strings[0]) {
-        char prev[160] = "";
-        strncpy(prev, strings[0], sizeof(prev) - 1);
-        for (char *q = prev; *q; q++) if (*q == '\n' || *q == '\r') *q = ' ';
-        tl_log_line("gl: glCreateShaderProgramv(type %#x, count %d) -> prog %u: %.150s", type, count, p, prev);
-    }
-    return p;
-}
-
-static unsigned (*r_glCreateProgram)(void);
-static unsigned w_glCreateProgram(void)
-{
-    if (!r_glCreateProgram) r_glCreateProgram = gl_proc("glCreateProgram");
-    unsigned p = r_glCreateProgram ? r_glCreateProgram() : 0;
-    static atomic_int count;
-    if (atomic_fetch_add(&count, 1) < 30) tl_log_line("gl: glCreateProgram -> %u", p);
-    return p;
-}
-
-static unsigned (*r_glCreateShader)(unsigned);
-static unsigned w_glCreateShader(unsigned type)
-{
-    if (!r_glCreateShader) r_glCreateShader = gl_proc("glCreateShader");
-    unsigned s = r_glCreateShader ? r_glCreateShader(type) : 0;
-    static atomic_int count;
-    if (atomic_fetch_add(&count, 1) < 30) tl_log_line("gl: glCreateShader(type %#x) -> %u", type, s);
-    return s;
-}
-
-static void (*r_glUniformBlockBinding)(unsigned, unsigned, unsigned);
-static void w_glUniformBlockBinding(unsigned prog, unsigned blockIndex, unsigned binding)
-{
-    static atomic_int count;
-    if (atomic_fetch_add(&count, 1) < 100)
-        tl_log_line("gl: glUniformBlockBinding(prog %u, block %u, binding %u)", prog, blockIndex, binding);
-    if (!r_glUniformBlockBinding) r_glUniformBlockBinding = gl_proc("glUniformBlockBinding");
-    if (r_glUniformBlockBinding) r_glUniformBlockBinding(prog, blockIndex, binding);
-}
-
-static void (*r_glDrawElements)(unsigned, int, unsigned, const void *);
-static void w_glDrawElements(unsigned mode, int count, unsigned type, const void *indices)
-{
-    if (!r_glDrawElements) r_glDrawElements = gl_proc("glDrawElements");
-
-    int cur_prog = 0, cur_tex = 0, cur_ibo = 0, cur_vao = 0;
-    a_glGetIntegerv(0x8B8D /* GL_CURRENT_PROGRAM */, &cur_prog);
-    a_glGetIntegerv(0x8069 /* GL_TEXTURE_BINDING_2D */, &cur_tex);
-    a_glGetIntegerv(0x8895 /* GL_ELEMENT_ARRAY_BUFFER_BINDING */, &cur_ibo);
-    a_glGetIntegerv(0x85B5 /* GL_VERTEX_ARRAY_BINDING */, &cur_vao);
-
-    while (gl_proc_get_error());
-    if (r_glDrawElements) r_glDrawElements(mode, count, type, indices);
-    unsigned err = gl_proc_get_error();
-
-    static atomic_int de_logged;
-    int c = atomic_fetch_add(&de_logged, 1);
-    if (c < 30 || err != 0 || (cur_prog >= 24 && cur_prog <= 32 && c < 200)) {
-        tl_log_line("gl: DrawElements(mode %#x, cnt %d, type %#x, idx %p, prog %d, tex %d, vao %d, ibo %d) -> err %#x",
-                    mode, count, type, indices, cur_prog, cur_tex, cur_vao, cur_ibo, err);
-    }
-}
-
-static void (*r_glDrawArrays)(unsigned, int, int);
-static void w_glDrawArrays(unsigned mode, int first, int count)
-{
-    if (!r_glDrawArrays) r_glDrawArrays = gl_proc("glDrawArrays");
-
-    int cur_prog = 0, cur_tex = 0;
-    a_glGetIntegerv(0x8B8D /* GL_CURRENT_PROGRAM */, &cur_prog);
-    a_glGetIntegerv(0x8069 /* GL_TEXTURE_BINDING_2D */, &cur_tex);
-
-    while (gl_proc_get_error());
-    if (r_glDrawArrays) r_glDrawArrays(mode, first, count);
-    unsigned err = gl_proc_get_error();
-
-    static atomic_int da_logged;
-    int c = atomic_fetch_add(&da_logged, 1);
-    if (c < 20 || err != 0 || (cur_prog >= 24 && cur_prog <= 32 && c < 100)) {
-        tl_log_line("gl: DrawArrays(mode %#x, first %d, cnt %d, prog %d, tex %d) -> err %#x",
-                    mode, first, count, cur_prog, cur_tex, err);
-    }
-}
-
-static void (*r_glDrawElementsBaseVertex)(unsigned, int, unsigned, const void *, int);
-static void (*r_glDrawRangeElementsBaseVertex)(unsigned, unsigned, unsigned, int, unsigned, const void *, int);
-static void (*r_glDrawElementsInstancedBaseVertex)(unsigned, int, unsigned, const void *, int, int);
-
-static void resolve_base_vertex_procs(void)
-{
-    static bool resolved = false;
-    if (resolved) return;
-    resolved = true;
-
-    r_glDrawElementsBaseVertex = gl_proc("glDrawElementsBaseVertex");
-    if (!r_glDrawElementsBaseVertex) r_glDrawElementsBaseVertex = gl_proc("glDrawElementsBaseVertexEXT");
-    if (!r_glDrawElementsBaseVertex) r_glDrawElementsBaseVertex = gl_proc("glDrawElementsBaseVertexOES");
-    if (!r_glDrawElementsBaseVertex) r_glDrawElementsBaseVertex = gl_proc("glDrawElementsBaseVertexANGLE");
-
-    r_glDrawRangeElementsBaseVertex = gl_proc("glDrawRangeElementsBaseVertex");
-    if (!r_glDrawRangeElementsBaseVertex) r_glDrawRangeElementsBaseVertex = gl_proc("glDrawRangeElementsBaseVertexEXT");
-    if (!r_glDrawRangeElementsBaseVertex) r_glDrawRangeElementsBaseVertex = gl_proc("glDrawRangeElementsBaseVertexOES");
-    if (!r_glDrawRangeElementsBaseVertex) r_glDrawRangeElementsBaseVertex = gl_proc("glDrawRangeElementsBaseVertexANGLE");
-
-    r_glDrawElementsInstancedBaseVertex = gl_proc("glDrawElementsInstancedBaseVertex");
-    if (!r_glDrawElementsInstancedBaseVertex) r_glDrawElementsInstancedBaseVertex = gl_proc("glDrawElementsInstancedBaseVertexEXT");
-    if (!r_glDrawElementsInstancedBaseVertex) r_glDrawElementsInstancedBaseVertex = gl_proc("glDrawElementsInstancedBaseVertexOES");
-    if (!r_glDrawElementsInstancedBaseVertex) r_glDrawElementsInstancedBaseVertex = gl_proc("glDrawElementsInstancedBaseVertexANGLE");
-
-    tl_log_line("gl: resolve_base_vertex: bv=%p (ext=%p, oes=%p, angle=%p), inst_bv=%p (ext=%p, oes=%p, angle=%p)",
-                r_glDrawElementsBaseVertex,
-                gl_proc("glDrawElementsBaseVertexEXT"),
-                gl_proc("glDrawElementsBaseVertexOES"),
-                gl_proc("glDrawElementsBaseVertexANGLE"),
-                r_glDrawElementsInstancedBaseVertex,
-                gl_proc("glDrawElementsInstancedBaseVertexEXT"),
-                gl_proc("glDrawElementsInstancedBaseVertexOES"),
-                gl_proc("glDrawElementsInstancedBaseVertexANGLE"));
-}
-
-static void w_glDrawElementsBaseVertex(unsigned mode, int count, unsigned type, const void *indices, int basevertex)
-{
-    resolve_base_vertex_procs();
-
-    int cur_prog = 0, cur_tex = 0, cur_ibo = 0, cur_vao = 0;
-    a_glGetIntegerv(0x8B8D /* GL_CURRENT_PROGRAM */, &cur_prog);
-    a_glGetIntegerv(0x8069 /* GL_TEXTURE_BINDING_2D */, &cur_tex);
-    a_glGetIntegerv(0x8895 /* GL_ELEMENT_ARRAY_BUFFER_BINDING */, &cur_ibo);
-    a_glGetIntegerv(0x85B5 /* GL_VERTEX_ARRAY_BINDING */, &cur_vao);
-
-    while (gl_proc_get_error());
-
-    if (basevertex == 0) {
-        if (!r_glDrawElements) r_glDrawElements = gl_proc("glDrawElements");
-        if (r_glDrawElements) r_glDrawElements(mode, count, type, indices);
-    } else if (r_glDrawElementsBaseVertex) {
-        r_glDrawElementsBaseVertex(mode, count, type, indices, basevertex);
-    } else if (r_glDrawElementsInstancedBaseVertex) {
-        r_glDrawElementsInstancedBaseVertex(mode, count, type, indices, 1, basevertex);
-    } else {
-        static int warned = 0;
-        if (!warned++) tl_log_line("gl: glDrawElementsBaseVertex called with basevertex %d but no driver base vertex proc available", basevertex);
-    }
-
-    unsigned err = gl_proc_get_error();
-    static atomic_int bv_logged;
-    int c = atomic_fetch_add(&bv_logged, 1);
-    if (c < 40 || err != 0 || (cur_prog >= 24 && cur_prog <= 32 && c < 200)) {
-        tl_log_line("gl: DrawElementsBaseVertex(mode %#x, cnt %d, type %#x, idx %p, bv %d, prog %d, tex %d, vao %d, ibo %d) -> err %#x",
-                    mode, count, type, indices, basevertex, cur_prog, cur_tex, cur_vao, cur_ibo, err);
-    }
-}
-
-static void w_glDrawRangeElementsBaseVertex(unsigned mode, unsigned start, unsigned end, int count, unsigned type, const void *indices, int basevertex)
-{
-    (void)start; (void)end;
-    resolve_base_vertex_procs();
-
-    int cur_prog = 0, cur_tex = 0, cur_ibo = 0, cur_vao = 0;
-    a_glGetIntegerv(0x8B8D /* GL_CURRENT_PROGRAM */, &cur_prog);
-    a_glGetIntegerv(0x8069 /* GL_TEXTURE_BINDING_2D */, &cur_tex);
-    a_glGetIntegerv(0x8895 /* GL_ELEMENT_ARRAY_BUFFER_BINDING */, &cur_ibo);
-    a_glGetIntegerv(0x85B5 /* GL_VERTEX_ARRAY_BINDING */, &cur_vao);
-
-    while (gl_proc_get_error());
-
-    if (basevertex == 0) {
-        if (!r_glDrawElements) r_glDrawElements = gl_proc("glDrawElements");
-        if (r_glDrawElements) r_glDrawElements(mode, count, type, indices);
-    } else if (r_glDrawRangeElementsBaseVertex) {
-        r_glDrawRangeElementsBaseVertex(mode, start, end, count, type, indices, basevertex);
-    } else if (r_glDrawElementsBaseVertex) {
-        r_glDrawElementsBaseVertex(mode, count, type, indices, basevertex);
-    } else if (r_glDrawElementsInstancedBaseVertex) {
-        r_glDrawElementsInstancedBaseVertex(mode, count, type, indices, 1, basevertex);
-    } else {
-        static int warned = 0;
-        if (!warned++) tl_log_line("gl: glDrawRangeElementsBaseVertex called with basevertex %d but no driver base vertex proc available", basevertex);
-    }
-
-    unsigned err = gl_proc_get_error();
-    static atomic_int rbv_logged;
-    int c = atomic_fetch_add(&rbv_logged, 1);
-    if (c < 30 || err != 0 || (cur_prog >= 24 && cur_prog <= 32 && c < 150)) {
-        tl_log_line("gl: DrawRangeElementsBaseVertex(mode %#x, cnt %d, type %#x, idx %p, bv %d, prog %d, tex %d, vao %d, ibo %d) -> err %#x",
-                    mode, count, type, indices, basevertex, cur_prog, cur_tex, cur_vao, cur_ibo, err);
-    }
-}
-
-static void w_glDrawElementsInstancedBaseVertex(unsigned mode, int count, unsigned type, const void *indices, int instancecount, int basevertex)
-{
-    resolve_base_vertex_procs();
-
-    int cur_prog = 0, cur_tex = 0, cur_ibo = 0, cur_vao = 0;
-    a_glGetIntegerv(0x8B8D /* GL_CURRENT_PROGRAM */, &cur_prog);
-    a_glGetIntegerv(0x8069 /* GL_TEXTURE_BINDING_2D */, &cur_tex);
-    a_glGetIntegerv(0x8895 /* GL_ELEMENT_ARRAY_BUFFER_BINDING */, &cur_ibo);
-    a_glGetIntegerv(0x85B5 /* GL_VERTEX_ARRAY_BINDING */, &cur_vao);
-
-    while (gl_proc_get_error());
-
-    if (r_glDrawElementsInstancedBaseVertex) {
-        r_glDrawElementsInstancedBaseVertex(mode, count, type, indices, instancecount, basevertex);
-    } else if (basevertex == 0) {
-        static void (*fn_inst)(unsigned, int, unsigned, const void *, int);
-        if (!fn_inst) fn_inst = gl_proc("glDrawElementsInstanced");
-        if (fn_inst) fn_inst(mode, count, type, indices, instancecount);
-    } else {
-        static int warned = 0;
-        if (!warned++) tl_log_line("gl: glDrawElementsInstancedBaseVertex called with basevertex %d but no driver base vertex proc available", basevertex);
-    }
-
-    unsigned err = gl_proc_get_error();
-    static atomic_int ibv_logged;
-    int c = atomic_fetch_add(&ibv_logged, 1);
-    if (c < 30 || err != 0 || (cur_prog >= 24 && cur_prog <= 32 && c < 150)) {
-        tl_log_line("gl: DrawElementsInstancedBaseVertex(mode %#x, cnt %d, type %#x, idx %p, inst %d, bv %d, prog %d, tex %d, vao %d, ibo %d) -> err %#x",
-                    mode, count, type, indices, instancecount, basevertex, cur_prog, cur_tex, cur_vao, cur_ibo, err);
-    }
-}
 
 
 /*
@@ -1361,33 +526,18 @@ static bool ext_hidden(const char *name, size_t n)
     return false;
 }
 
-static const char *const k_extra_exts[] = {
-    "GL_EXT_copy_image",
-    "GL_OES_copy_image",
-    "GL_EXT_texture_filter_anisotropic",
-    "GL_EXT_draw_elements_base_vertex",
-    "GL_OES_draw_elements_base_vertex",
-};
-#define EXTRA_EXT_COUNT (sizeof(k_extra_exts) / sizeof(k_extra_exts[0]))
-
 #include "husk-tl-egl-es31.inc"
 
 static const unsigned char *(*r_glGetString)(unsigned);
 static const unsigned char *w_glGetString(unsigned name)
 {
-    if (!r_glGetString) r_glGetString = gl_proc("glGetString");
+    if (!r_glGetString && a_eglGetProcAddress) r_glGetString = a_eglGetProcAddress("glGetString");
     const unsigned char *s = r_glGetString ? r_glGetString(name) : NULL;
     if (g_es31_shim && s && (name == 0x1F02 || name == 0x8B8C)) s = (const unsigned char *)es31_fix((const char *)s, name == 0x8B8C);
     if (s && (name == 0x1F02 || name == 0x8B8C || name == 0x1F01 || name == 0x1F00)) {
         static atomic_int said[4];
         int k = name == 0x1F02 ? 0 : name == 0x8B8C ? 1 : name == 0x1F01 ? 2 : 3;
         if (!atomic_exchange(&said[k], 1)) tl_log_line("gl: %s = %.200s", k == 0 ? "GL_VERSION" : k == 1 ? "GL_SHADING_LANGUAGE_VERSION" : k == 2 ? "GL_RENDERER" : "GL_VENDOR", (const char *)s);
-    }
-    if (name == 0x1F03 /* GL_EXTENSIONS */ && s) {
-        static atomic_int said_ext;
-        if (!atomic_exchange(&said_ext, 1)) {
-            tl_log_line("gl: GL_EXTENSIONS = %.400s", (const char *)s);
-        }
     }
     if (name != 0x1F03 /* GL_EXTENSIONS */ || !s) return s;
     static pthread_mutex_t mu = PTHREAD_MUTEX_INITIALIZER;
@@ -1396,16 +546,13 @@ static const unsigned char *w_glGetString(unsigned name)
     if (source != s) {
         free(filtered);
         size_t len = strlen((const char *)s);
-        filtered = malloc(len + 1024);
+        filtered = malloc(len + 64);
         size_t k = 0;
         for (const char *p = (const char *)s; *p;) {
             const char *e = strchr(p, ' ');
             size_t n = e ? (size_t)(e - p) : strlen(p);
             if (n && !ext_hidden(p, n)) { if (k) filtered[k++] = ' '; memcpy(filtered + k, p, n); k += n; }
             p += n; if (e) p++;
-        }
-        for (size_t i = 0; i < EXTRA_EXT_COUNT; i++) {
-            k += (size_t)snprintf(filtered + k, 64, "%s%s", k ? " " : "", k_extra_exts[i]);
         }
         /* The engines that need ES 3.1 buffer textures check for the extension before asking for its entry points. */
         if (g_es31_shim) { k += (size_t)snprintf(filtered + k, 62, "%sGL_EXT_texture_buffer", k ? " " : ""); }
@@ -1419,25 +566,6 @@ static const unsigned char *w_glGetString(unsigned name)
 static const unsigned char *(*r_glGetStringi)(unsigned, unsigned);
 static const unsigned char *w_glGetStringi(unsigned name, unsigned index)
 {
-    if (!r_glGetStringi) r_glGetStringi = gl_proc("glGetStringi");
-    if (name == 0x1F03 /* GL_EXTENSIONS */) {
-        int host_num = 0;
-        if (r_glGetIntegerv) r_glGetIntegerv(0x821D /* GL_NUM_EXTENSIONS */, &host_num);
-        else {
-            void (*get_iv)(unsigned, int *) = gl_proc("glGetIntegerv");
-            if (get_iv) get_iv(0x821D, &host_num);
-        }
-        if (host_num > 0 && index >= (unsigned)host_num) {
-            unsigned extra_idx = index - (unsigned)host_num;
-            if (extra_idx < EXTRA_EXT_COUNT) {
-                return (const unsigned char *)k_extra_exts[extra_idx];
-            }
-            if (g_es31_shim && extra_idx == EXTRA_EXT_COUNT) {
-                return (const unsigned char *)"GL_EXT_texture_buffer";
-            }
-            return NULL;
-        }
-    }
     const unsigned char *s = r_glGetStringi ? r_glGetStringi(name, index) : NULL;
     if (name == 0x1F03 && s && ext_hidden((const char *)s, strlen((const char *)s))) return (const unsigned char *)"GL_ANGLE_husk_hidden_extension";
     return s;
@@ -1450,7 +578,7 @@ static void w_glCompileShader(unsigned sh)
     static void (*getiv)(unsigned, unsigned, int *), (*getlog)(unsigned, int, int *, char *), (*getsrc)(unsigned, int, int *, char *);
     static atomic_int reported;
     r_glCompileShader(sh);
-    if (!getiv) { getiv = gl_proc("glGetShaderiv"); getlog = gl_proc("glGetShaderInfoLog"); getsrc = gl_proc("glGetShaderSource"); }
+    if (!getiv && a_eglGetProcAddress) { getiv = a_eglGetProcAddress("glGetShaderiv"); getlog = a_eglGetProcAddress("glGetShaderInfoLog"); getsrc = a_eglGetProcAddress("glGetShaderSource"); }
     if (!getiv || !getlog || !getsrc) return;
     int ok = 1;
     getiv(sh, 0x8B81 /* GL_COMPILE_STATUS */, &ok);
@@ -1499,42 +627,12 @@ static EGLBoolean w_eglDestroySync(EGLDisplay d, void *s) { return s ? r_eglDest
 
 #define ADAPT(name) { #name, (void *)w_##name, (void **)&r_##name }
 static const struct { const char *name; void *wrap; void **real; } k_adapt[] = {
-    ADAPT(glBlitFramebuffer), ADAPT(glTexImage3D), ADAPT(glCompressedTexImage3D), ADAPT(glTexStorage3D),
-    ADAPT(glBindTexture), ADAPT(glTexSubImage3D), ADAPT(glCompressedTexSubImage3D), ADAPT(glCopyImageSubData),
-    ADAPT(glCopyTexSubImage3D),
-    { "glCopyImageSubDataEXT", (void *)w_glCopyImageSubData, (void **)&r_glCopyImageSubData },
-    { "glCopyImageSubDataOES", (void *)w_glCopyImageSubData, (void **)&r_glCopyImageSubData },
-    { "glCopyTexSubImage3DEXT", (void *)w_glCopyTexSubImage3D, (void **)&r_glCopyTexSubImage3D },
-    { "glCopyTexSubImage3DOES", (void *)w_glCopyTexSubImage3D, (void **)&r_glCopyTexSubImage3D },
+    ADAPT(glBlitFramebuffer), ADAPT(glTexSubImage3D), ADAPT(glCompressedTexSubImage3D), ADAPT(glCopyImageSubData),
     ADAPT(glColorMask), ADAPT(glDepthMask), ADAPT(glVertexAttribPointer), ADAPT(glUniformMatrix2fv),
-    ADAPT(glUniformMatrix3fv), ADAPT(glUniformMatrix4fv),
-    ADAPT(glUniformMatrix2x3fv), ADAPT(glUniformMatrix3x2fv), ADAPT(glUniformMatrix2x4fv), ADAPT(glUniformMatrix4x2fv),
-    ADAPT(glUniformMatrix3x4fv), ADAPT(glUniformMatrix4x3fv),
-    ADAPT(glSampleCoverage), ADAPT(glTexImage2D), ADAPT(glTexStorage2D), ADAPT(glTexSubImage2D), ADAPT(glCompressedTexImage2D), ADAPT(glCompressedTexSubImage2D), ADAPT(glUniformBlockBinding),
-    ADAPT(glGetString), ADAPT(glGetStringi), ADAPT(glCompileShader), ADAPT(glShaderSource), ADAPT(glAttachShader), ADAPT(glLinkProgram), ADAPT(glGetIntegerv), ADAPT(glGetFloatv), ADAPT(glBindBufferBase), ADAPT(glBindBuffer), ADAPT(glBufferData), ADAPT(glBufferSubData), ADAPT(glBindBufferRange),
-    ADAPT(glProgramBinary), ADAPT(glShaderBinary), ADAPT(glCreateShaderProgramv), ADAPT(glCreateProgram), ADAPT(glCreateShader),
-    ADAPT(glDrawElements), ADAPT(glDrawArrays),
-    ADAPT(glDrawElementsBaseVertex),
-    { "glDrawElementsBaseVertexEXT", (void *)w_glDrawElementsBaseVertex, (void **)&r_glDrawElementsBaseVertex },
-    { "glDrawElementsBaseVertexOES", (void *)w_glDrawElementsBaseVertex, (void **)&r_glDrawElementsBaseVertex },
-    ADAPT(glDrawRangeElementsBaseVertex),
-    { "glDrawRangeElementsBaseVertexEXT", (void *)w_glDrawRangeElementsBaseVertex, (void **)&r_glDrawRangeElementsBaseVertex },
-    { "glDrawRangeElementsBaseVertexOES", (void *)w_glDrawRangeElementsBaseVertex, (void **)&r_glDrawRangeElementsBaseVertex },
-    ADAPT(glDrawElementsInstancedBaseVertex),
-    { "glDrawElementsInstancedBaseVertexEXT", (void *)w_glDrawElementsInstancedBaseVertex, (void **)&r_glDrawElementsInstancedBaseVertex },
-    { "glDrawElementsInstancedBaseVertexOES", (void *)w_glDrawElementsInstancedBaseVertex, (void **)&r_glDrawElementsInstancedBaseVertex },
-    ADAPT(glBlendFunc), ADAPT(glBlendFuncSeparate), ADAPT(glBlendEquation), ADAPT(glBlendEquationSeparate), ADAPT(glEnable), ADAPT(glDisable),
+    ADAPT(glUniformMatrix3fv), ADAPT(glUniformMatrix4fv), ADAPT(glSampleCoverage), ADAPT(glGetString), ADAPT(glGetStringi), ADAPT(glCompileShader), ADAPT(glShaderSource), ADAPT(glAttachShader), ADAPT(glLinkProgram), ADAPT(glGetIntegerv), ADAPT(glBindBufferBase), ADAPT(glBindBuffer), ADAPT(glBufferData), ADAPT(glBufferSubData), ADAPT(glBindBufferRange),
     ADAPT(glGetProgramInterfaceiv), ADAPT(glGetProgramResourceIndex), ADAPT(glGetProgramResourceName), ADAPT(glGetProgramResourceiv), ADAPT(glGetIntegeri_v),
     ADAPT(eglClientWaitSyncKHR), ADAPT(eglDestroySyncKHR), ADAPT(eglGetSyncAttribKHR), ADAPT(eglClientWaitSync), ADAPT(eglDestroySync),
 };
-
-static void adapt_init(void)
-{
-    for (size_t i = 0; i < sizeof(k_adapt) / sizeof(k_adapt[0]); i++) {
-        void *p = gl_proc(k_adapt[i].name);
-        if (p) *k_adapt[i].real = p;
-    }
-}
 
 /* Labels are never kept (setting one is a no-op above), so every label read back is empty. ANGLE's own getter raises an error for
  * an object type its context does not have (a 3.1 one, under the shim) and then writes nothing, not even the length, which a game
@@ -1683,50 +781,36 @@ static void *egl_resolve(const char *name);
 void *tl_egl_resolve(const char *name)
 {
     void *r = egl_resolve(name);
-    if (name) {
-        static char seen[512][48];
-        static int nseen;
-        static pthread_mutex_t smu = PTHREAD_MUTEX_INITIALIZER;
-        pthread_mutex_lock(&smu);
-        bool found = false;
-        for (int i = 0; i < nseen; i++) {
-            if (!strcmp(seen[i], name)) { found = true; break; }
-        }
-        if (!found && nseen < 512) {
-            strncpy(seen[nseen++], name, 47);
-            tl_log_line("gl: resolve %s -> %p", name, r);
-        }
-        pthread_mutex_unlock(&smu);
-    }
+    static int trace = -1;
+    if (trace < 0) trace = getenv("TL_EGL_TRACE") ? 1 : 0;
+    if (trace && name[0] == 'e') tl_log_line("egl: resolve %s -> %p", name, r);
     return r;
 }
 static void *egl_resolve(const char *name)
 {
     for (int i = 0; k_noop_names[i]; i++) if (!strcmp(k_noop_names[i], name)) return (void *)w_gl_noop;
     if (g_es31_shim) for (int i = 0; k_es31_stub_names[i]; i++) if (!strcmp(k_es31_stub_names[i], name)) {
-        void *real = gl_proc(name);
+        void *real = E.ready && a_eglGetProcAddress ? a_eglGetProcAddress(name) : NULL;
         if (real) break;
         static int said; if (!said++) tl_log_line("gl: stubbing ES 3.1 entry points ANGLE lacks (first: %s)", name);
         return (void *)w_gl_noop;
     }
     for (size_t i = 0; i < sizeof(k_egl) / sizeof(k_egl[0]); i++) if (!strcmp(k_egl[i].name, name)) return k_egl[i].fn;
-    if (!E.ready) return NULL;
-    if (!strncmp(name, "glDrawElementsBaseVertex", 24) ||
-        !strncmp(name, "glDrawRangeElementsBaseVertex", 29) ||
-        !strncmp(name, "glDrawElementsInstancedBaseVertex", 33)) {
-        resolve_base_vertex_procs();
-        if (!r_glDrawElementsBaseVertex && !r_glDrawElementsInstancedBaseVertex) return NULL;
+    if (!E.ready || !a_eglGetProcAddress) return NULL;
+    void *real = a_eglGetProcAddress(name);
+    if (!real && E.gles) {
+        /* dlsym on the handle also searches what ANGLE links against, and on a Mac that is the system's desktop OpenGL:
+         * glPolygonMode and its kin would resolve there, and a GLES guest that calls one must not reach them. */
+        real = dlsym(E.gles, name);
+        Dl_info di;
+        if (real && dladdr(real, &di) && di.dli_fname && strcmp(di.dli_fname, E.gles_path) != 0 && strcmp(di.dli_fname, E.egl_path) != 0) real = NULL;
     }
-    void *real = gl_proc(name);
+    if (!real) return NULL;
     static int trace = -1;
     if (trace < 0) trace = getenv("TL_GL_TRACE") ? 1 : 0;
     for (size_t i = 0; i < sizeof(k_adapt) / sizeof(k_adapt[0]); i++) {
-        if (!strcmp(k_adapt[i].name, name)) {
-            if (real) *k_adapt[i].real = real;
-            return trace ? glt_wrap(name, k_adapt[i].wrap) : k_adapt[i].wrap;
-        }
+        if (!strcmp(k_adapt[i].name, name)) { *k_adapt[i].real = real; return trace ? glt_wrap(name, k_adapt[i].wrap) : k_adapt[i].wrap; }
     }
-    if (!real) return NULL;
     return trace && name[0] == 'g' && name[1] == 'l' ? glt_wrap(name, real) : real;
 }
 
