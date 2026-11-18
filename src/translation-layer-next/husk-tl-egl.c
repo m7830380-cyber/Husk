@@ -2,6 +2,7 @@
 #define _DARWIN_C_SOURCE
 #include "husk-tl-egl.h"
 
+#include <ctype.h>
 #include <dlfcn.h>
 #include <math.h>
 #include <pthread.h>
@@ -777,7 +778,7 @@ static void w_glCompileShader(unsigned sh)
             char *log = calloc(1, (size_t)len + 2); int got = 0;
             if (len > 0) getlog(sh, len, &got, log);
             for (char *q = log; *q; q++) if (*q == '\n') *q = '|';
-            tl_log_line("gl: shader %u: the IEEE-maths rewrite did not compile, so it is compiled as written: %.300s", sh, log);
+            tl_log_line("gl: shader %u: the rewrite (IEEE maths, subnormal constants) did not compile, so it is compiled as written: %.300s", sh, log);
             free(log);
         }
         const char *one = orig; int one_len = (int)strlen(orig);

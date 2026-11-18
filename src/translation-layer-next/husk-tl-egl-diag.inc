@@ -1008,6 +1008,12 @@ static void diag_swap(unsigned long n)
 {
     if (!diag_on()) return;
     unsigned long drew = t_diag_draws; t_diag_draws = 0;
+#if defined(__aarch64__)
+    if (n == 300) {   /* FPCR.FZ (bit 24) flushes subnormals on the CPU; Android starts threads with it off */
+        unsigned long fpcr; __asm__ volatile("mrs %0, fpcr" : "=r"(fpcr));
+        tl_log_line("gldiag: GL thread fpcr %#lx (FZ %lu, FZ16 %lu, DN %lu)", fpcr, (fpcr >> 24) & 1, (fpcr >> 19) & 1, (fpcr >> 25) & 1);
+    }
+#endif
     if (cap_here()) {
         cap_finish();
         if (C.next >= CAP_N) { diag_summary(n); atomic_store(&g_diag_done, true); tl_log_line("gldiag: done"); return; }
