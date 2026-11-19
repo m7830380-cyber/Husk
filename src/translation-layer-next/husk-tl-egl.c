@@ -666,8 +666,7 @@ static void w_glCopyImageSubData(unsigned sn, unsigned st, int sl, int sx, int s
 /* GLboolean arguments: AAPCS64 callers do not extend them, Apple's callee may assume they are. */
 static void (*r_glColorMask)(unsigned, unsigned, unsigned, unsigned);
 static void w_glColorMask(unsigned r, unsigned g, unsigned b, unsigned a) { r_glColorMask(r & 0xff, g & 0xff, b & 0xff, a & 0xff); }
-static void (*r_glDepthMask)(unsigned);
-static void w_glDepthMask(unsigned f) { r_glDepthMask(f & 0xff); }
+static void w_glDepthMask(unsigned f) { t_game_depth_mask = (unsigned char)(f & 0xff); r_glDepthMask(f & 0xff); }
 static void (*r_glVertexAttribPointer)(unsigned, int, unsigned, unsigned, int, const void *);
 static void w_glVertexAttribPointer(unsigned i, int s, unsigned t, unsigned n, int st, const void *p) { r_glVertexAttribPointer(i, s, t, n & 0xff, st, p); }
 static void (*r_glUniformMatrix2fv)(int, int, unsigned, const float *);
