@@ -159,16 +159,20 @@ static void w_glTexImage3D(unsigned target, int level, int ifmt, int w, int h, i
     if (n < 40) tl_log_line("gldiag: glTexImage3D(%s, tex %d, fmt %#x, %dx%dx%d, data %s)",
                             target == 0x8C1A ? "2D_ARRAY" : target == 0x806F ? "3D" : "?", diag_bound(target), ifmt, w, h, d, px ? "yes" : "none");
 }
+/* draws by this thread since it last attached a texture layer to a framebuffer: whether anything rendered into an array before its mips */
+static __thread long t_layer_draws = -1;
 static void (*r_glFramebufferTextureLayer)(unsigned, unsigned, unsigned, int, int);
 static void w_glFramebufferTextureLayer(unsigned fbt, unsigned att, unsigned tex, int level, int layer)
 {
     r_glFramebufferTextureLayer(fbt, att, tex, level, layer);
+    if (tex && t_layer_draws < 0) t_layer_draws = 0;
     if (diag_on() && tex) {
         int n = atomic_fetch_add(&g_diag_arr_layer, 1);
         if (n < 40) tl_log_line("gldiag: glFramebufferTextureLayer(%#x, att %#x, tex %u, level %d, layer %d)", fbt, att, tex, level, layer);
     }
 }
 
+static void diag_array_mips_done(unsigned tex);
 static atomic_int g_diag_mips, g_diag_mips_arr, g_diag_mips_2d;
 static void (*r_glGenerateMipmap)(unsigned);
 static void w_glGenerateMipmap(unsigned target)
@@ -180,6 +184,7 @@ static void w_glGenerateMipmap(unsigned target)
     if (n < 10) tl_log_line("gldiag: glGenerateMipmap(%s, tex %d)", target == 0x8C1A ? "2D_ARRAY" : target == 0x8513 ? "CUBE" :
                             target == 0x0DE1 ? "2D" : "3D", diag_bound(target));
     if (target == 0x8513) diag_cube_mips_done((unsigned)diag_bound(target));
+    if (target == 0x8C1A) diag_array_mips_done((unsigned)diag_bound(target));
 }
 
 /* ---- GL entry points of our own (ANGLE's, called directly) */
@@ -397,6 +402,17 @@ static void diag_cube_mips_done(unsigned tex)
     unsigned err = DG.get_error();
     char why[96]; snprintf(why, sizeof(why), "after glGenerateMipmap(CUBE)%s", err ? " (GL error)" : "");
     diag_probe_at(0x8513, tex, 0, 4, why);
+}
+/* a texture array the game rendered into layer by layer (terrain layers), then mipmapped: what its layer 0 holds at lod 0 and 4,
+ * and how many draws went into it -- an array that reads as zeros or garbage here is what the terrain samples */
+static void diag_array_mips_done(unsigned tex)
+{
+    static atomic_int n;
+    long draws = t_layer_draws; t_layer_draws = -1;
+    if (!diag_load() || atomic_fetch_add(&n, 1) >= 16) return;
+    unsigned err = DG.get_error();
+    char why[120]; snprintf(why, sizeof(why), "after glGenerateMipmap(2D_ARRAY), %ld draws since a layer was attached%s", draws, err ? " (GL error)" : "");
+    diag_probe_at(0x8C1A, tex, 0, 4, why);
 }
 /* after a copy into a cube's level: that level read back, and the GL error the copy raised (if any) */
 static void diag_cube_copy_done(unsigned sn, unsigned st, int sl, unsigned dn, int dl, int face, int w, int h, unsigned err, int rfmt, int rtype)
@@ -840,14 +856,32 @@ static void diag_blend(int kind, int buf, unsigned s, unsigned d, unsigned sa, u
                     kind >= 2 ? ", " : "", s, d, sa, da, n, prog, fb, zero ? "  <- ZERO,ZERO" : "");
     }
 }
+/* Blending with both factors ZERO writes 0 whatever the shader computes and whatever is under it: the draw is a black silhouette.
+ * No renderer asks for that on purpose (black is a shader output, or a clear); an engine gets there from a material whose blend
+ * properties are unset (Unity's `Blend [_SrcBlend] [_DstBlend]` reads 0 for each). It is drawn as unblended, ONE,ZERO -- what the
+ * draw would be with those properties at their defaults. TL_GL_KEEP_ZERO_BLEND=1: off. */
+static int g_zero_blend_keep = -1;
+static inline void zero_blend_fix(unsigned *s, unsigned *d, unsigned *sa, unsigned *da)
+{
+    if (*s || *d) return;
+    if (g_zero_blend_keep < 0) { const char *e = getenv("TL_GL_KEEP_ZERO_BLEND"); g_zero_blend_keep = e && *e == '1'; }
+    if (g_zero_blend_keep) return;
+    static atomic_int said;
+    if (!atomic_exchange(&said, 1))
+        tl_log_line("gl: the game blends with both factors ZERO (a black silhouette, from unset material blend properties): drawn as ONE,ZERO (TL_GL_KEEP_ZERO_BLEND=1: off)");
+    *s = 1;
+    if (!*sa && !*da) *sa = 1;
+}
 static void (*r_glBlendFunc)(unsigned, unsigned);
-static void w_glBlendFunc(unsigned s, unsigned d) { r_glBlendFunc(s, d); diag_blend(0, 0, s, d, s, d); }
+static void w_glBlendFunc(unsigned s, unsigned d) { unsigned fs = s, fd = d, x = s, y = d; zero_blend_fix(&fs, &fd, &x, &y); r_glBlendFunc(fs, fd); diag_blend(0, 0, s, d, s, d); }
 static void (*r_glBlendFuncSeparate)(unsigned, unsigned, unsigned, unsigned);
-static void w_glBlendFuncSeparate(unsigned s, unsigned d, unsigned sa, unsigned da) { r_glBlendFuncSeparate(s, d, sa, da); diag_blend(1, 0, s, d, sa, da); }
+static void w_glBlendFuncSeparate(unsigned s, unsigned d, unsigned sa, unsigned da)
+{ unsigned fs = s, fd = d, fsa = sa, fda = da; zero_blend_fix(&fs, &fd, &fsa, &fda); r_glBlendFuncSeparate(fs, fd, fsa, fda); diag_blend(1, 0, s, d, sa, da); }
 static void (*r_glBlendFunci)(unsigned, unsigned, unsigned);
-static void w_glBlendFunci(unsigned b, unsigned s, unsigned d) { r_glBlendFunci(b, s, d); diag_blend(2, (int)b, s, d, s, d); }
+static void w_glBlendFunci(unsigned b, unsigned s, unsigned d) { unsigned fs = s, fd = d, x = s, y = d; zero_blend_fix(&fs, &fd, &x, &y); r_glBlendFunci(b, fs, fd); diag_blend(2, (int)b, s, d, s, d); }
 static void (*r_glBlendFuncSeparatei)(unsigned, unsigned, unsigned, unsigned, unsigned);
-static void w_glBlendFuncSeparatei(unsigned b, unsigned s, unsigned d, unsigned sa, unsigned da) { r_glBlendFuncSeparatei(b, s, d, sa, da); diag_blend(3, (int)b, s, d, sa, da); }
+static void w_glBlendFuncSeparatei(unsigned b, unsigned s, unsigned d, unsigned sa, unsigned da)
+{ unsigned fs = s, fd = d, fsa = sa, fda = da; zero_blend_fix(&fs, &fd, &fsa, &fda); r_glBlendFuncSeparatei(b, fs, fd, fsa, fda); diag_blend(3, (int)b, s, d, sa, da); }
 static void (*r_glEnable)(unsigned);
 static void w_glEnable(unsigned cap) { r_glEnable(cap); if (cap == 0x0BE2 && bt_on()) bt_log("glEnable(GL_BLEND)"); }
 static void (*r_glDisable)(unsigned);
@@ -978,19 +1012,19 @@ static void cube_post(void) { if (t_cube_post) { t_cube_post = false; cube_px("a
 
 static void (*r_glDrawElements)(unsigned, int, unsigned, const void *);
 static void w_glDrawElements(unsigned mode, int count, unsigned type, const void *idx)
-{ t_diag_draws++; bt_draw(mode, count); CUBE_PRE(mode, count); bool c = cap_here(); if (c) cap_pre(); r_glDrawElements(mode, count, type, idx); CUBE_POST(); if (c) cap_post(mode, count); }
+{ t_diag_draws++; if (t_layer_draws >= 0) t_layer_draws++; bt_draw(mode, count); CUBE_PRE(mode, count); bool c = cap_here(); if (c) cap_pre(); r_glDrawElements(mode, count, type, idx); CUBE_POST(); if (c) cap_post(mode, count); }
 static void (*r_glDrawElementsInstanced)(unsigned, int, unsigned, const void *, int);
 static void w_glDrawElementsInstanced(unsigned mode, int count, unsigned type, const void *idx, int inst)
-{ t_diag_draws++; bt_draw(mode, count); CUBE_PRE(mode, count); bool c = cap_here(); if (c) cap_pre(); r_glDrawElementsInstanced(mode, count, type, idx, inst); CUBE_POST(); if (c) cap_post(mode, count); }
+{ t_diag_draws++; if (t_layer_draws >= 0) t_layer_draws++; bt_draw(mode, count); CUBE_PRE(mode, count); bool c = cap_here(); if (c) cap_pre(); r_glDrawElementsInstanced(mode, count, type, idx, inst); CUBE_POST(); if (c) cap_post(mode, count); }
 static void (*r_glDrawRangeElements)(unsigned, unsigned, unsigned, int, unsigned, const void *);
 static void w_glDrawRangeElements(unsigned mode, unsigned s, unsigned e, int count, unsigned type, const void *idx)
-{ t_diag_draws++; bt_draw(mode, count); CUBE_PRE(mode, count); bool c = cap_here(); if (c) cap_pre(); r_glDrawRangeElements(mode, s, e, count, type, idx); CUBE_POST(); if (c) cap_post(mode, count); }
+{ t_diag_draws++; if (t_layer_draws >= 0) t_layer_draws++; bt_draw(mode, count); CUBE_PRE(mode, count); bool c = cap_here(); if (c) cap_pre(); r_glDrawRangeElements(mode, s, e, count, type, idx); CUBE_POST(); if (c) cap_post(mode, count); }
 static void (*r_glDrawArrays)(unsigned, int, int);
 static void w_glDrawArrays(unsigned mode, int first, int count)
-{ t_diag_draws++; bt_draw(mode, count); CUBE_PRE(mode, count); bool c = cap_here(); if (c) cap_pre(); r_glDrawArrays(mode, first, count); CUBE_POST(); if (c) cap_post(mode, count); }
+{ t_diag_draws++; if (t_layer_draws >= 0) t_layer_draws++; bt_draw(mode, count); CUBE_PRE(mode, count); bool c = cap_here(); if (c) cap_pre(); r_glDrawArrays(mode, first, count); CUBE_POST(); if (c) cap_post(mode, count); }
 static void (*r_glDrawArraysInstanced)(unsigned, int, int, int);
 static void w_glDrawArraysInstanced(unsigned mode, int first, int count, int inst)
-{ t_diag_draws++; bt_draw(mode, count); CUBE_PRE(mode, count); bool c = cap_here(); if (c) cap_pre(); r_glDrawArraysInstanced(mode, first, count, inst); CUBE_POST(); if (c) cap_post(mode, count); }
+{ t_diag_draws++; if (t_layer_draws >= 0) t_layer_draws++; bt_draw(mode, count); CUBE_PRE(mode, count); bool c = cap_here(); if (c) cap_pre(); r_glDrawArraysInstanced(mode, first, count, inst); CUBE_POST(); if (c) cap_post(mode, count); }
 static void (*r_glClear)(unsigned);
 static void w_glClear(unsigned mask) { r_glClear(mask); cap_dirty(); }
 
