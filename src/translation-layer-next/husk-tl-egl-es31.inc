@@ -382,6 +382,20 @@ static void (*r_glLinkProgram)(unsigned);
 static void w_glLinkProgram(unsigned prog)
 {
     r_glLinkProgram(prog);
+    /* a program that does not link draws nothing, and an engine seldom says so: say why, for the first few */
+    if (diag_on() && a_eglGetProcAddress) {
+        static atomic_int told;
+        static void (*piv)(unsigned, unsigned, int *), (*plog)(unsigned, int, int *, char *);
+        if (!piv) { piv = a_eglGetProcAddress("glGetProgramiv"); plog = a_eglGetProcAddress("glGetProgramInfoLog"); }
+        int linked = 1;
+        if (piv && plog) piv(prog, 0x8B82 /* GL_LINK_STATUS */, &linked);
+        if (!linked && atomic_fetch_add(&told, 1) < 8) {
+            char log[400] = { 0 }; int got = 0;
+            plog(prog, (int)sizeof(log) - 1, &got, log);
+            for (char *q = log; *q; q++) if (*q == '\n') *q = '|';
+            tl_log_line("gl: program %u failed to link: %s", prog, log);
+        }
+    }
     if (!g_es31_shim || !a_eglGetProcAddress) return;
     static int (*getloc)(unsigned, const char *); static unsigned (*getblk)(unsigned, const char *);
     static void (*blkbind)(unsigned, unsigned, unsigned), (*uni1i)(int, int), (*useprog)(unsigned), (*getprogiv)(unsigned, unsigned, int *);

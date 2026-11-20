@@ -468,6 +468,7 @@ static EGLBoolean w_eglGetNextFrameIdANDROID(EGLDisplay d, EGLSurface s, uint64_
 static EGLBoolean w_eglGetFrameTimestampsANDROID(EGLDisplay d, EGLSurface s, uint64_t id, EGLint n, const EGLint *t, int64_t *v) { (void)d; (void)s; (void)id; (void)n; (void)t; (void)v; return EGL_FALSE; }
 static EGLBoolean w_eglGetCompositorTimingANDROID(EGLDisplay d, EGLSurface s, EGLint n, const EGLint *t, int64_t *v) { (void)d; (void)s; (void)n; (void)t; (void)v; return EGL_FALSE; }
 
+#include "husk-tl-egl-tex.inc"
 #include "husk-tl-egl-diag.inc"
 
 /* ------------------------------------------------- GLES: stack-argument fixes */
@@ -480,7 +481,7 @@ static EGLBoolean w_eglGetCompositorTimingANDROID(EGLDisplay d, EGLSurface s, EG
  */
 static void (*r_glBlitFramebuffer)(int, int, int, int, int, int, int, int, unsigned, unsigned);
 static void w_glBlitFramebuffer(int a0, int a1, int a2, int a3, int a4, int a5, int a6, int a7, uint64_t mask, uint64_t filter)
-{ r_glBlitFramebuffer(a0, a1, a2, a3, a4, a5, a6, a7, (unsigned)mask, (unsigned)filter); cap_dirty(); }
+{ r_glBlitFramebuffer(a0, a1, a2, a3, a4, a5, a6, a7, (unsigned)mask, (unsigned)filter); cap_dirty(); if (!cap_here()) err_check("glBlitFramebuffer"); }
 
 static void (*r_glTexSubImage3D)(unsigned, int, int, int, int, int, int, int, unsigned, unsigned, const void *);
 static void w_glTexSubImage3D(unsigned t, int l, int x, int y, int z, int w, int h, int d, uint64_t fmt, uint64_t type, const void *px)
@@ -753,6 +754,25 @@ static const unsigned char *w_glGetStringi(unsigned name, unsigned index)
         if (n > 0 && index >= (unsigned)n && index < (unsigned)n + COPYIMG_EXT_COUNT) return (const unsigned char *)k_copyimg_ext[index - (unsigned)n];
     }
     const unsigned char *s = r_glGetStringi ? r_glGetStringi(name, index) : NULL;
+    if (name == 0x1F03 && index == 0 && r_glGetStringi && diag_on()) {
+        /* what the game is told it has, once: which of its features it turns on depends on this list */
+        static atomic_int said;
+        int n = 0;
+        if (!atomic_exchange(&said, 1) && a_glGetIntegerv) {
+            a_glGetIntegerv(0x821D /* GL_NUM_EXTENSIONS */, &n);
+            char line[400]; size_t k = 0;
+            for (int i = 0; i < n; i++) {
+                const char *x = (const char *)r_glGetStringi(0x1F03, (unsigned)i);
+                if (!x) continue;
+                size_t m = strlen(x);
+                if (k + m + 2 > sizeof(line)) { line[k] = 0; tl_log_line("gldiag: extensions: %s", line); k = 0; }
+                if (m + 2 > sizeof(line)) continue;
+                if (k) line[k++] = ' ';
+                memcpy(line + k, x, m); k += m;
+            }
+            if (k) { line[k] = 0; tl_log_line("gldiag: extensions: %s", line); }
+        }
+    }
     if (name == 0x1F03 && s && ext_hidden((const char *)s, strlen((const char *)s))) return (const unsigned char *)"GL_ANGLE_husk_hidden_extension";
     return s;
 }
@@ -840,7 +860,8 @@ static const struct { const char *name; void *wrap; void **real; } k_adapt[] = {
     ADAPT(glUniformMatrix2x3fv), ADAPT(glUniformMatrix3x2fv), ADAPT(glUniformMatrix2x4fv), ADAPT(glUniformMatrix4x2fv),
     ADAPT(glUniformMatrix3x4fv), ADAPT(glUniformMatrix4x3fv),
     ADAPT(glProgramBinary), { "glProgramBinaryOES", (void *)w_glProgramBinary, (void **)&r_glProgramBinary }, ADAPT(glGetProgramBinary), { "glGetProgramBinaryOES", (void *)w_glGetProgramBinary, (void **)&r_glGetProgramBinary },
-    ADAPT(glTexStorage3D), ADAPT(glTexImage3D), ADAPT(glFramebufferTextureLayer),
+    ADAPT(glTexStorage3D), ADAPT(glTexImage3D), ADAPT(glTexStorage2D), ADAPT(glTexImage2D), ADAPT(glDeleteTextures),
+    ADAPT(glTexParameteri), ADAPT(glTexParameterf), ADAPT(glTexParameteriv), ADAPT(glTexParameterfv), ADAPT(glGetError), ADAPT(glFramebufferTextureLayer),
     ADAPT(glBlendFunc), ADAPT(glEnable), ADAPT(glDisable), ADAPT(glUseProgram), ADAPT(glBlendEquation), ADAPT(glBlendEquationSeparate), ADAPT(glBlendFuncSeparate), ADAPT(glBlendFunci), ADAPT(glBlendFuncSeparatei),
     { "glBlendFunciEXT", (void *)w_glBlendFunci, (void **)&r_glBlendFunci }, { "glBlendFunciOES", (void *)w_glBlendFunci, (void **)&r_glBlendFunci },
     { "glBlendFuncSeparateiEXT", (void *)w_glBlendFuncSeparatei, (void **)&r_glBlendFuncSeparatei },

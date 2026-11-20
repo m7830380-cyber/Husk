@@ -145,6 +145,7 @@ static void (*r_glTexStorage3D)(unsigned, int, unsigned, int, int, int);
 static void w_glTexStorage3D(unsigned target, int levels, unsigned fmt, int w, int h, int d)
 {
     r_glTexStorage3D(target, levels, fmt, w, h, d);
+    tf_storage(target, fmt, 0);
     if (!diag_on()) return;
     int n = atomic_fetch_add(&g_diag_arr_storage, 1);
     if (n < 40) tl_log_line("gldiag: glTexStorage3D(%s, tex %d, %d levels, fmt %#x, %dx%dx%d)",
@@ -154,6 +155,7 @@ static void (*r_glTexImage3D)(unsigned, int, int, int, int, int, int, unsigned, 
 static void w_glTexImage3D(unsigned target, int level, int ifmt, int w, int h, int d, int border, unsigned fmt, uint64_t type, const void *px)
 {
     r_glTexImage3D(target, level, ifmt, w, h, d, border, fmt, (unsigned)type, px);
+    if (!level) tf_storage(target, (unsigned)ifmt, (unsigned)type);
     if (!diag_on() || level) return;
     int n = atomic_fetch_add(&g_diag_arr_storage, 1);
     if (n < 40) tl_log_line("gldiag: glTexImage3D(%s, tex %d, fmt %#x, %dx%dx%d, data %s)",
@@ -173,12 +175,14 @@ static void w_glFramebufferTextureLayer(unsigned fbt, unsigned att, unsigned tex
 }
 
 static void diag_array_mips_done(unsigned tex);
+static void err_check(const char *where);
 static atomic_int g_diag_mips, g_diag_mips_arr, g_diag_mips_2d;
 static void (*r_glGenerateMipmap)(unsigned);
 static void w_glGenerateMipmap(unsigned target)
 {
     r_glGenerateMipmap(target);
     if (!diag_on()) return;
+    err_check("glGenerateMipmap");
     atomic_fetch_add(&g_diag_mips, 1);
     int n = target == 0x0DE1 ? atomic_fetch_add(&g_diag_mips_2d, 1) : target == 0x8C1A ? atomic_fetch_add(&g_diag_mips_arr, 1) : 0;
     if (n < 10) tl_log_line("gldiag: glGenerateMipmap(%s, tex %d)", target == 0x8C1A ? "2D_ARRAY" : target == 0x8513 ? "CUBE" :
@@ -1028,23 +1032,62 @@ static void cube_post(void) { if (t_cube_post) { t_cube_post = false; cube_px("a
 #define CUBE_PRE(m, c) cube_pre(m, c)
 #define CUBE_POST() cube_post()
 
+/* ---- GL errors: a call ANGLE refuses does nothing and says nothing, so a draw that is refused is a hole in the frame. While the
+ * diagnostics run, the error is read after each draw (and clear, blit, mipmap generation); the first of each kind is logged, and
+ * the error is kept for the game's own next glGetError, so it still sees it. */
+static unsigned (*r_glGetError)(void);
+static unsigned (*g_err_get)(void);
+static __thread unsigned t_err_held;
+static pthread_mutex_t g_err_mu = PTHREAD_MUTEX_INITIALIZER;
+static struct { const char *where; unsigned err; int prog; } g_err_seen[40];
+static int g_err_nseen;
+static void err_check(const char *where)
+{
+    if (!diag_on() || !a_eglGetProcAddress || !a_glGetIntegerv) return;
+    if (!g_err_get) g_err_get = (unsigned (*)(void))a_eglGetProcAddress("glGetError");
+    if (!g_err_get) return;
+    unsigned e = g_err_get();
+    if (!e) return;
+    if (!t_err_held) t_err_held = e;
+    int prog = 0, fb = 0; a_glGetIntegerv(0x8B8D /* CURRENT_PROGRAM */, &prog); a_glGetIntegerv(0x8CA6 /* DRAW_FRAMEBUFFER_BINDING */, &fb);
+    pthread_mutex_lock(&g_err_mu);
+    bool seen = g_err_nseen >= 40;
+    for (int i = 0; i < g_err_nseen && !seen; i++) if (g_err_seen[i].where == where && g_err_seen[i].err == e && g_err_seen[i].prog == prog) seen = true;
+    if (!seen) { g_err_seen[g_err_nseen].where = where; g_err_seen[g_err_nseen].err = e; g_err_seen[g_err_nseen].prog = prog; g_err_nseen++; }
+    pthread_mutex_unlock(&g_err_mu);
+    if (seen) return;
+    const char *name = e == 0x500 ? "INVALID_ENUM" : e == 0x501 ? "INVALID_VALUE" : e == 0x502 ? "INVALID_OPERATION" : e == 0x505 ? "OUT_OF_MEMORY" :
+                       e == 0x506 ? "INVALID_FRAMEBUFFER_OPERATION" : "?";
+    unsigned st = 0;
+    if (e == 0x506) { unsigned (*cfs)(unsigned) = (unsigned (*)(unsigned))a_eglGetProcAddress("glCheckFramebufferStatus"); if (cfs) st = cfs(0x8CA9 /* DRAW_FRAMEBUFFER */); }
+    tl_log_line("gldiag: GL error %#x %s at %s (or a call before it since the last check): program %d, fbo %d%s%s", e, name, where, prog, fb,
+                st ? ", framebuffer status " : "", st == 0x8CD6 ? "INCOMPLETE_ATTACHMENT" : st == 0x8CD7 ? "MISSING_ATTACHMENT" : st == 0x8CD9 ? "INCOMPLETE_DIMENSIONS" :
+                st == 0x8CDD ? "UNSUPPORTED" : st == 0x8D56 ? "INCOMPLETE_MULTISAMPLE" : st == 0x8CD5 ? "complete" : st ? "other" : "");
+}
+static unsigned w_glGetError(void)
+{
+    unsigned e = t_err_held;
+    if (e) { t_err_held = 0; return e; }
+    return r_glGetError ? r_glGetError() : 0;
+}
+
 static void (*r_glDrawElements)(unsigned, int, unsigned, const void *);
 static void w_glDrawElements(unsigned mode, int count, unsigned type, const void *idx)
-{ t_diag_draws++; if (t_layer_draws >= 0) t_layer_draws++; bt_draw(mode, count); CUBE_PRE(mode, count); bool c = cap_here(); if (c) cap_pre(); { bool zf = zb_pre(); r_glDrawElements(mode, count, type, idx); zb_post(zf); } CUBE_POST(); if (c) cap_post(mode, count); }
+{ t_diag_draws++; if (t_layer_draws >= 0) t_layer_draws++; bt_draw(mode, count); CUBE_PRE(mode, count); bool c = cap_here(); if (c) cap_pre(); { bool zf = zb_pre(); r_glDrawElements(mode, count, type, idx); zb_post(zf); } CUBE_POST(); if (c) cap_post(mode, count); else err_check("a draw"); }
 static void (*r_glDrawElementsInstanced)(unsigned, int, unsigned, const void *, int);
 static void w_glDrawElementsInstanced(unsigned mode, int count, unsigned type, const void *idx, int inst)
-{ t_diag_draws++; if (t_layer_draws >= 0) t_layer_draws++; bt_draw(mode, count); CUBE_PRE(mode, count); bool c = cap_here(); if (c) cap_pre(); { bool zf = zb_pre(); r_glDrawElementsInstanced(mode, count, type, idx, inst); zb_post(zf); } CUBE_POST(); if (c) cap_post(mode, count); }
+{ t_diag_draws++; if (t_layer_draws >= 0) t_layer_draws++; bt_draw(mode, count); CUBE_PRE(mode, count); bool c = cap_here(); if (c) cap_pre(); { bool zf = zb_pre(); r_glDrawElementsInstanced(mode, count, type, idx, inst); zb_post(zf); } CUBE_POST(); if (c) cap_post(mode, count); else err_check("a draw"); }
 static void (*r_glDrawRangeElements)(unsigned, unsigned, unsigned, int, unsigned, const void *);
 static void w_glDrawRangeElements(unsigned mode, unsigned s, unsigned e, int count, unsigned type, const void *idx)
-{ t_diag_draws++; if (t_layer_draws >= 0) t_layer_draws++; bt_draw(mode, count); CUBE_PRE(mode, count); bool c = cap_here(); if (c) cap_pre(); { bool zf = zb_pre(); r_glDrawRangeElements(mode, s, e, count, type, idx); zb_post(zf); } CUBE_POST(); if (c) cap_post(mode, count); }
+{ t_diag_draws++; if (t_layer_draws >= 0) t_layer_draws++; bt_draw(mode, count); CUBE_PRE(mode, count); bool c = cap_here(); if (c) cap_pre(); { bool zf = zb_pre(); r_glDrawRangeElements(mode, s, e, count, type, idx); zb_post(zf); } CUBE_POST(); if (c) cap_post(mode, count); else err_check("a draw"); }
 static void (*r_glDrawArrays)(unsigned, int, int);
 static void w_glDrawArrays(unsigned mode, int first, int count)
-{ t_diag_draws++; if (t_layer_draws >= 0) t_layer_draws++; bt_draw(mode, count); CUBE_PRE(mode, count); bool c = cap_here(); if (c) cap_pre(); { bool zf = zb_pre(); r_glDrawArrays(mode, first, count); zb_post(zf); } CUBE_POST(); if (c) cap_post(mode, count); }
+{ t_diag_draws++; if (t_layer_draws >= 0) t_layer_draws++; bt_draw(mode, count); CUBE_PRE(mode, count); bool c = cap_here(); if (c) cap_pre(); { bool zf = zb_pre(); r_glDrawArrays(mode, first, count); zb_post(zf); } CUBE_POST(); if (c) cap_post(mode, count); else err_check("a draw"); }
 static void (*r_glDrawArraysInstanced)(unsigned, int, int, int);
 static void w_glDrawArraysInstanced(unsigned mode, int first, int count, int inst)
-{ t_diag_draws++; if (t_layer_draws >= 0) t_layer_draws++; bt_draw(mode, count); CUBE_PRE(mode, count); bool c = cap_here(); if (c) cap_pre(); { bool zf = zb_pre(); r_glDrawArraysInstanced(mode, first, count, inst); zb_post(zf); } CUBE_POST(); if (c) cap_post(mode, count); }
+{ t_diag_draws++; if (t_layer_draws >= 0) t_layer_draws++; bt_draw(mode, count); CUBE_PRE(mode, count); bool c = cap_here(); if (c) cap_pre(); { bool zf = zb_pre(); r_glDrawArraysInstanced(mode, first, count, inst); zb_post(zf); } CUBE_POST(); if (c) cap_post(mode, count); else err_check("a draw"); }
 static void (*r_glClear)(unsigned);
-static void w_glClear(unsigned mask) { r_glClear(mask); cap_dirty(); }
+static void w_glClear(unsigned mask) { r_glClear(mask); cap_dirty(); if (!cap_here()) err_check("glClear"); }
 
 /* at each swap: a capture starts with the frame after a listed one's predecessor, and ends at that frame's swap */
 static void diag_summary(unsigned long n)
@@ -1059,6 +1102,7 @@ static void diag_summary(unsigned long n)
 static void diag_swap(unsigned long n)
 {
     if (!diag_on()) return;
+    if (!cap_here()) err_check("the end of a frame");
     unsigned long drew = t_diag_draws; t_diag_draws = 0;
 #if defined(__aarch64__)
     if (n == 300) {   /* FPCR.FZ (bit 24) flushes subnormals on the CPU; Android starts threads with it off */
