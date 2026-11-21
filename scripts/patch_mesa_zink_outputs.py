@@ -29,8 +29,8 @@ patch(Z + "zink_types.h",
       "   uint8_t husk_out_kind[PIPE_MAX_COLOR_BUFS];\n")
 
 patch(Z + "zink_compiler.c",
-      "   zs->can_inline = true;\n   zs->nir = nir;\n",
-      "   zs->can_inline = true;\n   zs->nir = nir;\n"
+      "      nir_sort_variables_by_location(nir, nir_var_shader_out);\n   }\n",
+      "      nir_sort_variables_by_location(nir, nir_var_shader_out);\n   }\n"
       "   if (nir->info.stage == MESA_SHADER_FRAGMENT) {\n"
       "      nir_foreach_shader_out_variable(var, nir) {\n"
       "         if (var->data.index || (var->data.location != FRAG_RESULT_COLOR && var->data.location < FRAG_RESULT_DATA0))\n"
