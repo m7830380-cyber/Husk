@@ -34,6 +34,7 @@ jobs:
         run: |
           tail -150 build/mesa-configure.log || true
           tail -60 third_party/mesa/build-ios/meson-logs/meson-log.txt || true
+          grep -E "error:|FAILED:|undefined" build/mesa-ninja.log | sort -u | head -200 || true
       - name: Package
         run: |
           cd build/ios-arm64 && tar -czf "$GITHUB_WORKSPACE/mesa-zink-ios.tar.gz" zink
