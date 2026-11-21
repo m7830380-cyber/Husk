@@ -183,6 +183,25 @@ struct TLAppSettingsView: View {
             .filter { FileManager.default.fileExists(atPath: $0.path) }
     }
 
+    private var graphicsFooter: String {
+        let renderer: String
+        if settings.renderer == .vulkan {
+            renderer = "The game is offered Vulkan (MoltenVK) as well as OpenGL ES, as on an Android phone, and uses Vulkan if it was built for it. "
+                + "A game that cannot start Vulkan falls back to OpenGL ES by itself. Applies the next time the game starts."
+        } else {
+            renderer = "The game gets OpenGL ES only: Vulkan is not offered. Pick this if the game looks or runs worse with Vulkan. A game that "
+                + "can only draw with Vulkan will not start. Applies the next time the game starts."
+        }
+        let es31: String
+        if settings.gles31 {
+            es31 = "OpenGL ES 3.1: a game that asks for 3.1 gets a real 3.1 context, and its shaders compile as written. Compute shaders "
+                + "are not supported yet, so a game that needs them may draw wrongly. Turn this off if the game worked before."
+        } else {
+            es31 = "OpenGL ES 3.1 off: a game that asks for 3.1 gets 3.0, with Husk rewriting its shaders to fit. This is the stable choice."
+        }
+        return renderer + "\n\n" + es31
+    }
+
     var body: some View {
         HuskForm {
             Section {
@@ -223,15 +242,7 @@ struct TLAppSettingsView: View {
             } header: {
                 Text("Graphics")
             } footer: {
-                Text((settings.renderer == .vulkan
-                     ? "The game is offered Vulkan (MoltenVK) as well as OpenGL ES, as on an Android phone, and uses Vulkan if it was built for it. "
-                       + "A game that cannot start Vulkan falls back to OpenGL ES by itself. Applies the next time the game starts."
-                     : "The game gets OpenGL ES only: Vulkan is not offered. Pick this if the game looks or runs worse with Vulkan. A game that "
-                       + "can only draw with Vulkan will not start. Applies the next time the game starts.")
-                     + (settings.gles31
-                        ? "\n\nOpenGL ES 3.1: a game that asks for 3.1 gets a real 3.1 context, and its shaders compile as written. Compute shaders "
-                          + "are not supported yet, so a game that needs them may draw wrongly. Turn this off if the game worked before."
-                        : "\n\nOpenGL ES 3.1 off: a game that asks for 3.1 gets 3.0, with Husk rewriting its shaders to fit. This is the stable choice."))
+                Text(graphicsFooter)
             }
 
             Section {
