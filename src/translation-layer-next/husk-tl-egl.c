@@ -274,9 +274,13 @@ __attribute__((used)) void husk_caps_fix(uint32_t *c)
             tl_log_line("egl: es31: max uniform locations found at caps word %d", at);
         }
     }
-    if (at > 0 && (int32_t)c[at] < 1024) {
-        c[at] = 1024;
-        if (!told++) tl_log_line("egl: es31: ANGLE's max uniform locations raised to 1024 (it reports 0 on Metal)");
+    if (at > 0) {
+        /* maxCombinedShaderOutputResources sits right before maxUniformLocations; ES 3.1 links count every
+           fragment output against it, so 0 refuses any program that draws. 16 covers 8 draw buffers plus room. */
+        bool raised = false;
+        if ((int32_t)c[at] < 1024) { c[at] = 1024; raised = true; }
+        if ((int32_t)c[at - 1] < 16) { c[at - 1] = 16; raised = true; }
+        if (raised && !told++) tl_log_line("egl: es31: ANGLE's max uniform locations raised to 1024 and max combined shader output resources to 16 (Metal reports 0 for both)");
     }
 }
 #if defined(__aarch64__) && defined(__APPLE__)
