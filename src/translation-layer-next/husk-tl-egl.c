@@ -240,10 +240,43 @@ static bool g_es31_native;         /* the game runs on a real 3.1 context ANGLE 
  * DisplayMtl's vtable pointed at one that answers 3.1 -- the same Version encoding (major << 8 | minor) -- or back at the original.
  */
 static uint32_t angle_es31_version(const void *self) { (void)self; return 0x0301; }
+
+/*
+ * The backend leaves the limits only 3.1 has at 0 in the caps it reports (rx::ContextMtl::getNativeCaps returns gl::Caps by value), and
+ * ANGLE's linker refuses any 3.1 program that has a uniform: "Exceeded maximum uniform location size ... max uniform locations = 0".
+ * The slot of getNativeCaps in ContextMtl's vtable goes to a trampoline that calls it and then sets maxUniformLocations to 1024 (the
+ * 3.1 minimum). The field is found by the limits Metal puts just before it -- maxUniformBufferBindings 32, maxUniformBlockSize 16384
+ * (64-bit), uniformBufferOffsetAlignment 16 or 256, maxCombinedUniformBlocks 32 -- so another layout of gl::Caps is left alone.
+ */
+void *g_husk_caps_orig;
+__attribute__((used)) void husk_caps_fix(uint32_t *c)
+{
+    static int at = -1, told;
+    if (at < 0) {
+        for (int j = 2; j < 600; j += 2)
+            if (c[j] == 16384 && c[j + 1] == 0 && c[j - 2] == 32 && (c[j + 2] == 16 || c[j + 2] == 256) && c[j + 3] == 32 && c[j + 7] == 0) { at = j + 8; break; }
+        if (at < 0) { at = 0; tl_log_line("egl: es31: ANGLE's caps are laid out differently: uniform locations not raised"); }
+    }
+    if (at > 0 && (int32_t)c[at] < 1024) {
+        c[at] = 1024;
+        if (!told++) tl_log_line("egl: es31: ANGLE's max uniform locations raised to 1024 (it reports 0 on Metal)");
+    }
+}
+#if defined(__aarch64__) && defined(__APPLE__)
+__attribute__((naked)) static void husk_caps_tramp(void)
+{
+    __asm__ volatile(
+        "stp x29, x30, [sp, #-32]!\n" "mov x29, sp\n" "str x8, [sp, #16]\n"
+        "adrp x16, _g_husk_caps_orig@PAGE\n" "ldr x16, [x16, _g_husk_caps_orig@PAGEOFF]\n" "blr x16\n"
+        "ldr x0, [sp, #16]\n" "bl _husk_caps_fix\n"
+        "ldp x29, x30, [sp], #32\n" "ret\n");
+}
+#endif
+
 static bool angle_es31(bool on)
 {
 #ifdef __APPLE__
-    static void **slot; static void *orig; static int found = -1;
+    static void **slot, **caps_slot; static void *orig; static int found = -1;
     if (found < 0) {
         found = 0;
         Dl_info info;
@@ -274,7 +307,25 @@ static bool angle_es31(bool on)
         for (; p < end; p++) if ((uintptr_t)*p == fn) { if (!hits) slot = p; hits++; }
         if (hits != 1) { tl_log_line("egl: es31: %d vtable slots hold getMaxSupportedESVersion; not patching", hits); slot = NULL; return false; }
         orig = *slot; found = 1;
+        uintptr_t cfn = 0;
+        for (uint32_t i = 0; i < st->nsyms; i++)
+            if (sym[i].n_un.n_strx && !strcmp(str + sym[i].n_un.n_strx, "__ZNK2rx10ContextMtl13getNativeCapsEv") && sym[i].n_value) { cfn = (uintptr_t)(slide + sym[i].n_value); break; }
+        hits = 0;
+        if (cfn) for (p = (void **)(slide + dconst->addr); p < end; p++) if ((uintptr_t)*p == cfn) { if (!hits) caps_slot = p; hits++; }
+        if (hits != 1) { tl_log_line("egl: es31: rx::ContextMtl::getNativeCaps %s; uniform locations not raised", cfn ? "is in more than one vtable slot or none" : "not found"); caps_slot = NULL; }
+        else g_husk_caps_orig = *caps_slot;
     }
+#if defined(__aarch64__)
+    if (caps_slot) {
+        void *cwant = on ? (void *)husk_caps_tramp : g_husk_caps_orig;
+        if (*caps_slot != cwant) {
+            long cpg = sysconf(_SC_PAGESIZE);
+            void *cpage = (void *)((uintptr_t)caps_slot & ~(uintptr_t)(cpg - 1));
+            if (mprotect(cpage, (size_t)cpg, PROT_READ | PROT_WRITE) == 0) { *caps_slot = cwant; mprotect(cpage, (size_t)cpg, PROT_READ); }
+            else tl_log_line("egl: es31: cannot write ContextMtl's vtable");
+        }
+    }
+#endif
     if (found != 1) return false;
     void *want = on ? (void *)angle_es31_version : orig;
     if (*slot == want) return true;
