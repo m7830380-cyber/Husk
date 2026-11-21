@@ -116,6 +116,16 @@ static void GA_forceQuit(tl_jcall *c)
         if (next <= fp) break;
         fp = next;
     }
+    /* The fatal error's text: UE copies it into GErrorHist (TCHAR = UTF-16 on Android) before asking to quit. */
+    tl_lib *ue = tl_ld_find_lib("libUE4.so");
+    const unsigned short *hist = ue ? (const unsigned short *)tl_ld_sym(ue, "GErrorHist") : NULL;
+    if (hist) {
+        char buf[1024]; int n = 0;
+        for (int i = 0; i < 4096 && hist[i] && n < (int)sizeof buf - 1; i++)
+            buf[n++] = hist[i] < 0x80 ? (hist[i] >= 0x20 || hist[i] == '\n' ? (char)hist[i] : ' ') : '?';
+        buf[n] = 0;
+        tl_log_line("ue4: error text: %s", n ? buf : "(empty)");
+    } else tl_log_line("ue4: error text: GErrorHist not exported");
     for (;;) sleep(1000);
 }
 
