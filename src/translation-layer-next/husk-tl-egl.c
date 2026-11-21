@@ -99,6 +99,8 @@ bool tl_egl_init(const char *egl_path, const char *gles_path, const char *frame_
 {
     pthread_mutex_lock(&E.lock);
     if (E.ready) { pthread_mutex_unlock(&E.lock); return true; }
+    char fallback[600] = "";
+reload:
     snprintf(E.egl_path, sizeof(E.egl_path), "%s", egl_path);
     snprintf(E.gles_path, sizeof(E.gles_path), "%s", gles_path ? gles_path : egl_path);
     const char *base = strrchr(egl_path, '/');
@@ -127,6 +129,19 @@ bool tl_egl_init(const char *egl_path, const char *gles_path, const char *frame_
     LOAD(g, eglQueryAPI); LOAD(g, eglGetError); LOAD(g, eglWaitGL); LOAD(g, eglWaitNative); LOAD(g, eglReleaseThread);
     a_eglGetPlatformDisplayEXT = a_eglGetProcAddress ? a_eglGetProcAddress("eglGetPlatformDisplayEXT") : NULL;
     if (!a_eglGetPlatformDisplayEXT) { tl_log_line("egl: ANGLE has no eglGetPlatformDisplayEXT"); pthread_mutex_unlock(&E.lock); return false; }
+    if (g_zink && !fallback[0]) {
+        /* Zink stands on the device's Vulkan: a device it refuses leaves no display at all, and the game no GL. Bring it up here, and
+         * when it does not come, use ANGLE beside it instead */
+        EGLDisplay d = a_eglGetPlatformDisplayEXT(0x31DD /* EGL_PLATFORM_SURFACELESS_MESA */, NULL, NULL);
+        EGLint mj = 0, mn = 0;
+        if (d && a_eglInitialize(d, &mj, &mn)) { E.display = d; tl_log_line("egl: Zink display up, EGL %d.%d", mj, mn); }
+        else {
+            snprintf(fallback, sizeof(fallback), "%.*slibANGLE-shared.dylib", base ? (int)(base + 1 - egl_path) : 0, egl_path);
+            tl_log_line("egl: Zink did not start (display %p, error 0x%x): using ANGLE (%s)", d, a_eglGetError ? a_eglGetError() : 0, fallback);
+            egl_path = fallback; gles_path = NULL; E.gles = NULL; E.egl = NULL;
+            goto reload;
+        }
+    }
     /* GLES functions this layer itself calls (frame capture) */
     a_glReadPixels = a_eglGetProcAddress("glReadPixels");
     a_glGetIntegerv = a_eglGetProcAddress("glGetIntegerv");
