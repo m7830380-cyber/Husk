@@ -297,6 +297,12 @@ static void *launch_thread(void *arg)
     if (A.engine == ENGINE_UNITY) tl_unity_register_pad_sink();
     else if (A.engine == ENGINE_COCOS) tl_cocos_register_pad_sink();
 
+    /* The renderer the game's settings chose, for every engine: with MoltenVK named, libvulkan.so is there and the game picks between
+     * Vulkan and OpenGL ES as on a phone; without it, there is no Vulkan and the game draws with OpenGL ES (ANGLE). */
+    if (A.vulkan[0]) tl_vk_configure(A.vulkan, NULL, 0);
+    tl_log_line("native: renderer %s", A.vulkan[0] ? (tl_vk_available() ? "Vulkan offered (MoltenVK), OpenGL ES as the fallback" : "Vulkan asked for, but MoltenVK did not load: OpenGL ES")
+                                                  : "OpenGL ES only (game settings)");
+
     bool ok;
     if (A.engine == ENGINE_GAMEACTIVITY) {
         tl_ga_config cfg = {
@@ -403,10 +409,7 @@ static void *launch_thread(void *arg)
             .apk_path = A.apk, .data_dir = A.data, .package_name = A.package, .width = A.width, .height = A.height,
             .metal_layer = A.layer, .angle_egl = A.angle, .angle_gles = NULL, .frame_dir = NULL, .frame_every = 0,
         };
-        /* The renderer the game's settings chose: with MoltenVK named, the game finds Vulkan and picks between it and OpenGL ES as on a phone */
-        if (A.vulkan[0]) tl_vk_configure(A.vulkan, NULL, 0);
-        tl_log_line("unity: starting %s as %s, %dx%d (renderer: %s)", A.apk, A.package, A.width, A.height,
-                    A.vulkan[0] ? (tl_vk_available() ? "Vulkan offered, OpenGL ES as the fallback" : "Vulkan asked for, but MoltenVK did not load: OpenGL ES") : "OpenGL ES only");
+        tl_log_line("unity: starting %s as %s, %dx%d", A.apk, A.package, A.width, A.height);
         tl_audio_install();
         ok = tl_unity_start(&cfg) && tl_unity_run();
     }

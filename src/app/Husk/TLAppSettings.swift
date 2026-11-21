@@ -77,7 +77,7 @@ struct TLAppSettings: Codable, Equatable {
         }
     }
 
-    /// Which graphics API a Unity game is given. Vulkan: the game is offered Vulkan (MoltenVK, over Metal) and OpenGL ES, and picks
+    /// Which graphics API the game is given (any engine). Vulkan: the game is offered Vulkan (MoltenVK, over Metal) and OpenGL ES, and picks
     /// as it does on an Android phone -- a game built for Vulkan uses it, and one that cannot start it falls back to OpenGL ES.
     /// OpenGL ES: Vulkan is not there, so the game runs on OpenGL ES (ANGLE, over Metal), as Husk did before this setting.
     enum Renderer: String, Codable, CaseIterable, Identifiable {
@@ -211,20 +211,18 @@ struct TLAppSettingsView: View {
                    + "running in this session needs Husk closed and opened again.")
             }
 
-            if app.screenEngine == .unity {
-                Section {
-                    Picker("Renderer", selection: $settings.renderer) {
-                        ForEach(TLAppSettings.Renderer.allCases) { Text($0.title).tag($0) }
-                    }
-                } header: {
-                    Text("Graphics")
-                } footer: {
-                    Text(settings.renderer == .vulkan
-                         ? "The game is offered Vulkan, as on an Android phone, and uses it if it was built for it. A game that cannot start "
-                           + "Vulkan falls back to OpenGL ES by itself. Applies the next time the game starts."
-                         : "The game runs on OpenGL ES only. Pick this if the game looks or runs worse with Vulkan. Applies the next time "
-                           + "the game starts.")
+            Section {
+                Picker("Renderer", selection: $settings.renderer) {
+                    ForEach(TLAppSettings.Renderer.allCases) { Text($0.title).tag($0) }
                 }
+            } header: {
+                Text("Graphics")
+            } footer: {
+                Text(settings.renderer == .vulkan
+                     ? "The game is offered Vulkan (MoltenVK) as well as OpenGL ES, as on an Android phone, and uses Vulkan if it was built for it. "
+                       + "A game that cannot start Vulkan falls back to OpenGL ES by itself. Applies the next time the game starts."
+                     : "The game gets OpenGL ES only: Vulkan is not offered. Pick this if the game looks or runs worse with Vulkan. A game that "
+                       + "can only draw with Vulkan will not start. Applies the next time the game starts.")
             }
 
             Section {

@@ -287,6 +287,13 @@ final class TLUnityUIView: UIView, UIKeyInput {
             husk_native_set_system_files(sys + "/cacerts", sys)
         }
         husk_native_set_extra_fonts(CJKFonts.directory.path)
+        // The renderer this game's settings ask for, whatever its engine. Vulkan: MoltenVK is the device's Vulkan, and the game picks
+        // between it and OpenGL ES as it does on a phone. OpenGL ES: Vulkan is not there, so the game draws with ANGLE.
+        let appID = ((dataDir as NSString).deletingLastPathComponent as NSString).lastPathComponent
+        let renderer = TLAppSettings.load(appID).renderer
+        let mvk = Bundle.main.privateFrameworksPath.map { $0 + "/MoltenVK.framework/MoltenVK" } ?? ""
+        husk_ue4_set_vulkan(renderer == .vulkan ? mvk : "")
+        HuskLog.log("tl", "native: renderer \(renderer.title) (game settings)")
         let started: Bool
         switch engine {
         case .sdl:
@@ -295,15 +302,11 @@ final class TLUnityUIView: UIView, UIKeyInput {
                 let k = contentScaleFactor
                 husk_sdl_set_safe_insets(Int32(inset.left * k), Int32(inset.top * k), Int32(inset.right * k), Int32(inset.bottom * k))
             }
-            // Vulkan for the SDL games that draw with it (directly, or through DXVK): MoltenVK, as for Unreal.
-            if let fw = Bundle.main.privateFrameworksPath { husk_ue4_set_vulkan(fw + "/MoltenVK.framework/MoltenVK") }
             started = husk_sdl_launch(apk, dataDir, layerPtr, Int32(width), Int32(height), angle, ca)
         case .gta: started = husk_gta_launch(apk, dataDir, layerPtr, Int32(width), Int32(height), angle, ca)
         case .godot: started = husk_godot_launch(apk, dataDir, layerPtr, Int32(width), Int32(height), angle, ca)
         case .nativeactivity: started = husk_ue4_launch(apk, dataDir, layerPtr, Int32(width), Int32(height), angle, ca)       // the NativeActivity driver; with no Unreal in the APK it runs the plain game
         case .ue4:
-            // Unreal draws with Vulkan, which on this device is MoltenVK, a framework of the app's own.
-            if let fw = Bundle.main.privateFrameworksPath { husk_ue4_set_vulkan(fw + "/MoltenVK.framework/MoltenVK") }
             started = husk_ue4_launch(apk, dataDir, layerPtr, Int32(width), Int32(height), angle, ca)
         case .cocos:
             // Geode, when it is on for this game and downloaded: loaded into the game after its own libraries.
@@ -332,15 +335,7 @@ final class TLUnityUIView: UIView, UIKeyInput {
             }
             started = husk_flutter_launch(apk, dataDir, layerPtr, Int32(width), Int32(height), angle, ca)
         case .minecraft: started = husk_gameactivity_launch(apk, dataDir, layerPtr, Int32(width), Int32(height), angle, ca)
-        case .unity:
-            // The renderer the game's settings ask for. Vulkan: MoltenVK is the device's Vulkan, and the game picks between it and OpenGL ES
-            // as it does on a phone. OpenGL ES: there is no Vulkan, so it runs on ANGLE.
-            let appID = ((dataDir as NSString).deletingLastPathComponent as NSString).lastPathComponent
-            let renderer = TLAppSettings.load(appID).renderer
-            let mvk = Bundle.main.privateFrameworksPath.map { $0 + "/MoltenVK.framework/MoltenVK" } ?? ""
-            husk_ue4_set_vulkan(renderer == .vulkan ? mvk : "")
-            HuskLog.log("tl", "unity: renderer \(renderer.title) (game settings)")
-            started = husk_unity_launch(apk, dataDir, layerPtr, Int32(width), Int32(height), angle, ca)
+        case .unity: started = husk_unity_launch(apk, dataDir, layerPtr, Int32(width), Int32(height), angle, ca)
         }
         if !started { HuskLog.log("tl", "native: launch refused") }
     }
