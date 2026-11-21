@@ -3,7 +3,7 @@ name: Build Mesa Zink iOS
 on:
   push:
     branches: [ main ]
-    paths: [ 'scripts/build_mesa_zink_ios.sh', 'patches/mesa/**', '.github/workflows/build-mesa-zink.yml' ]
+    paths: [ 'scripts/build_mesa_zink_ios.sh', 'scripts/patch_mesa_zink*.py', 'patches/mesa/**', '.github/workflows/build-mesa-zink.yml' ]
   workflow_dispatch:
 
 permissions:
