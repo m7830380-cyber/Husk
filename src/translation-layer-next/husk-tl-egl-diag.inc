@@ -226,19 +226,57 @@ static void tu_note(unsigned target, int level, int x, int y, int w, int h, unsi
     pthread_mutex_unlock(&g_tu_mu);
     int n = atomic_fetch_add(&g_tu_said, 1);
     if (n < 40 || (e && n < 200) || (want >= 0 && size != want && n < 200))
-        tl_log_line("gldiag: %s(tex %u, level %d, at %d,%d %dx%d, fmt %#x %s, %ld bytes%s%ld, %s)%s%#x [thread %p ctx %p]", call, tex, level, x, y, w, h, fmt,
-                    tu_fmtname(fmt), size, want < 0 ? "" : ", the format needs ", want < 0 ? 0 : want, pbo ? "from an unpack buffer" : "from memory",
+        tl_log_line("gldiag: %s(tex %u, level %d, at %d,%d %dx%d, fmt %#x %s, %ld bytes, needs %ld, %s)%s%#x [thread %p ctx %p]", call, tex, level, x, y, w, h, fmt,
+                    tu_fmtname(fmt), size, want, pbo ? "from an unpack buffer" : "from memory",
                     e ? " -> GL error " : "", e, (void *)pthread_self(), a_eglGetCurrentContext ? (void *)a_eglGetCurrentContext() : NULL);
+}
+/* Compressed uploads sourced from a pixel unpack buffer go through Mesa's GPU blit path, which renders into the
+ * compressed image through an uncompressed view; Metal cannot render to compressed textures, so the data is dropped
+ * and the texture stays zero (ASTC's error colour). Read the bytes out of the buffer and upload them from memory. */
+static int cpbo_said;
+static const void *cpbo_begin(int size, const void *data, int *pbo_out, void **map_out)
+{
+    static void *(*map)(unsigned, intptr_t, intptr_t, unsigned);
+    static void (*bind)(unsigned, unsigned);
+    static void (*buf_iv)(unsigned, unsigned, int *);
+    *pbo_out = 0; *map_out = NULL;
+    int pbo = 0; a_glGetIntegerv(0x88EF /* PIXEL_UNPACK_BUFFER_BINDING */, &pbo);
+    if (!pbo || size <= 0) return data;
+    if (!map) { *(void **)&map = a_eglGetProcAddress("glMapBufferRange"); *(void **)&bind = a_eglGetProcAddress("glBindBuffer");
+                *(void **)&buf_iv = a_eglGetProcAddress("glGetBufferParameteriv"); }
+    if (!map || !bind || !buf_iv) return data;
+    int mapped = 0, total = 0; buf_iv(0x88EC, 0x88BC /* BUFFER_MAPPED */, &mapped); buf_iv(0x88EC, 0x8764 /* BUFFER_SIZE */, &total);
+    intptr_t off = (intptr_t)data;
+    if (mapped || off < 0 || off + size > total) return data;
+    void *p = map(0x88EC, off, size, 1 /* MAP_READ_BIT */);
+    if (!p) return data;
+    if (diag_on() && cpbo_said < 6) {
+        cpbo_said++; const unsigned char *b = p; int nz = 0; for (int i = 0; i < size && i < 4096; i++) nz += b[i] != 0;
+        tl_log_line("gldiag: compressed upload from unpack buffer %d (+%ld, %d bytes) re-sent from memory; %d of the first %d bytes are non-zero", pbo, (long)off, size, nz, size < 4096 ? size : 4096);
+    }
+    *pbo_out = pbo; *map_out = p;
+    bind(0x88EC, 0);
+    return p;
+}
+static void cpbo_end(int pbo, void *p)
+{
+    if (!pbo) return;
+    static void (*bind)(unsigned, unsigned); static unsigned char (*unmap)(unsigned);
+    if (!bind) { *(void **)&bind = a_eglGetProcAddress("glBindBuffer"); *(void **)&unmap = a_eglGetProcAddress("glUnmapBuffer"); }
+    bind(0x88EC, (unsigned)pbo);
+    if (p && unmap) unmap(0x88EC);
 }
 static void (*r_glTexSubImage2D)(unsigned, int, int, int, int, int, unsigned, unsigned, const void *);
 static void w_glTexSubImage2D(unsigned t, int l, int x, int y, int w, int h, unsigned fmt, unsigned type, const void *px)
 { r_glTexSubImage2D(t, l, x, y, w, h, fmt, type, px); if (diag_on()) tu_note(t, l, x, y, w, h, fmt, -1, false, "glTexSubImage2D"); }
 static void (*r_glCompressedTexSubImage2D)(unsigned, int, int, int, int, int, unsigned, int, const void *);
 static void w_glCompressedTexSubImage2D(unsigned t, int l, int x, int y, int w, int h, unsigned fmt, int size, const void *data)
-{ r_glCompressedTexSubImage2D(t, l, x, y, w, h, fmt, size, data); if (diag_on()) tu_note(t, l, x, y, w, h, fmt, size, true, "glCompressedTexSubImage2D"); }
+{ int pbo; void *m; const void *src = cpbo_begin(size, data, &pbo, &m);
+  r_glCompressedTexSubImage2D(t, l, x, y, w, h, fmt, size, src); if (diag_on()) tu_note(t, l, x, y, w, h, fmt, size, true, "glCompressedTexSubImage2D"); cpbo_end(pbo, m); }
 static void (*r_glCompressedTexImage2D)(unsigned, int, unsigned, int, int, int, int, const void *);
 static void w_glCompressedTexImage2D(unsigned t, int l, unsigned fmt, int w, int h, int border, int size, const void *data)
-{ r_glCompressedTexImage2D(t, l, fmt, w, h, border, size, data); if (diag_on()) tu_note(t, l, 0, 0, w, h, fmt, size, true, "glCompressedTexImage2D"); }
+{ int pbo; void *m; const void *src = cpbo_begin(size, data, &pbo, &m);
+  r_glCompressedTexImage2D(t, l, fmt, w, h, border, size, src); if (diag_on()) tu_note(t, l, 0, 0, w, h, fmt, size, true, "glCompressedTexImage2D"); cpbo_end(pbo, m); }
 /* the upload record of a texture, for the probe line */
 static void tu_describe(unsigned tex, char *out, size_t n)
 {

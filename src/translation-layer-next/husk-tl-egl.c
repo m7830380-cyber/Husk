@@ -768,7 +768,8 @@ static void w_glTexSubImage3D(unsigned t, int l, int x, int y, int z, int w, int
 
 static void (*r_glCompressedTexSubImage3D)(unsigned, int, int, int, int, int, int, int, unsigned, int, const void *);
 static void w_glCompressedTexSubImage3D(unsigned t, int l, int x, int y, int z, int w, int h, int d, uint64_t fmt, uint64_t size, const void *data)
-{ r_glCompressedTexSubImage3D(t, l, x, y, z, w, h, d, (unsigned)fmt, (int)size, data); if (diag_on()) atomic_fetch_add(&g_diag_arr_csub, 1); }
+{ int pbo; void *m; const void *src = cpbo_begin((int)size, data, &pbo, &m);
+  r_glCompressedTexSubImage3D(t, l, x, y, z, w, h, d, (unsigned)fmt, (int)size, src); if (diag_on()) atomic_fetch_add(&g_diag_arr_csub, 1); cpbo_end(pbo, m); }
 
 /*
  * EXT_copy_image on ANGLE's Metal back end: the entry point is there, but TextureMtl has no copyTextureSubData, so the extension is
