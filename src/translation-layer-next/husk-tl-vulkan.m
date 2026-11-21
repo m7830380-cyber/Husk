@@ -716,7 +716,23 @@ static pfn_create_device g_real_create_device;
 static int w_vkCreateDevice(void *pd, const vk_device_ci *ci, const void *alloc, void **out)
 {
     if (!g_real_create_device) return -3;
-    if (!dxvk_game()) return g_real_create_device(pd, ci, alloc, out);
+    if (!dxvk_game()) {
+        /* Android builds ask for Android-only device extensions (VK_ANDROID_external_memory_android_hardware_buffer, ...)
+           that MoltenVK does not have, and one missing extension fails the whole device (-7), so the game drops to GLES.
+           Whatever the device does not list is left out of the request. */
+        vk_device_ci copy = *ci;
+        const char **ext = calloc(ci->extCount + 1, sizeof(char *));
+        uint32_t n = 0;
+        for (uint32_t i = 0; i < ci->extCount; i++) {
+            if (real_dev_ext(pd, ci->exts[i])) ext[n++] = ci->exts[i];
+            else tl_log_line("vulkan: device extension %s is not on this GPU; left out of the request", ci->exts[i]);
+        }
+        copy.extCount = n; copy.exts = ext;
+        int r = g_real_create_device(pd, &copy, alloc, out);
+        free(ext);
+        tl_log_line("vulkan: vkCreateDevice(%u of %u extensions) -> %d", n, ci->extCount, r);
+        return r;
+    }
     uint32_t base[N_FEATURES], saved1[8], saved2[8];
     vk_device_ci copy = *ci;
     if (ci->features) { memcpy(base, ci->features, sizeof(base)); unclaim(pd, base, saved1); copy.features = base; }
