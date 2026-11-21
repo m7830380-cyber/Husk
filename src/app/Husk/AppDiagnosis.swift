@@ -113,6 +113,14 @@ struct AppDiagnosis: Identifiable, Equatable {
                                 evidence: l)
         }
 
+        // A 32-bit ARM engine (armeabi-v7a only) started through NativeActivity: Husk's ARM32 interpreter runs small 32-bit libraries, not a whole engine
+        if let l = lines.first(where: { $0.hasPrefix("na: ") && $0.contains("is 32-bit ARM only") }) {
+            return AppDiagnosis(kind: .unsupportedCPU, title: "Not supported yet: 32-bit game engine",
+                                detail: "This game ships only a 32-bit ARM build of its engine (armeabi-v7a). Husk can translate small 32-bit "
+                                    + "libraries but not a whole 32-bit engine yet. A version of the game with arm64 (64-bit) libraries will run.",
+                                evidence: l)
+        }
+
         // Out of address space, not memory: a reservation of address space was refused (an allocator's PROT_NONE mmap failing with
         // ENOMEM), and the engine gave up. Unity's own allocators reserve 256 MiB regions, as 512 MiB each, far ahead of use; an iOS
         // app without the extended-virtual-addressing entitlement has a few GiB of address space, and installs re-signed with their

@@ -169,6 +169,8 @@ static void na_lib_cb(const char *name, uint64_t size, void *user)
     for (size_t i = 0; i < sizeof(support) / sizeof(support[0]); i++) if (!strncmp(name, support[i], strlen(support[i]))) return;
     if (l->n < 6) snprintf(l->name[l->n++], 64, "%s", name);
 }
+static bool engine_is_64bit(const char *libname);
+
 static bool start_generic(void)
 {
     struct na_libs libs = { .n = 0 };
@@ -182,6 +184,7 @@ static bool start_generic(void)
         if (l && tl_ld_sym(l, "ANativeActivity_onCreate")) { snprintf(N.main_lib, sizeof(N.main_lib), "%s", libs.name[i]); break; }
     }
     if (!N.main_lib[0]) { tl_log_line("na: no library exports ANativeActivity_onCreate"); return false; }
+    if (!engine_is_64bit(N.main_lib)) return false;
     tl_log_line("na: native activity in %s", N.main_lib);
     N.started = true;
     return true;
@@ -210,6 +213,18 @@ static void drop_empty_saves(const char *dir, int depth)
         }
     }
     closedir(d);
+}
+
+/* The NativeActivity path calls the engine directly, as arm64 code. A 32-bit ARM engine (armeabi-v7a only) runs on Husk's ARM32 interpreter, which covers small
+ * entry points (Minecraft PE's) but not booting a whole engine; calling its functions as host code jumps to a guest address and kills Husk. Say so and stop. */
+bool tl_a32_is_fn(const void *p);
+static bool engine_is_64bit(const char *libname)
+{
+    tl_lib *lib = tl_ld_find_lib(libname);
+    void *p = lib ? tl_ld_sym(lib, "ANativeActivity_onCreate") : NULL;
+    if (!tl_a32_is_fn(p)) return true;
+    tl_log_line("na: %s is 32-bit ARM only (armeabi-v7a); this engine needs an arm64 build to run on Husk", libname);
+    return false;
 }
 
 bool tl_na_start(const tl_ga_config *cfg)
@@ -278,6 +293,7 @@ bool tl_na_start(const tl_ga_config *cfg)
         if (ue) { patch_return(ue, "_ZN12FAndroidMisc15ShouldUseVulkanEv", 1); patch_return(ue, "_ZN12FAndroidMisc17IsVulkanAvailableEv", 1); }
     }
     tl_log_line("ue4: libraries loaded");
+    if (!engine_is_64bit("libUE4.so")) return false;
     setenv("TL_PAD_DPAD", "keys", 0);          /* the D-pad as DPAD_* keys, which the engine maps like a stick's arrows */
     static const tl_pad_sink sink = { na_pad_key, na_pad_motion };
     tl_pad_set_sink(&sink);
