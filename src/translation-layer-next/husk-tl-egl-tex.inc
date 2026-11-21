@@ -142,7 +142,8 @@ static void w_glTexParameteriv(unsigned t, unsigned p, const int *v) { if (!v ||
 static void (*r_glTexParameterfv)(unsigned, unsigned, const float *);
 static void w_glTexParameterfv(unsigned t, unsigned p, const float *v) { if (!v || !tf_param(t, p, (int)v[0])) r_glTexParameterfv(t, p, v); }
 static void (*r_glTexStorage2D)(unsigned, int, unsigned, int, int);
-static void w_glTexStorage2D(unsigned t, int levels, unsigned fmt, int w, int h) { r_glTexStorage2D(t, levels, fmt, w, h); tf_storage(t, fmt, 0); }
+static void diag_tex_storage2d(unsigned target, int levels, unsigned fmt, int w, int h);
+static void w_glTexStorage2D(unsigned t, int levels, unsigned fmt, int w, int h) { r_glTexStorage2D(t, levels, fmt, w, h); tf_storage(t, fmt, 0); diag_tex_storage2d(t, levels, fmt, w, h); }
 static void (*r_glTexImage2D)(unsigned, int, int, int, int, int, unsigned, unsigned, const void *);
 static void w_glTexImage2D(unsigned t, int level, int ifmt, int w, int h, int border, unsigned fmt, unsigned type, const void *px)
 { r_glTexImage2D(t, level, ifmt, w, h, border, fmt, type, px); if (level == 0) tf_storage(t, (unsigned)ifmt, type); }

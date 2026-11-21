@@ -147,6 +147,111 @@ static int diag_bound(unsigned target)
     return t;
 }
 
+static unsigned (*g_err_get)(void);
+static __thread unsigned t_err_held;
+/* ---- 2D texture uploads: what each texture was made as and what reached it, so a texture that samples wrong can be traced back to
+ * its upload (format, data size against what the format needs, a pixel-unpack buffer, an error from the call). */
+#define TU_N 4096
+static struct { unsigned name; unsigned fmt; int w, h, levels; unsigned up, cup, l0, pbo, err; unsigned long bytes; long badsize; } g_tu[TU_N];
+static pthread_mutex_t g_tu_mu = PTHREAD_MUTEX_INITIALIZER;
+static atomic_int g_tu_said;
+static int tu_slot(unsigned name, bool make)
+{
+    if (!name) return -1;
+    int i = (int)(name % TU_N);
+    if (g_tu[i].name == name) return i;
+    if (!make) return -1;
+    memset(&g_tu[i], 0, sizeof(g_tu[i])); g_tu[i].name = name;
+    return i;
+}
+/* bytes a compressed level of w x h needs, or -1 for a format not known here */
+static long tu_csize(unsigned fmt, int w, int h)
+{
+    static const unsigned char astc[14][2] = { {4,4},{5,4},{5,5},{6,5},{6,6},{8,5},{8,6},{8,8},{10,5},{10,6},{10,8},{10,10},{12,10},{12,12} };
+    int bw = 4, bh = 4, bb = 16;
+    if (fmt >= 0x93B0 && fmt <= 0x93BD) { bw = astc[fmt - 0x93B0][0]; bh = astc[fmt - 0x93B0][1]; }
+    else if (fmt >= 0x93D0 && fmt <= 0x93DD) { bw = astc[fmt - 0x93D0][0]; bh = astc[fmt - 0x93D0][1]; }
+    else if (fmt == 0x8D64 || fmt == 0x9274 || fmt == 0x9275 || fmt == 0x9276 || fmt == 0x9277 || fmt == 0x9270 || fmt == 0x9271 ||
+             fmt == 0x83F0 || fmt == 0x83F1 || fmt == 0x8C4C || fmt == 0x8C4D || fmt == 0x8DBB || fmt == 0x8DBC) bb = 8;
+    else if (fmt == 0x9278 || fmt == 0x9279 || fmt == 0x9272 || fmt == 0x9273 || fmt == 0x83F2 || fmt == 0x83F3 || fmt == 0x8C4E ||
+             fmt == 0x8C4F || fmt == 0x8DBD || fmt == 0x8DBE || (fmt >= 0x8E8C && fmt <= 0x8E8F)) bb = 16;
+    else return -1;
+    return (long)((w + bw - 1) / bw) * ((h + bh - 1) / bh) * bb;
+}
+static const char *tu_fmtname(unsigned f)
+{
+    if (f >= 0x93B0 && f <= 0x93BD) return "ASTC";
+    if (f >= 0x93D0 && f <= 0x93DD) return "ASTC sRGB";
+    if (f >= 0x9270 && f <= 0x9279) return "ETC2/EAC";
+    if (f == 0x8D64) return "ETC1";
+    if (f >= 0x83F0 && f <= 0x83F3) return "S3TC";
+    return "";
+}
+static unsigned tu_err(void)
+{
+    if (!g_err_get) g_err_get = (unsigned (*)(void))a_eglGetProcAddress("glGetError");
+    if (!g_err_get) return 0;
+    unsigned e = g_err_get();
+    if (e && !t_err_held) t_err_held = e;
+    return e;
+}
+static void diag_tex_storage2d(unsigned target, int levels, unsigned fmt, int w, int h)
+{
+    if (!diag_on()) return;
+    unsigned e = tu_err();
+    unsigned tex = (unsigned)diag_bound(target == 0x0DE1 ? 0x0DE1 : 0x8513);
+    pthread_mutex_lock(&g_tu_mu);
+    int i = tu_slot(tex, true);
+    if (i >= 0) { g_tu[i].fmt = fmt; g_tu[i].w = w; g_tu[i].h = h; g_tu[i].levels = levels; g_tu[i].up = g_tu[i].cup = g_tu[i].l0 = g_tu[i].pbo = 0; g_tu[i].err = e; g_tu[i].bytes = 0; g_tu[i].badsize = 0; }
+    pthread_mutex_unlock(&g_tu_mu);
+    if (e || atomic_fetch_add(&g_tu_said, 1) < 12)
+        tl_log_line("gldiag: glTexStorage2D(%s, tex %u, %d levels, fmt %#x %s, %dx%d)%s%s", target == 0x0DE1 ? "2D" : "cube", tex, levels, fmt,
+                    tu_fmtname(fmt), w, h, e ? " -> GL error " : "", e == 0x500 ? "INVALID_ENUM" : e == 0x501 ? "INVALID_VALUE" : e == 0x502 ? "INVALID_OPERATION" : e ? "other" : "");
+}
+static void tu_note(unsigned target, int level, int x, int y, int w, int h, unsigned fmt, long size, bool comp, const char *call)
+{
+    unsigned e = tu_err();
+    int pbo = 0; a_glGetIntegerv(0x88EF /* PIXEL_UNPACK_BUFFER_BINDING */, &pbo);
+    unsigned tex = (unsigned)diag_bound(target == 0x0DE1 ? 0x0DE1 : 0x8513);
+    pthread_mutex_lock(&g_tu_mu);
+    int i = tu_slot(tex, true);
+    long want = comp ? tu_csize(fmt, w, h) : -1;
+    if (i >= 0) {
+        g_tu[i].up++; if (comp) g_tu[i].cup++; if (!level) g_tu[i].l0++; if (pbo) g_tu[i].pbo++;
+        if (e && !g_tu[i].err) g_tu[i].err = e;
+        if (size > 0) g_tu[i].bytes += (unsigned long)size;
+        if (want >= 0 && size != want && !g_tu[i].badsize) g_tu[i].badsize = size - want;
+        if (!g_tu[i].fmt) { g_tu[i].fmt = fmt; g_tu[i].w = w; g_tu[i].h = h; }
+    }
+    pthread_mutex_unlock(&g_tu_mu);
+    int n = atomic_fetch_add(&g_tu_said, 1);
+    if (n < 40 || (e && n < 200) || (want >= 0 && size != want && n < 200))
+        tl_log_line("gldiag: %s(tex %u, level %d, at %d,%d %dx%d, fmt %#x %s, %ld bytes%s%ld, %s)%s%#x [thread %p ctx %p]", call, tex, level, x, y, w, h, fmt,
+                    tu_fmtname(fmt), size, want < 0 ? "" : ", the format needs ", want < 0 ? 0 : want, pbo ? "from an unpack buffer" : "from memory",
+                    e ? " -> GL error " : "", e, (void *)pthread_self(), a_eglGetCurrentContext ? (void *)a_eglGetCurrentContext() : NULL);
+}
+static void (*r_glTexSubImage2D)(unsigned, int, int, int, int, int, unsigned, unsigned, const void *);
+static void w_glTexSubImage2D(unsigned t, int l, int x, int y, int w, int h, unsigned fmt, unsigned type, const void *px)
+{ r_glTexSubImage2D(t, l, x, y, w, h, fmt, type, px); if (diag_on()) tu_note(t, l, x, y, w, h, fmt, -1, false, "glTexSubImage2D"); }
+static void (*r_glCompressedTexSubImage2D)(unsigned, int, int, int, int, int, unsigned, int, const void *);
+static void w_glCompressedTexSubImage2D(unsigned t, int l, int x, int y, int w, int h, unsigned fmt, int size, const void *data)
+{ r_glCompressedTexSubImage2D(t, l, x, y, w, h, fmt, size, data); if (diag_on()) tu_note(t, l, x, y, w, h, fmt, size, true, "glCompressedTexSubImage2D"); }
+static void (*r_glCompressedTexImage2D)(unsigned, int, unsigned, int, int, int, int, const void *);
+static void w_glCompressedTexImage2D(unsigned t, int l, unsigned fmt, int w, int h, int border, int size, const void *data)
+{ r_glCompressedTexImage2D(t, l, fmt, w, h, border, size, data); if (diag_on()) tu_note(t, l, 0, 0, w, h, fmt, size, true, "glCompressedTexImage2D"); }
+/* the upload record of a texture, for the probe line */
+static void tu_describe(unsigned tex, char *out, size_t n)
+{
+    out[0] = 0;
+    pthread_mutex_lock(&g_tu_mu);
+    int i = tu_slot(tex, false);
+    if (i >= 0) snprintf(out, n, "; made fmt %#x %s %dx%d, %u uploads (%u compressed, %u level 0, %u from unpack buffers), %lu bytes%s%ld, first error %#x",
+                         g_tu[i].fmt, tu_fmtname(g_tu[i].fmt), g_tu[i].w, g_tu[i].h, g_tu[i].up, g_tu[i].cup, g_tu[i].l0, g_tu[i].pbo, g_tu[i].bytes,
+                         g_tu[i].badsize ? ", a size off by " : "", g_tu[i].badsize, g_tu[i].err);
+    else snprintf(out, n, "; no upload seen");
+    pthread_mutex_unlock(&g_tu_mu);
+}
+
 static void (*r_glTexStorage3D)(unsigned, int, unsigned, int, int, int);
 static void w_glTexStorage3D(unsigned target, int levels, unsigned fmt, int w, int h, int d)
 {
@@ -399,8 +504,9 @@ static void diag_probe_at(unsigned target, unsigned tex, unsigned samp, int lod,
     bool nan = false;
     if (read) for (int i = 0; i < 32; i++) if (out[i] != out[i] || out[i] > 65000.0f || out[i] < -65000.0f) nan = true;
     if (why) { tl_log_line("gldiag:     %s: tex %u%s; %s", why, tex, nan ? " HAS NaN/inf" : "", read ? px : "(not read)"); return; }
-    tl_log_line("gldiag:     tex %u: base %d max %d min %#x mag %#x immutable %d (%d levels) compare %#x; %s", tex, base, maxl, minf, magf,
-                imm, imml, cmp, read ? px : "(depth compare: not read)");
+    char up[300]; tu_describe(tex, up, sizeof(up));
+    tl_log_line("gldiag:     tex %u: base %d max %d min %#x mag %#x immutable %d (%d levels) compare %#x; %s%s", tex, base, maxl, minf, magf,
+                imm, imml, cmp, read ? px : "(depth compare: not read)", up);
 }
 static void diag_probe(unsigned target, unsigned tex, unsigned samp) { diag_probe_at(target, tex, samp, 4, NULL); }
 
@@ -1043,8 +1149,6 @@ static void cube_post(void) { if (t_cube_post) { t_cube_post = false; cube_px("a
  * diagnostics run, the error is read after each draw (and clear, blit, mipmap generation); the first of each kind is logged, and
  * the error is kept for the game's own next glGetError, so it still sees it. */
 static unsigned (*r_glGetError)(void);
-static unsigned (*g_err_get)(void);
-static __thread unsigned t_err_held;
 static pthread_mutex_t g_err_mu = PTHREAD_MUTEX_INITIALIZER;
 static struct { const char *where; unsigned err; int prog; } g_err_seen[40];
 static int g_err_nseen;
