@@ -721,7 +721,20 @@ static void draw_text(gcanvas *v, jobj *s, int start, int end, float x, float y,
         if (bold || style != 0) {
             CGContextSetLineWidth(c, style != 0 ? pf(p, P_STROKE) : pf(p, P_TEXTSIZE) / 24);
             CGContextSetTextDrawingMode(c, style == 1 ? kCGTextStroke : kCGTextFillStroke);
-        } else CGContextSetTextDrawingMode(c, kCGTextFill);
+        } else {
+            /* Android's glyph rasteriser (FreeType hinting + Skia's text contrast) gives stems more ink than
+               CoreText does on iOS, where text otherwise looks thin: darken stems with a thin outline in the
+               fill colour, about 0.6 device px at body sizes, tapering off for large text as FreeType does */
+            CGSize d = CGContextConvertSizeToDeviceSpace(c, CGSizeMake(1, 0));
+            float scale = (float)hypot(d.width, d.height); if (scale <= 0) scale = 1;
+            float tsd = pf(p, P_TEXTSIZE) * scale, dark = tsd <= 36 ? 0.6f : tsd >= 96 ? 0.25f : 0.6f - (tsd - 36) * (0.35f / 60);
+            if (dark > tsd / 30) dark = tsd / 30;
+            if (dark > 0.05f) {
+                CGContextSetLineWidth(c, dark / scale);
+                CGContextSetLineJoin(c, kCGLineJoinRound);
+                CGContextSetTextDrawingMode(c, kCGTextFillStroke);
+            } else CGContextSetTextDrawingMode(c, kCGTextFill);
+        }
         CGFloat asc = 0, desc = 0;
         CTLineGetTypographicBounds(line, &asc, &desc, NULL);
         CGRect area = CGRectMake(x - 2, y - asc - 2, w + 4, asc + desc + 4);
