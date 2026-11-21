@@ -78,6 +78,7 @@ public final class Services {
                     android.app.job.JobParameters p = new android.app.job.JobParameters();
                     p.huskJobId = j.getId();
                     p.huskExtras = j.getExtras();
+                    p.huskJob = j;
                     ((android.app.job.JobService) s).onStartJob(p);
                 } else s.onStartCommand(new Intent().setComponent(cn), 0, 1);
             } catch (Throwable t) { android.util.Log.e("Husk", "job " + cn.getClassName() + " failed", t); }

@@ -1,6 +1,6 @@
 package android.app.job;
 public class JobParameters implements android.os.Parcelable {
-    public int huskJobId; public android.os.PersistableBundle huskExtras;
+    public int huskJobId; public android.os.PersistableBundle huskExtras; public JobInfo huskJob;
     public int getJobId() { return huskJobId; }
     public android.os.PersistableBundle getExtras() { return huskExtras != null ? huskExtras : new android.os.PersistableBundle(); }
     public android.os.Bundle getTransientExtras() { return new android.os.Bundle(); } public android.net.Network getNetwork() { return new android.net.Network(); } public JobWorkItem dequeueWork() { return null; } public void completeWork(JobWorkItem w) {} public boolean isOverrideDeadlineExpired() { return false; } public int getStopReason() { return 0; } public int describeContents() { return 0; }

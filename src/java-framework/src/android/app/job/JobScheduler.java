@@ -3,18 +3,55 @@ public abstract class JobScheduler {
     public static final int RESULT_FAILURE = 0, RESULT_SUCCESS = 1;
     public abstract int schedule(JobInfo job); public abstract int enqueue(JobInfo job, JobWorkItem w); public abstract void cancel(int id); public abstract void cancelAll();
     public abstract java.util.List<JobInfo> getAllPendingJobs(); public abstract JobInfo getPendingJob(int id);
-    /** Jobs are kept but not run: Husk runs one app in the foreground. */
+    /** Jobs run on the main thread once their minimum latency (or period) has passed; one shared table serves every getSystemService call. */
     public static final class Impl extends JobScheduler {
-        private final java.util.HashMap<Integer, JobInfo> mJobs = new java.util.HashMap<>();
+        private static final java.util.HashMap<Integer, JobInfo> sJobs = new java.util.HashMap<>();
+        private static final java.util.HashMap<Integer, Runnable> sPending = new java.util.HashMap<>();
+        private static final java.util.HashMap<Integer, Integer> sFailures = new java.util.HashMap<>();
+        private static android.os.Handler sHandler;
+        private static synchronized android.os.Handler handler() {
+            if (sHandler == null) sHandler = new android.os.Handler(android.os.Looper.getMainLooper());
+            return sHandler;
+        }
+        private static synchronized void post(final JobInfo j, long delay) {
+            final int id = j.getId();
+            Runnable old = sPending.remove(id);
+            if (old != null) handler().removeCallbacks(old);
+            Runnable r = new Runnable() { public void run() {
+                synchronized (Impl.class) {
+                    if (sPending.get(id) != this || sJobs.get(id) != j) return;
+                    sPending.remove(id);
+                    if (!j.isPeriodic()) sJobs.remove(id);
+                }
+                husk.Services.runJob(j);
+                if (j.isPeriodic()) synchronized (Impl.class) { if (sJobs.get(id) == j && !sPending.containsKey(id)) post(j, j.getIntervalMillis()); }
+            }};
+            sPending.put(id, r);
+            handler().postDelayed(r, Math.max(0, delay));
+        }
+        /** JobService.jobFinished(p, true): run the job again after its backoff. */
+        public static void retry(JobInfo j) {
+            if (j == null) return;
+            int n;
+            synchronized (Impl.class) { n = sFailures.getOrDefault(j.getId(), 0) + 1; sFailures.put(j.getId(), n); sJobs.put(j.getId(), j); }
+            long b = j.getInitialBackoffMillis();
+            long d = j.getBackoffPolicy() == JobInfo.BACKOFF_POLICY_LINEAR ? b * n : b << Math.min(n - 1, 20);
+            post(j, Math.min(d, JobInfo.MAX_BACKOFF_DELAY_MILLIS));
+        }
         public int schedule(JobInfo j) {
-            mJobs.put(j.getId(), j);
-            husk.Services.runJob(j);
+            synchronized (Impl.class) { sJobs.put(j.getId(), j); sFailures.remove(j.getId()); }
+            post(j, j.isPeriodic() ? j.getIntervalMillis() - j.getFlexMillis() : j.getMinLatencyMillis());
             return RESULT_SUCCESS;
         }
         public int enqueue(JobInfo j, JobWorkItem w) { return schedule(j); }
-        public void cancel(int id) { mJobs.remove(id); } public void cancelAll() { mJobs.clear(); }
-        public java.util.List<JobInfo> getAllPendingJobs() { return new java.util.ArrayList<>(mJobs.values()); }
-        public JobInfo getPendingJob(int id) { return mJobs.get(id); }
+        public void cancel(int id) {
+            synchronized (Impl.class) { sJobs.remove(id); Runnable r = sPending.remove(id); if (r != null) handler().removeCallbacks(r); }
+        }
+        public void cancelAll() {
+            synchronized (Impl.class) { for (Runnable r : sPending.values()) handler().removeCallbacks(r); sPending.clear(); sJobs.clear(); }
+        }
+        public java.util.List<JobInfo> getAllPendingJobs() { synchronized (Impl.class) { return new java.util.ArrayList<>(sJobs.values()); } }
+        public JobInfo getPendingJob(int id) { synchronized (Impl.class) { return sJobs.get(id); } }
     }
     /** One scheduler serves every namespace here. */
     public JobScheduler forNamespace(String namespace) { return this; }

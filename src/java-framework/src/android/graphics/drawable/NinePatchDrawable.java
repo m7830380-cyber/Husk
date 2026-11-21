@@ -9,6 +9,10 @@ public class NinePatchDrawable extends Drawable {
     private final Rect mPadding;
     public NinePatchDrawable(Resources r, Bitmap b, byte[] chunk, Rect padding, String src) { mPatch = new NinePatch(b, chunk, src); mPadding = padding != null ? new Rect(padding) : new Rect(mPatch.padding); }
     public NinePatchDrawable(NinePatch p) { mPatch = p; mPadding = new Rect(p.padding); }
+    @Deprecated public NinePatchDrawable(Bitmap b, byte[] chunk, Rect padding, String src) { this(null, b, chunk, padding, src); }
+    public NinePatchDrawable(Resources r, NinePatch p) { this(p); }
+    @Deprecated public NinePatchDrawable(NinePatch p, Resources r) { this(p); }
+    public NinePatchDrawable(Resources r, Bitmap b, byte[] chunk, Rect padding, Rect layoutInsets, String src) { this(r, b, chunk, padding, src); }
     @Override public void draw(Canvas c) { mPaint.setColorFilter(huskTintFilter()); mPatch.draw(c, getBounds(), mPaint); }
     @Override public boolean getPadding(Rect p) { p.set(mPadding); return (p.left | p.top | p.right | p.bottom) != 0; }
     @Override public int getIntrinsicWidth() { return mPatch.getWidth(); }
