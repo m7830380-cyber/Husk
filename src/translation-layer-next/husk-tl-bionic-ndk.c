@@ -794,13 +794,16 @@ static void b_ANativeActivity_input(void *a, uint32_t flags) { (void)a; (void)fl
 
 typedef struct tl_nwindow { atomic_int refs; int width, height, format; void *layer; jobj *texture; void *bits; } tl_nwindow;
 static tl_nwindow g_window = { 1, 1080, 2400, 1, NULL, NULL, NULL };
+/* The screen window's buffer size, as ANativeWindow_setBuffersGeometry set it (0: the window's own size). As on a phone, the
+ * buffers are that size and each frame is stretched to the whole window when it is put on the screen. */
+static int g_buf_w, g_buf_h;
 
 void tl_nwindow_configure(int w, int h, void *layer) { g_window.width = w; g_window.height = h; g_window.layer = layer; }
 void tl_nwindow_resize(int w, int h) { g_window.width = w; g_window.height = h; }
 void *tl_nwindow_get(void) { atomic_fetch_add(&g_window.refs, 1); return &g_window; }
 void *tl_nwindow_native(void *window) { return window ? ((tl_nwindow *)window)->layer : NULL; }
-int tl_nwindow_width(void *window) { return window ? ((tl_nwindow *)window)->width : 0; }
-int tl_nwindow_height(void *window) { return window ? ((tl_nwindow *)window)->height : 0; }
+int tl_nwindow_width(void *window) { return !window ? 0 : window == &g_window && g_buf_w > 0 ? g_buf_w : ((tl_nwindow *)window)->width; }
+int tl_nwindow_height(void *window) { return !window ? 0 : window == &g_window && g_buf_h > 0 ? g_buf_h : ((tl_nwindow *)window)->height; }
 /* A window on a TextureView's SurfaceTexture (a Surface made on one): drawn off-screen, each frame handed to the texture. */
 void *tl_nwindow_texture(void *window) { return window ? ((tl_nwindow *)window)->texture : NULL; }
 /* rgba (w x h, top row first unless flip) to the texture's next frame */
@@ -859,13 +862,19 @@ static int b_ANativeWindow_unlockAndPost(tl_nwindow *w)
     tl_nwindow_post(w, w->bits, w->width, w->height, false);
     return 0;
 }
-static int b_ANativeWindow_getWidth(tl_nwindow *w) { return w ? w->width : 0; }
-static int b_ANativeWindow_getHeight(tl_nwindow *w) { return w ? w->height : 0; }
+static int b_ANativeWindow_getWidth(tl_nwindow *w) { return tl_nwindow_width(w); }
+static int b_ANativeWindow_getHeight(tl_nwindow *w) { return tl_nwindow_height(w); }
 static int b_ANativeWindow_getFormat(tl_nwindow *w) { return w ? w->format : 0; }
 static int b_ANativeWindow_setBuffersGeometry(tl_nwindow *w, int width, int height, int format)
 {
     (void)format;
-    if (w && w != &g_window && width > 0 && height > 0 && (width != w->width || height != w->height)) { w->width = width; w->height = height; free(w->bits); w->bits = NULL; }
+    if (w == &g_window) {
+        int nw = width > 0 && height > 0 ? width : 0, nh = width > 0 && height > 0 ? height : 0;
+        if (nw != g_buf_w || nh != g_buf_h) tl_log_line("ndk: screen window buffers %dx%d (window %dx%d)", nw, nh, g_window.width, g_window.height);
+        g_buf_w = nw; g_buf_h = nh;
+        return 0;
+    }
+    if (w && width > 0 && height > 0 && (width != w->width || height != w->height)) { w->width = width; w->height = height; free(w->bits); w->bits = NULL; }
     return 0;
 }
 static void *b_ANativeWindow_toSurface(void *env, void *w) { (void)env; (void)w; return NULL; }

@@ -516,12 +516,12 @@ __attribute__((weak)) void tl_javaapp_app_pixels(const void *px, int w, int h);
 static EGLSurface g_comp_surf[MAX_COMP_SURFACES];
 /* Zink's windows: buffers, each put on its window's layer at a swap */
 #define MAX_ZINK_SURFACES 8
-static struct { EGLSurface s; void *layer; } g_zink_surf[MAX_ZINK_SURFACES];
-static void *zink_layer_of(EGLSurface s)
+static struct { EGLSurface s; void *layer, *win; } g_zink_surf[MAX_ZINK_SURFACES];
+static void *zink_layer_of(EGLSurface s, void **win)
 {
     void *l = NULL;
     pthread_mutex_lock(&g_tex_lock);
-    for (int i = 0; i < MAX_ZINK_SURFACES && s; i++) if (g_zink_surf[i].s == s) { l = g_zink_surf[i].layer; break; }
+    for (int i = 0; i < MAX_ZINK_SURFACES && s; i++) if (g_zink_surf[i].s == s) { l = g_zink_surf[i].layer; *win = g_zink_surf[i].win; break; }
     pthread_mutex_unlock(&g_tex_lock);
     return l;
 }
@@ -538,6 +538,8 @@ static const uint8_t *read_back(EGLDisplay d, EGLSurface s, EGLint *pw, EGLint *
 {
     EGLint w = 0, h = 0;
     a_eglQuerySurface(d, s, EGL_WIDTH, &w); a_eglQuerySurface(d, s, EGL_HEIGHT, &h);
+    if (*pw > 0 && *pw < w) w = *pw;   /* a part of the surface, from the bottom left */
+    if (*ph > 0 && *ph < h) h = *ph;
     if (w <= 0 || h <= 0 || !a_glReadPixels) return NULL;
     static __thread uint8_t *buf; static __thread size_t cap;
     size_t need = (size_t)w * h * 4;
@@ -599,7 +601,7 @@ static EGLSurface w_eglCreateWindowSurface(EGLDisplay d, EGLConfig cfg, void *wi
         EGLSurface s = a_eglCreatePbufferSurface(d, cfg, pb);
         if (s) {
             pthread_mutex_lock(&g_tex_lock);
-            for (int i = 0; i < MAX_ZINK_SURFACES; i++) if (!g_zink_surf[i].s) { g_zink_surf[i].s = s; g_zink_surf[i].layer = layer; break; }
+            for (int i = 0; i < MAX_ZINK_SURFACES; i++) if (!g_zink_surf[i].s) { g_zink_surf[i].s = s; g_zink_surf[i].layer = layer; g_zink_surf[i].win = win; break; }
             pthread_mutex_unlock(&g_tex_lock);
         }
         tl_log_line("egl: window %dx%d on layer %p -> Zink buffer %p%s", pb[1], pb[3], layer, s, s ? "" : " (failed)");
@@ -716,9 +718,11 @@ static EGLBoolean w_eglSwapBuffers(EGLDisplay d, EGLSurface s)
         fprintf(stderr, "egl: calls so far, by function: %s\n", hist);
     }
     if (E.frame_dir[0] && (n % (unsigned long)E.frame_every == 0 || n <= 3)) save_frame(d, s, n);
-    void *zl = g_zink && !E.frame_dir[0] ? zink_layer_of(s) : NULL;
+    void *zwin = NULL;
+    void *zl = g_zink && !E.frame_dir[0] ? zink_layer_of(s, &zwin) : NULL;
     if (zl) {
-        EGLint w = 0, h = 0;
+        /* buffers made smaller after the surface (ANativeWindow_setBuffersGeometry): the game draws that much, from the bottom left */
+        EGLint w = zwin ? tl_nwindow_width(zwin) : 0, h = zwin ? tl_nwindow_height(zwin) : 0;
         const uint8_t *px = read_back(d, s, &w, &h);
         if (px) tl_present_rgba(zl, px, w, h);
         return EGL_TRUE;
