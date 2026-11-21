@@ -93,7 +93,10 @@ static void where(char *out, size_t n, uintptr_t addr)
 {
     struct { uintptr_t addr; const char *name; uintptr_t off; } r = { addr, NULL, 0 };
     tl_ld_iterate(find_lib, &r);
-    if (r.name) snprintf(out, n, "%s+%#lx", r.name, (unsigned long)r.off);
+    const void *sa = NULL;
+    const char *sym = r.name ? tl_ld_symbol_at((const void *)addr, NULL, &sa) : NULL;
+    if (r.name && sym) snprintf(out, n, "%s+%#lx  %s+%#lx", r.name, (unsigned long)r.off, sym, (unsigned long)(addr - (uintptr_t)sa));
+    else if (r.name) snprintf(out, n, "%s+%#lx", r.name, (unsigned long)r.off);
     else snprintf(out, n, "%#lx", (unsigned long)addr);
 }
 
