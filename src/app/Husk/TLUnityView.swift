@@ -293,6 +293,8 @@ final class TLUnityUIView: UIView, UIKeyInput {
         let renderer = TLAppSettings.load(appID).renderer
         let mvk = Bundle.main.privateFrameworksPath.map { $0 + "/MoltenVK.framework/MoltenVK" } ?? ""
         husk_ue4_set_vulkan(renderer == .vulkan ? mvk : "")
+        // OpenGL ES 3.1 from ANGLE (experimental), read by the GL layer when the game makes its context
+        if TLAppSettings.load(appID).gles31 { setenv("TL_GL_ES31", "1", 1) } else { unsetenv("TL_GL_ES31") }
         HuskLog.log("tl", "native: renderer \(renderer.title) (game settings)")
         let started: Bool
         switch engine {

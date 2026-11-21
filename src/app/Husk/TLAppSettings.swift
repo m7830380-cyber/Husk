@@ -93,6 +93,9 @@ struct TLAppSettings: Codable, Equatable {
 
     var orientation: Orientation = .auto
     var renderer: Renderer = .vulkan
+    /// Experimental: OpenGL ES 3.1 from ANGLE itself instead of 3.0 with Husk's 3.1 stand-in, for games whose 3.1 shaders the stand-in
+    /// cannot rewrite (Unreal Engine's). Compute shaders are not there.
+    var gles31 = false
     var window: WindowMode = .auto
     var resolution: Resolution = .high
     /// The frames-per-second readout in the top bar.
@@ -126,6 +129,7 @@ struct TLAppSettings: Codable, Equatable {
         geode = try c.decodeIfPresent(Bool.self, forKey: .geode) ?? false
         window = try c.decodeIfPresent(WindowMode.self, forKey: .window) ?? .auto
         renderer = try c.decodeIfPresent(Renderer.self, forKey: .renderer) ?? .vulkan
+        gles31 = try c.decodeIfPresent(Bool.self, forKey: .gles31) ?? false
     }
 
     private static func url(_ id: String) -> URL {
@@ -215,14 +219,19 @@ struct TLAppSettingsView: View {
                 Picker("Renderer", selection: $settings.renderer) {
                     ForEach(TLAppSettings.Renderer.allCases) { Text($0.title).tag($0) }
                 }
+                Toggle("OpenGL ES 3.1 (Experimental)", isOn: $settings.gles31)
             } header: {
                 Text("Graphics")
             } footer: {
-                Text(settings.renderer == .vulkan
+                Text((settings.renderer == .vulkan
                      ? "The game is offered Vulkan (MoltenVK) as well as OpenGL ES, as on an Android phone, and uses Vulkan if it was built for it. "
                        + "A game that cannot start Vulkan falls back to OpenGL ES by itself. Applies the next time the game starts."
                      : "The game gets OpenGL ES only: Vulkan is not offered. Pick this if the game looks or runs worse with Vulkan. A game that "
                        + "can only draw with Vulkan will not start. Applies the next time the game starts.")
+                     + (settings.gles31
+                        ? "\n\nOpenGL ES 3.1: a game that asks for 3.1 gets a real 3.1 context, and its shaders compile as written. Compute shaders "
+                          + "are not supported yet, so a game that needs them may draw wrongly. Turn this off if the game worked before."
+                        : "\n\nOpenGL ES 3.1 off: a game that asks for 3.1 gets 3.0, with Husk rewriting its shaders to fit. This is the stable choice."))
             }
 
             Section {

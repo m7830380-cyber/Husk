@@ -11,6 +11,12 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/mman.h>
+#include <unistd.h>
+#ifdef __APPLE__
+#include <mach-o/loader.h>
+#include <mach-o/nlist.h>
+#endif
 
 #include "husk-tl-bionic.h"
 #include "husk-tl-ld.h"
@@ -224,17 +230,78 @@ PASS_BOOL(eglReleaseThread, (void), ())
 
 static const char *w_eglQueryString(EGLDisplay d, EGLint name) { return a_eglQueryString(d, name); }
 static bool g_es31_shim;           /* defined with the rest of the shim, below */
+
+/*
+ * OpenGL ES 3.1 on ANGLE's Metal backend, experimental (the game's "OpenGL ES 3.1" setting, TL_GL_ES31=1). The backend caps the version
+ * it offers in one virtual function, rx::DisplayMtl::getMaxSupportedESVersion (3.0 on GPU family 4+), while its shader compiler and most
+ * of the state behind it handle 3.1: what is not there is compute (dispatchCompute is unimplemented), so a game that needs compute
+ * shaders gets errors where it would otherwise be told 3.0. The function is found by its symbol in the loaded ANGLE and its slot in
+ * DisplayMtl's vtable pointed at one that answers 3.1 -- the same Version encoding (major << 8 | minor) -- or back at the original.
+ */
+static uint32_t angle_es31_version(const void *self) { (void)self; return 0x0301; }
+static bool angle_es31(bool on)
+{
+#ifdef __APPLE__
+    static void **slot; static void *orig; static int found = -1;
+    if (found < 0) {
+        found = 0;
+        Dl_info info;
+        if (!a_eglGetProcAddress || !dladdr((void *)a_eglGetProcAddress, &info) || !info.dli_fbase) { tl_log_line("egl: es31: ANGLE's image not found"); return false; }
+        const struct mach_header_64 *mh = info.dli_fbase;
+        const struct load_command *lc = (const void *)(mh + 1);
+        const struct segment_command_64 *text = NULL, *linkedit = NULL; const struct symtab_command *st = NULL;
+        const struct section_64 *dconst = NULL;
+        for (uint32_t i = 0; i < mh->ncmds; i++, lc = (const void *)((const char *)lc + lc->cmdsize)) {
+            if (lc->cmd == LC_SEGMENT_64) {
+                const struct segment_command_64 *sg = (const void *)lc;
+                if (!strcmp(sg->segname, "__TEXT")) text = sg;
+                if (!strcmp(sg->segname, "__LINKEDIT")) linkedit = sg;
+                const struct section_64 *sc = (const void *)(sg + 1);
+                for (uint32_t k = 0; k < sg->nsects; k++) if (!strcmp(sc[k].segname, "__DATA_CONST") && !strcmp(sc[k].sectname, "__const")) dconst = &sc[k];
+            } else if (lc->cmd == LC_SYMTAB) st = (const void *)lc;
+        }
+        if (!text || !linkedit || !st || !dconst) { tl_log_line("egl: es31: ANGLE's symbol table not found"); return false; }
+        intptr_t slide = (intptr_t)mh - (intptr_t)text->vmaddr;
+        const char *le = (const char *)(slide + linkedit->vmaddr - linkedit->fileoff);
+        const struct nlist_64 *sym = (const void *)(le + st->symoff); const char *str = le + st->stroff;
+        uintptr_t fn = 0;
+        for (uint32_t i = 0; i < st->nsyms; i++)
+            if (sym[i].n_un.n_strx && !strcmp(str + sym[i].n_un.n_strx, "__ZNK2rx10DisplayMtl24getMaxSupportedESVersionEv") && sym[i].n_value) { fn = (uintptr_t)(slide + sym[i].n_value); break; }
+        if (!fn) { tl_log_line("egl: es31: ANGLE has no rx::DisplayMtl::getMaxSupportedESVersion"); return false; }
+        void **p = (void **)(slide + dconst->addr), **end = (void **)(slide + dconst->addr + dconst->size);
+        int hits = 0;
+        for (; p < end; p++) if ((uintptr_t)*p == fn) { if (!hits) slot = p; hits++; }
+        if (hits != 1) { tl_log_line("egl: es31: %d vtable slots hold getMaxSupportedESVersion; not patching", hits); slot = NULL; return false; }
+        orig = *slot; found = 1;
+    }
+    if (found != 1) return false;
+    void *want = on ? (void *)angle_es31_version : orig;
+    if (*slot == want) return true;
+    long pg = sysconf(_SC_PAGESIZE);
+    void *page = (void *)((uintptr_t)slot & ~(uintptr_t)(pg - 1));
+    if (mprotect(page, (size_t)pg, PROT_READ | PROT_WRITE) != 0) { tl_log_line("egl: es31: cannot write ANGLE's vtable"); return false; }
+    *slot = want;
+    mprotect(page, (size_t)pg, PROT_READ);
+    tl_log_line("egl: %s", on ? "OpenGL ES 3.1 offered (experimental, game setting): ANGLE's Metal backend now allows 3.1 contexts" : "OpenGL ES 3.1 setting off: ANGLE back to 3.0");
+    return true;
+#else
+    (void)on; return false;
+#endif
+}
 static EGLContext w_eglCreateContext(EGLDisplay d, EGLConfig c, EGLContext share, const EGLint *at)
 {
     /* A game that insists on ES 3.1 or 3.2 (Unreal Engine tries 3.2, then 3.1) is given the 3.0 context ANGLE can make: the version it is then told is the shim's. */
     EGLint patched[40];
     /* A newer ANGLE can make a real 3.1 context on Metal: when it does, the game gets what it asked for and the 3.0 shim steps aside
-       (its shaders compile as written, with samplerBuffer and the varyings' explicit locations Unreal's 3.1 shaders use). TL_GL_NO_NATIVE_ES31: always the shim. */
+       (its shaders compile as written, with the varyings' explicit locations Unreal's 3.1 shaders use). Only with the game's OpenGL ES 3.1 setting (TL_GL_ES31=1). */
     static int native;                                         /* 1: a real 3.x context was made; bit 1<<minor: ANGLE refused 3.minor */
     int want_minor = 0;
     for (int n = 0; at && at[n] != EGL_NONE && n < 36; n += 2) if (at[n] == 0x30fb) want_minor = at[n + 1];
     /* from the version asked for down to 3.1 (a game asking for 3.2 takes 3.1 as well: Unreal asks for 3.2, then 3.1) */
-    for (int m = want_minor < 8 ? want_minor : 0; g_es31_shim && at && m > 0 && !getenv("TL_GL_NO_NATIVE_ES31"); m--) {
+    bool es31 = getenv("TL_GL_ES31") && *getenv("TL_GL_ES31") == '1';
+    static int applied = -1;
+    if (applied != es31) { angle_es31(es31); applied = es31; }
+    for (int m = want_minor < 8 ? want_minor : 0; es31 && g_es31_shim && at && m > 0; m--) {
         if (native & (1 << m)) continue;
         EGLint try_at[40]; int n = 0;
         for (; at[n] != EGL_NONE && n < 36; n += 2) { try_at[n] = at[n]; try_at[n + 1] = at[n] == 0x30fb ? m : at[n + 1]; }
