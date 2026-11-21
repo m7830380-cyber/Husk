@@ -60,7 +60,7 @@ meson setup build-ios --cross-file "$CROSS" \
     -Dplatforms= -Degl=enabled -Dgbm=disabled -Dglx=disabled \
     -Dopengl=true -Dgles1=disabled -Dgles2=enabled \
     -Dllvm=disabled -Dshared-llvm=disabled -Dzstd=disabled -Dexpat=disabled -Dvalgrind=disabled -Dlibunwind=disabled \
-    -Dbuild-tests=false -Dmoltenvk-dir="$(dirname "$(dirname "$MVK_LIB")")" \
+    -Dbuild-tests=false -Dmoltenvk-dir="${MOLTENVK_SDK:-$HUSK_ROOT/build/ios-arm64/lib/moltenvk-sdk}" \
     -Dprefix="$OUT" 2>&1 | tee "$HUSK_ROOT/build/mesa-configure.log"
 ninja -C build-ios install 2>&1 | tail -80
 find "$OUT" -name '*.dylib' -exec ls -la {} \;

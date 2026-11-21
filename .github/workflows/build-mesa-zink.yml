@@ -25,6 +25,8 @@ jobs:
           curl -fL --retry 3 -o mvk.tar https://github.com/KhronosGroup/MoltenVK/releases/download/v1.4.2/MoltenVK-ios.tar
           tar -xf mvk.tar
           mkdir -p build/ios-arm64/lib && cp -R MoltenVK/MoltenVK/dynamic/MoltenVK.xcframework build/ios-arm64/lib/
+          mkdir -p build/ios-arm64/lib/moltenvk-sdk && cp -R MoltenVK/MoltenVK/include build/ios-arm64/lib/moltenvk-sdk/
+          ls build/ios-arm64/lib/moltenvk-sdk/include
       - name: Build
         run: ./scripts/build_mesa_zink_ios.sh
       - name: Logs
