@@ -54,6 +54,15 @@ for p in "$HUSK_ROOT"/patches/mesa/*.patch; do [ -f "$p" ] && { git apply --chec
 sed -i '' "s/^if with_gallium and system_has_kms_drm$/if with_gallium and (system_has_kms_drm or host_machine.system() == 'darwin')/" meson.build
 grep -n "^if with_gallium and" meson.build
 
+# Zink finds Vulkan by dlopen'ing the loader; on iOS there is none, and MoltenVK (an ICD exporting vkGetInstanceProcAddr) is
+# embedded as a framework beside these libraries.
+sed -i '' 's|#define VK_LIBNAME "libvulkan.1.dylib"|#define VK_LIBNAME "@rpath/MoltenVK.framework/MoltenVK"|' src/gallium/drivers/zink/zink_screen.c
+grep -n 'MoltenVK.framework' src/gallium/drivers/zink/zink_screen.c
+# Surfaceless EGL looks for a DRM render node first and only falls back to a device-less screen for software rendering; iOS has no
+# DRM, so let Zink take the device-less path too.
+sed -i '' 's|if (!driver_loaded \&\& disp->Options.ForceSoftware) {|if (!driver_loaded \&\& (disp->Options.ForceSoftware \|\| disp->Options.Zink)) {|' src/egl/drivers/dri2/platform_surfaceless.c
+grep -n 'Options.Zink)) {' src/egl/drivers/dri2/platform_surfaceless.c
+
 rm -rf build-ios
 meson setup build-ios --cross-file "$CROSS" \
     -Dbuildtype=release -Db_ndebug=true \
@@ -65,4 +74,12 @@ meson setup build-ios --cross-file "$CROSS" \
     -Dprefix="$OUT" 2>&1 | tee "$HUSK_ROOT/build/mesa-configure.log"
 ninja -C build-ios -k 0 2>&1 | tee "$HUSK_ROOT/build/mesa-ninja.log" | tail -80
 ninja -C build-ios install 2>&1 | tail -40
+# Install names: the build's absolute paths become @rpath, so the libraries load from the app's Frameworks folder.
+cd "$OUT/lib"
+for f in libEGL.1.dylib libGLESv2.2.dylib libgallium-*.dylib; do
+    install_name_tool -id "@rpath/$f" "$f"
+    for dep in $(otool -L "$f" | awk 'NR>1 {print $1}' | grep "^$OUT/"); do install_name_tool -change "$dep" "@rpath/$(basename "$dep")" "$f"; done
+    install_name_tool -add_rpath @loader_path "$f" 2>/dev/null || true
+    otool -L "$f"
+done
 find "$OUT" -name '*.dylib' -exec ls -la {} \;
