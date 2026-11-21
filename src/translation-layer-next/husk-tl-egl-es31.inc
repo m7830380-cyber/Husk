@@ -554,6 +554,7 @@ static bool es31_q(void)
 static void (*r_glGetProgramInterfaceiv)(unsigned, unsigned, unsigned, int *);
 static void w_glGetProgramInterfaceiv(unsigned prog, unsigned iface, unsigned pname, int *params)
 {
+    if (params && cs_fake(prog)) { *params = 0; return; }        /* a compute program ANGLE could not build: nothing active */
     if (!g_es31_shim) { r_glGetProgramInterfaceiv(prog, iface, pname, params); return; }
     if (!params) return;
     *params = 0;
@@ -577,6 +578,7 @@ static void w_glGetProgramInterfaceiv(unsigned prog, unsigned iface, unsigned pn
 static unsigned (*r_glGetProgramResourceIndex)(unsigned, unsigned, const char *);
 static unsigned w_glGetProgramResourceIndex(unsigned prog, unsigned iface, const char *name)
 {
+    if (cs_fake(prog)) return 0xFFFFFFFFu;
     if (!g_es31_shim) return r_glGetProgramResourceIndex(prog, iface, name);
     if (!name || !es31_q()) return 0xFFFFFFFFu;
     if (iface == ES31_UNIFORM) { unsigned i = 0xFFFFFFFFu; Q.uniform_indices(prog, 1, &name, &i); return i; }
@@ -609,6 +611,7 @@ static void (*r_glGetProgramResourceiv)(unsigned, unsigned, unsigned, int, const
 static void w_glGetProgramResourceiv(unsigned prog, unsigned iface, unsigned index, int nprops, const unsigned *props, int bufsize,
                                      int *length, int *params)
 {
+    if (cs_fake(prog)) { if (length) *length = 0; for (int i = 0; params && i < bufsize; i++) params[i] = 0; return; }
     if (!g_es31_shim) { r_glGetProgramResourceiv(prog, iface, index, nprops, props, bufsize, length, params); return; }
     int k = 0;
     bool q = es31_q();

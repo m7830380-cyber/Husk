@@ -75,8 +75,15 @@ static void w_glGetProgramiv(unsigned prog, unsigned pname, int *v)
     case 0x8B89: /* GL_ACTIVE_ATTRIBUTES */ case 0x8B8A: case 0x8A36: /* GL_ACTIVE_UNIFORM_BLOCKS */ case 0x8A35:
     case 0x8741: /* GL_PROGRAM_BINARY_LENGTH */ case 0x92D9: /* GL_ACTIVE_ATOMIC_COUNTER_BUFFERS */ *v = 0; return;
     case 0x8267: /* GL_COMPUTE_WORK_GROUP_SIZE */ v[0] = v[1] = v[2] = 1; return;
-    default: r_glGetProgramiv(prog, pname, v); return;
+    default: *v = 0; r_glGetProgramiv(prog, pname, v); return;     /* an error leaves the 0, never what the caller had there */
     }
+}
+
+/* glGetProgramResourceLocation on such a program: nothing active (the other interface queries check in husk-tl-egl-es31.inc) */
+static int (*r_glGetProgramResourceLocation)(unsigned, unsigned, const char *);
+static int w_glGetProgramResourceLocation(unsigned prog, unsigned iface, const char *name)
+{
+    return cs_fake(prog) ? -1 : r_glGetProgramResourceLocation(prog, iface, name);
 }
 
 static void (*r_glGetProgramInfoLog)(unsigned, int, int *, char *);

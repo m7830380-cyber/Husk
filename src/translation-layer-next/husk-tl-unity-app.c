@@ -4,6 +4,7 @@
 #include "husk-console-host.h"
 
 #include <dlfcn.h>
+#include <mach/mach.h>
 #include <fcntl.h>
 #include <pthread.h>
 #include <signal.h>
@@ -130,6 +131,23 @@ static void on_fatal(int sig, siginfo_t *info, void *uctx)
     for (int i = 0; i < 29; i += 4)
         tl_log_line("    x%d=%#llx x%d=%#llx x%d=%#llx x%d=%#llx", i, uc->uc_mcontext->__ss.__x[i], i + 1, uc->uc_mcontext->__ss.__x[i + 1],
                     i + 2, i + 2 < 29 ? uc->uc_mcontext->__ss.__x[i + 2] : 0ull, i + 3, i + 3 < 29 ? uc->uc_mcontext->__ss.__x[i + 3] : 0ull);
+    /* What each register that looks like a pointer points at, read without faulting: a vtable or function shows as a symbol,
+     * which tells a freed or mistyped object from a good one. */
+    for (int i = 0; i < 29; i++) {
+        uint64_t p = uc->uc_mcontext->__ss.__x[i];
+        if (p < 0x100000000ull || p >= 0x800000000000ull) continue;
+        uint64_t m[4];
+        vm_size_t got = 0;
+        if (vm_read_overwrite(mach_task_self(), (vm_address_t)p, sizeof(m), (vm_address_t)m, &got) != KERN_SUCCESS || got != sizeof(m)) continue;
+        char w[4][120];
+        for (int k = 0; k < 4; k++) {
+            const void *sa = NULL;
+            const char *sym = tl_ld_symbol_at((const void *)m[k], NULL, &sa);
+            if (sym) snprintf(w[k], sizeof(w[k]), "%#llx(%.60s+%#lx)", (unsigned long long)m[k], sym, (unsigned long)(m[k] - (uintptr_t)sa));
+            else snprintf(w[k], sizeof(w[k]), "%#llx", (unsigned long long)m[k]);
+        }
+        tl_log_line("    [x%d] %s %s %s %s", i, w[0], w[1], w[2], w[3]);
+    }
     if (g_prev[sig].sa_flags & SA_SIGINFO) {
         if (g_prev[sig].sa_sigaction) { g_prev[sig].sa_sigaction(sig, info, uctx); return; }
     } else if (g_prev[sig].sa_handler != SIG_DFL && g_prev[sig].sa_handler != SIG_IGN && g_prev[sig].sa_handler) {

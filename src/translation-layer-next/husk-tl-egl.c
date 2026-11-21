@@ -1073,7 +1073,7 @@ static const struct { const char *name; void *wrap; void **real; } k_adapt[] = {
     ADAPT(glUnmapBuffer), { "glUnmapBufferOES", (void *)w_glUnmapBuffer, (void **)&r_glUnmapBuffer }, ADAPT(glFlushMappedBufferRange),
     { "glFlushMappedBufferRangeEXT", (void *)w_glFlushMappedBufferRange, (void **)&r_glFlushMappedBufferRange }, ADAPT(glCopyBufferSubData),
     ADAPT(glGetBufferParameteriv), ADAPT(glGetBufferParameteri64v), ADAPT(glGetBufferPointerv), { "glGetBufferPointervOES", (void *)w_glGetBufferPointerv, (void **)&r_glGetBufferPointerv },
-    ADAPT(glGetProgramInterfaceiv), ADAPT(glGetProgramResourceIndex), ADAPT(glGetProgramResourceName), ADAPT(glGetProgramResourceiv), ADAPT(glGetIntegeri_v), ADAPT(glGetShaderiv), ADAPT(glGetProgramiv), ADAPT(glGetProgramInfoLog), ADAPT(glDispatchCompute), ADAPT(glDispatchComputeIndirect),
+    ADAPT(glGetProgramInterfaceiv), ADAPT(glGetProgramResourceIndex), ADAPT(glGetProgramResourceName), ADAPT(glGetProgramResourceiv), ADAPT(glGetIntegeri_v), ADAPT(glGetShaderiv), ADAPT(glGetProgramiv), ADAPT(glGetProgramInfoLog), ADAPT(glDispatchCompute), ADAPT(glDispatchComputeIndirect), ADAPT(glGetProgramResourceLocation),
     ADAPT(eglClientWaitSyncKHR), ADAPT(eglDestroySyncKHR), ADAPT(eglGetSyncAttribKHR), ADAPT(eglClientWaitSync), ADAPT(eglDestroySync),
 };
 
