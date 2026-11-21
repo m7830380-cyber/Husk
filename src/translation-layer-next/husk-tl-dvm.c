@@ -1296,6 +1296,42 @@ static fref *resolve_fref(dvm_dex *d, uint32_t idx, bool is_static)
 
 /* ================================================================== the interpreter */
 
+/* Unchecked exceptions an app catches and drops leave no trace: Telegram's containers catch whatever their children's
+   layout throws and hand it to a logger that release builds switch off, so a list fails half way through its layout and
+   the screen stays empty with nothing in the log. The first time each (exception class, catching method) pair happens it
+   goes to the log, with the methods the exception came up through. */
+#define CAUGHT_PATH 8
+static _Thread_local jobj *t_exc;
+static _Thread_local dvm_method *t_exc_path[CAUGHT_PATH];
+static _Thread_local int t_exc_n;
+static void caught_note_unwind(jobj *e, dvm_method *m)
+{
+    if (e != t_exc) { t_exc = e; t_exc_n = 0; }
+    if (t_exc_n < CAUGHT_PATH && (!t_exc_n || t_exc_path[t_exc_n - 1] != m)) t_exc_path[t_exc_n++] = m;
+}
+static void caught_report(jobj *e, dvm_method *m)
+{
+    static tl_jclass *rte, *err;
+    static pthread_mutex_t lk = PTHREAD_MUTEX_INITIALIZER;
+    static struct { tl_jclass *c; dvm_method *m; } seen[512];
+    static int nseen;
+    if (!rte) { rte = dvm_class_named("java/lang/RuntimeException"); err = dvm_class_named("java/lang/Error"); }
+    tl_jclass *ec = dvm_object_class(e);
+    if (!ec || !(dvm_assignable(ec, rte) || dvm_assignable(ec, err))) return;
+    pthread_mutex_lock(&lk);
+    bool fresh = nseen < 512;
+    for (int i = 0; i < nseen && fresh; i++) if (seen[i].c == ec && seen[i].m == m) fresh = false;
+    if (fresh) { seen[nseen].c = ec; seen[nseen].m = m; nseen++; }
+    pthread_mutex_unlock(&lk);
+    if (!fresh) return;
+    char what[700], path[900]; size_t k = 0;
+    if (!tl_dvm_describe_pending(what, sizeof(what))) snprintf(what, sizeof(what), "%s", ec->name);
+    path[0] = 0;
+    for (int i = 0; e == t_exc && i < t_exc_n && k + 8 < sizeof(path); i++)
+        k += (size_t)snprintf(path + k, sizeof(path) - k, "%s%s.%s", i ? " <- " : "", t_exc_path[i]->cls->name, t_exc_path[i]->name);
+    tl_log_line("dvm: caught %s | thrown in %s | caught by %s.%s", what, path[0] ? path : "?", m->cls->name, m->name);
+}
+
 static bool find_handler(dvm_method *m, uint32_t pc, jobj *exc, uint32_t *target)
 {
     if (!m->ntries) return false;
@@ -2026,8 +2062,10 @@ dispatch:;
 exception: {
         jobj *e = tl_jni_pending_object();
         if (!e) { dvm_throw("java/lang/InternalError", "exception with nothing pending"); e = tl_jni_pending_object(); }
+        caught_note_unwind(e, m);
         uint32_t target;
         if (find_handler(m, pc, e, &target)) {
+            caught_report(e, m);
             tl_jni_set_pending(NULL);
             caught = e;
             pc = target;
