@@ -1746,6 +1746,35 @@ static size_t anon_total(void)
     return t;
 }
 
+/*
+ * Zero [a, e) of guest memory. Whole host pages (16 KiB on an iPhone) are replaced with fresh ones; the ends of a range that
+ * starts or stops inside a host page -- an allocator built for 4 KiB pages releases 4 KiB-aligned ranges -- are cleared in
+ * place, as remapping their whole page would also wipe the live neighbours outside the range.
+ */
+static void zap_range(uintptr_t a, uintptr_t e)
+{
+    const uintptr_t pg = (uintptr_t)getpagesize();
+    for (uintptr_t p = a; p < e;) {           /* walk the regions in the range */
+        vm_address_t ra = p & ~(pg - 1); vm_size_t rs = 0;
+        vm_region_basic_info_data_64_t info; mach_msg_type_number_t cnt = VM_REGION_BASIC_INFO_COUNT_64; mach_port_t obj;
+        if (vm_region_64(mach_task_self(), &ra, &rs, VM_REGION_BASIC_INFO_64, (vm_region_info_t)&info, &cnt, &obj) != KERN_SUCCESS) break;
+        if (ra > p) { p = ra; continue; }
+        uintptr_t re = ra + rs < e ? ra + rs : e;
+        if (tl_ld_covers((const void *)p, re - p) || tl_xmem_contains((const void *)p)) { p = re; continue; }
+        bool w = info.protection & VM_PROT_WRITE;
+        uintptr_t fa = (p + pg - 1) & ~(pg - 1), fe = re & ~(pg - 1);       /* the whole pages inside [p, re) */
+        if (fa >= fe) {
+            if (w) memset((void *)p, 0, re - p);
+        } else {
+            if (w && fa > p) memset((void *)p, 0, fa - p);
+            if (w && re > fe) memset((void *)fe, 0, re - fe);
+            int prot = (info.protection & VM_PROT_READ ? PROT_READ : 0) | (w ? PROT_WRITE : 0);
+            mmap((void *)fa, fe - fa, prot, MAP_FIXED | MAP_PRIVATE | MAP_ANON, -1, 0);
+        }
+        p = re;
+    }
+}
+
 static void anon_zap(uintptr_t addr, size_t len)
 {
     uintptr_t end = addr + len;
@@ -1753,20 +1782,7 @@ static void anon_zap(uintptr_t addr, size_t len)
     for (int i = 0; i < g_nanon; i++) {
         uintptr_t a = g_anon[i].addr > addr ? g_anon[i].addr : addr;
         uintptr_t e = g_anon[i].addr + g_anon[i].len < end ? g_anon[i].addr + g_anon[i].len : end;
-        if (a >= e) continue;
-        for (uintptr_t p = a & ~(uintptr_t)16383; p < e;) {           /* walk the regions in the range */
-            vm_address_t ra = p; vm_size_t rs = 0;
-            vm_region_basic_info_data_64_t info; mach_msg_type_number_t cnt = VM_REGION_BASIC_INFO_COUNT_64; mach_port_t obj;
-            if (vm_region_64(mach_task_self(), &ra, &rs, VM_REGION_BASIC_INFO_64, (vm_region_info_t)&info, &cnt, &obj) != KERN_SUCCESS) break;
-            if (ra > p) { p = ra; continue; }
-            uintptr_t re = ra + rs < e ? ra + rs : e;
-            if (tl_ld_covers((const void *)(uintptr_t)p, re - p) || tl_xmem_contains((const void *)(uintptr_t)p)) {
-                p = re; continue;
-            }
-            int prot = (info.protection & VM_PROT_READ ? PROT_READ : 0) | (info.protection & VM_PROT_WRITE ? PROT_WRITE : 0);
-            mmap((void *)p, re - p, prot, MAP_FIXED | MAP_PRIVATE | MAP_ANON, -1, 0);
-            p = re;
-        }
+        if (a < e) zap_range(a, e);
     }
     pthread_mutex_unlock(&g_anon_lock);
 }
