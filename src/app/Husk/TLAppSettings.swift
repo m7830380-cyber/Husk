@@ -80,13 +80,16 @@ struct TLAppSettings: Codable, Equatable {
     /// Which graphics API the game is given (any engine). Vulkan: the game is offered Vulkan (MoltenVK, over Metal) and OpenGL ES, and picks
     /// as it does on an Android phone -- a game built for Vulkan uses it, and one that cannot start it falls back to OpenGL ES.
     /// OpenGL ES: Vulkan is not there, so the game runs on OpenGL ES (ANGLE, over Metal), as Husk did before this setting.
+    /// OpenGL ES (Zink): Vulkan is not there, and OpenGL ES comes from Mesa's Zink on MoltenVK instead of ANGLE -- a full OpenGL ES 3.2
+    /// with compute shaders, for games (Unreal Engine's ES 3.1 renderer) that need more than ANGLE's Metal back end has.
     enum Renderer: String, Codable, CaseIterable, Identifiable {
-        case vulkan, opengl
+        case vulkan, opengl, zink
         var id: String { rawValue }
         var title: String {
             switch self {
             case .vulkan: return "Vulkan"
             case .opengl: return "OpenGL ES"
+            case .zink: return "OpenGL ES (Zink)"
             }
         }
     }
@@ -188,12 +191,18 @@ struct TLAppSettingsView: View {
         if settings.renderer == .vulkan {
             renderer = "The game is offered Vulkan (MoltenVK) as well as OpenGL ES, as on an Android phone, and uses Vulkan if it was built for it. "
                 + "A game that cannot start Vulkan falls back to OpenGL ES by itself. Applies the next time the game starts."
+        } else if settings.renderer == .zink {
+            renderer = "The game gets OpenGL ES 3.2 from Zink (Mesa, over MoltenVK) instead of ANGLE: real OpenGL ES 3.1 and 3.2, with compute "
+                + "shaders. For games that need more than ANGLE gives, such as Unreal Engine 4 games. Experimental, and slower to show "
+                + "each frame for now. Vulkan is not offered. Applies the next time the game starts."
         } else {
             renderer = "The game gets OpenGL ES only: Vulkan is not offered. Pick this if the game looks or runs worse with Vulkan. A game that "
                 + "can only draw with Vulkan will not start. Applies the next time the game starts."
         }
         let es31: String
-        if settings.gles31 {
+        if settings.renderer == .zink {
+            return renderer
+        } else if settings.gles31 {
             es31 = "OpenGL ES 3.1: a game that asks for 3.1 gets a real 3.1 context, and its shaders compile as written. Compute shaders "
                 + "are not supported yet, so a game that needs them may draw wrongly. Turn this off if the game worked before."
         } else {
@@ -238,7 +247,9 @@ struct TLAppSettingsView: View {
                 Picker("Renderer", selection: $settings.renderer) {
                     ForEach(TLAppSettings.Renderer.allCases) { Text($0.title).tag($0) }
                 }
-                Toggle("OpenGL ES 3.1 (Experimental)", isOn: $settings.gles31)
+                if settings.renderer != .zink {
+                    Toggle("OpenGL ES 3.1 (Experimental)", isOn: $settings.gles31)
+                }
             } header: {
                 Text("Graphics")
             } footer: {

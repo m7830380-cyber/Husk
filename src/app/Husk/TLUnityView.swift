@@ -252,7 +252,6 @@ final class TLUnityUIView: UIView, UIKeyInput {
     private func launch(width: Int, height: Int) {
         launched = true
         launchedSize = bounds.size
-        let angle = (Bundle.main.privateFrameworksPath ?? "") + "/libANGLE-shared.dylib"
         let ca = Bundle.main.path(forResource: "cacert", ofType: "pem") ?? ""
         try? FileManager.default.createDirectory(atPath: dataDir, withIntermediateDirectories: true)
         let layerPtr = Unmanaged.passUnretained(layer).toOpaque()
@@ -291,10 +290,15 @@ final class TLUnityUIView: UIView, UIKeyInput {
         // between it and OpenGL ES as it does on a phone. OpenGL ES: Vulkan is not there, so the game draws with ANGLE.
         let appID = ((dataDir as NSString).deletingLastPathComponent as NSString).lastPathComponent
         let renderer = TLAppSettings.load(appID).renderer
+        // The game's OpenGL ES: ANGLE (over Metal), or Mesa's Zink (over MoltenVK) when its settings ask for it. The GL layer tells
+        // them apart by the library it is given.
+        let frameworks = Bundle.main.privateFrameworksPath ?? ""
+        let zinkEGL = frameworks + "/libEGL.1.dylib"
+        let angle = renderer == .zink && FileManager.default.fileExists(atPath: zinkEGL) ? zinkEGL : frameworks + "/libANGLE-shared.dylib"
         let mvk = Bundle.main.privateFrameworksPath.map { $0 + "/MoltenVK.framework/MoltenVK" } ?? ""
         husk_ue4_set_vulkan(renderer == .vulkan ? mvk : "")
         // OpenGL ES 3.1 from ANGLE (experimental), read by the GL layer when the game makes its context
-        if TLAppSettings.load(appID).gles31 { setenv("TL_GL_ES31", "1", 1) } else { unsetenv("TL_GL_ES31") }
+        if TLAppSettings.load(appID).gles31 && renderer != .zink { setenv("TL_GL_ES31", "1", 1) } else { unsetenv("TL_GL_ES31") }
         HuskLog.log("tl", "native: renderer \(renderer.title) (game settings)")
         let started: Bool
         switch engine {

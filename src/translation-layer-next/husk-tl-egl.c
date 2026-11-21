@@ -52,6 +52,14 @@ static struct {
     pthread_mutex_t lock;
 } E = { .lock = PTHREAD_MUTEX_INITIALIZER };
 
+/* The OpenGL ES underneath: ANGLE (over Metal), or Mesa's Zink (over Vulkan on MoltenVK, the game's "OpenGL ES (Zink)" renderer).
+ * Zink is a whole OpenGL ES 3.2 with compute: none of ANGLE's stand-ins (the 3.0 shim, its 3.1 switch) are used on it. Mesa's EGL
+ * runs surfaceless here -- iOS has no window system it knows -- so a game's window is an off-screen buffer whose frames are put on
+ * the window's Metal layer at each swap (tl_present_rgba). */
+static bool g_zink;
+static bool g_es31_shim;           /* the 3.0 shim (husk-tl-egl-es31.inc) */
+void tl_present_rgba(void *layer, const void *rgba, int w, int h);   /* husk-tl-present.m */
+
 /* ANGLE's entry points */
 static void *(*a_eglGetProcAddress)(const char *);
 static EGLDisplay (*a_eglGetPlatformDisplayEXT)(EGLenum, void *, const EGLint *);
@@ -93,6 +101,19 @@ bool tl_egl_init(const char *egl_path, const char *gles_path, const char *frame_
     if (E.ready) { pthread_mutex_unlock(&E.lock); return true; }
     snprintf(E.egl_path, sizeof(E.egl_path), "%s", egl_path);
     snprintf(E.gles_path, sizeof(E.gles_path), "%s", gles_path ? gles_path : egl_path);
+    const char *base = strrchr(egl_path, '/');
+    g_zink = !strcmp(base ? base + 1 : egl_path, "libEGL.1.dylib");
+    if (g_zink) {
+        /* Mesa's GL entry points are in libGLESv2, beside its libEGL */
+        if (!gles_path) {
+            snprintf(E.gles_path, sizeof(E.gles_path), "%.*slibGLESv2.2.dylib", base ? (int)(base + 1 - egl_path) : 0, egl_path);
+            gles_path = E.gles_path;
+        }
+        setenv("MESA_LOADER_DRIVER_OVERRIDE", "zink", 1);
+        if (!getenv("EGL_LOG_LEVEL")) setenv("EGL_LOG_LEVEL", "info", 1);
+        if (!getenv("MESA_SHADER_CACHE_DIR")) { const char *t = getenv("TMPDIR"); if (t) { char c[600]; snprintf(c, sizeof(c), "%s/mesa-shader-cache", t); setenv("MESA_SHADER_CACHE_DIR", c, 1); } }
+        g_es31_shim = false;   /* whatever an engine claimed before this: Zink's versions are real */
+    }
     E.egl = dlopen(egl_path, RTLD_NOW | RTLD_LOCAL);
     if (!E.egl) { tl_log_line("egl: cannot load %s: %s", egl_path, dlerror()); pthread_mutex_unlock(&E.lock); return false; }
     E.gles = gles_path ? dlopen(gles_path, RTLD_NOW | RTLD_LOCAL) : E.egl;
@@ -114,7 +135,7 @@ bool tl_egl_init(const char *egl_path, const char *gles_path, const char *frame_
     if (frame_dir) { snprintf(E.frame_dir, sizeof(E.frame_dir), "%s", frame_dir); E.latest_only = frame_every < 0; E.frame_every = frame_every != 0 ? (frame_every < 0 ? -frame_every : frame_every) : 60; }
     E.ready = true;
     pthread_mutex_unlock(&E.lock);
-    tl_log_line("egl: ANGLE loaded%s%s", frame_dir ? ", off-screen, frames to " : "", frame_dir ? frame_dir : "");
+    tl_log_line("egl: %s loaded%s%s", g_zink ? "Zink (Mesa, over MoltenVK)" : "ANGLE", frame_dir ? ", off-screen, frames to " : "", frame_dir ? frame_dir : "");
     return true;
 }
 
@@ -126,6 +147,10 @@ static EGLDisplay w_eglGetDisplay(void *native)
 {
     (void)native;
     pthread_mutex_lock(&E.lock);
+    if (!E.display && E.ready && g_zink) {
+        E.display = a_eglGetPlatformDisplayEXT(0x31DD /* EGL_PLATFORM_SURFACELESS_MESA */, NULL, NULL);
+        tl_log_line("egl: display %p (Zink, surfaceless)", E.display);
+    }
     if (!E.display && E.ready) {
         const EGLint attribs[] = { EGL_PLATFORM_ANGLE_TYPE_ANGLE, EGL_PLATFORM_ANGLE_TYPE_METAL_ANGLE, EGL_NONE };
         E.display = a_eglGetPlatformDisplayEXT(EGL_PLATFORM_ANGLE_ANGLE, NULL, attribs);
@@ -162,6 +187,9 @@ static EGLBoolean w_eglChooseConfig(EGLDisplay d, const EGLint *at, EGLConfig *c
         if (at[i] == 0x3142 || at[i] == 0x3147) continue;
         if (at[i] == 0x3021 /* EGL_ALPHA_SIZE */ && at[i + 1] > 0) alpha_wanted = true;
         filtered[nf++] = at[i]; filtered[nf++] = at[i + 1];
+        /* surfaceless Zink has no window configs: a window is a buffer here (see w_eglCreateWindowSurface) */
+        if (g_zink && at[i] == 0x3033 /* EGL_SURFACE_TYPE */ && at[i + 1] != -1 && (at[i + 1] & 0x4 /* EGL_WINDOW_BIT */))
+            filtered[nf - 1] = (at[i + 1] & ~0x4) | 0x1 /* EGL_PBUFFER_BIT */;
     }
     filtered[nf] = EGL_NONE;
     static EGLConfig tmp[256];
@@ -199,6 +227,7 @@ static EGLBoolean w_eglGetConfigAttrib(EGLDisplay d, EGLConfig c, EGLint at, EGL
     if (at == 0x3142 /* EGL_RECORDABLE_ANDROID */) { if (v) *v = 1; return EGL_TRUE; }
     bool alias = cfg_alias(c);
     EGLBoolean ok = a_eglGetConfigAttrib(d, cfg_real(c), at, v);
+    if (ok && g_zink && v && at == 0x3033 /* EGL_SURFACE_TYPE */ && (*v & 0x1)) *v |= 0x4;   /* its buffers serve as windows */
     if (ok && alias && v) { if (at == 0x3021 /* ALPHA_SIZE */) *v = 0; else if (at == 0x3020 /* BUFFER_SIZE */) *v = 24; else if (at == 0x302E /* NATIVE_VISUAL_ID */) *v = 2; }
     static int trace = -1;
     if (trace < 0) trace = getenv("TL_EGL_TRACE") ? 1 : 0;
@@ -369,6 +398,14 @@ static EGLContext w_eglCreateContext(EGLDisplay d, EGLConfig c, EGLContext share
        (its shaders compile as written, with the varyings' explicit locations Unreal's 3.1 shaders use). Only with the game's OpenGL ES 3.1 setting (TL_GL_ES31=1). */
     static int native;                                         /* 1: a real 3.x context was made; bit 1<<minor: ANGLE refused 3.minor */
     static int native_minor;                                   /* the minor version of that real context */
+    if (g_zink) {
+        EGLContext ctx = a_eglCreateContext(d, cfg_real(c), share, at);
+        int maj = 0, min = 0;
+        for (int n = 0; at && at[n] != EGL_NONE && n < 36; n += 2) { if (at[n] == 0x3098) maj = at[n + 1]; if (at[n] == 0x30fb) min = at[n + 1]; }
+        tl_log_line("egl: Zink OpenGL ES %d.%d context (share %p) -> %p%s", maj, min, share, ctx, ctx ? "" : " (failed)");
+        if (!ctx) tl_log_line("egl: eglGetError %#x", a_eglGetError());
+        return ctx;
+    }
     int want_minor = 0;
     for (int n = 0; at && at[n] != EGL_NONE && n < 36; n += 2) if (at[n] == 0x30fb) want_minor = at[n + 1];
     /* from the version asked for down to 3.1 (a game asking for 3.2 takes 3.1 as well: Unreal asks for 3.2, then 3.1) */
@@ -445,6 +482,17 @@ __attribute__((weak)) bool tl_javaapp_compositing(void);
 __attribute__((weak)) void tl_javaapp_app_pixels(const void *px, int w, int h);
 #define MAX_COMP_SURFACES 8
 static EGLSurface g_comp_surf[MAX_COMP_SURFACES];
+/* Zink's windows: buffers, each put on its window's layer at a swap */
+#define MAX_ZINK_SURFACES 8
+static struct { EGLSurface s; void *layer; } g_zink_surf[MAX_ZINK_SURFACES];
+static void *zink_layer_of(EGLSurface s)
+{
+    void *l = NULL;
+    pthread_mutex_lock(&g_tex_lock);
+    for (int i = 0; i < MAX_ZINK_SURFACES && s; i++) if (g_zink_surf[i].s == s) { l = g_zink_surf[i].layer; break; }
+    pthread_mutex_unlock(&g_tex_lock);
+    return l;
+}
 static bool comp_surface(EGLSurface s)
 {
     bool r = false;
@@ -514,6 +562,18 @@ static EGLSurface w_eglCreateWindowSurface(EGLDisplay d, EGLConfig cfg, void *wi
         return s;
     }
     void *layer = tl_nwindow_native(win);
+    if (g_zink) {
+        EGLint pb[] = { EGL_WIDTH, tl_nwindow_width(win), EGL_HEIGHT, tl_nwindow_height(win), EGL_NONE };
+        EGLSurface s = a_eglCreatePbufferSurface(d, cfg, pb);
+        if (s) {
+            pthread_mutex_lock(&g_tex_lock);
+            for (int i = 0; i < MAX_ZINK_SURFACES; i++) if (!g_zink_surf[i].s) { g_zink_surf[i].s = s; g_zink_surf[i].layer = layer; break; }
+            pthread_mutex_unlock(&g_tex_lock);
+        }
+        tl_log_line("egl: window %dx%d on layer %p -> Zink buffer %p%s", pb[1], pb[3], layer, s, s ? "" : " (failed)");
+        if (!s) tl_log_line("egl: eglGetError %#x", a_eglGetError());
+        return s;
+    }
     EGLSurface s = a_eglCreateWindowSurface(d, cfg, layer, at);
     tl_log_line("egl: window surface %p on layer %p (%dx%d), eglGetError %#x", s, layer, tl_nwindow_width(win), tl_nwindow_height(win), a_eglGetError());
     return s;
@@ -524,6 +584,7 @@ static EGLBoolean w_eglDestroySurface(EGLDisplay d, EGLSurface s)
     for (int i = 0; i < MAX_TEX_SURFACES; i++) if (g_tex_surf[i].s == s) g_tex_surf[i].s = NULL;
     bool comp = false;
     for (int i = 0; i < MAX_COMP_SURFACES && s; i++) if (g_comp_surf[i] == s) { g_comp_surf[i] = NULL; comp = true; }
+    for (int i = 0; i < MAX_ZINK_SURFACES && s; i++) if (g_zink_surf[i].s == s) g_zink_surf[i].s = NULL;
     pthread_mutex_unlock(&g_tex_lock);
     if (comp && tl_javaapp_app_pixels) tl_javaapp_app_pixels(NULL, 0, 0);
     return a_eglDestroySurface(d, s);
@@ -623,6 +684,13 @@ static EGLBoolean w_eglSwapBuffers(EGLDisplay d, EGLSurface s)
         fprintf(stderr, "egl: calls so far, by function: %s\n", hist);
     }
     if (E.frame_dir[0] && (n % (unsigned long)E.frame_every == 0 || n <= 3)) save_frame(d, s, n);
+    void *zl = g_zink && !E.frame_dir[0] ? zink_layer_of(s) : NULL;
+    if (zl) {
+        EGLint w = 0, h = 0;
+        const uint8_t *px = read_back(d, s, &w, &h);
+        if (px) tl_present_rgba(zl, px, w, h);
+        return EGL_TRUE;
+    }
     return E.frame_dir[0] ? EGL_TRUE : a_eglSwapBuffers(d, s);
 }
 

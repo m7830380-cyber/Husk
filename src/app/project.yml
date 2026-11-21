@@ -150,6 +150,20 @@ targets:
         embed: true
         codeSign: true
         link: false
+      # Mesa's Zink (OpenGL ES 3.2 over Vulkan, on MoltenVK): the "OpenGL ES (Zink)" renderer in a game's settings. Built by
+      # scripts/build_mesa_zink_ios.sh (the Build Mesa Zink iOS workflow). Embedded, not linked: the GL layer opens it by path.
+      - framework: ../../build/ios-arm64/zink/lib/libEGL.1.dylib
+        embed: true
+        codeSign: true
+        link: false
+      - framework: ../../build/ios-arm64/zink/lib/libGLESv2.2.dylib
+        embed: true
+        codeSign: true
+        link: false
+      - framework: ../../build/ios-arm64/zink/lib/libgallium-25.2.0.dylib
+        embed: true
+        codeSign: true
+        link: false
       # The PS4 layer: Bachata-S4's core (branch husk) on husk-fex's FEXCore, as one dylib exporting husk_console_module_v1.
       # Built by scripts/build_ps4_ios.sh. Embedded, not linked: it needs iOS 17.4 and is opened by path only there
       # (PS4Store.moduleURL), by the console host (src/translation-layer-next/husk-console-host.c).

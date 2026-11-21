@@ -54,6 +54,15 @@ jobs:
           chmod +x scripts/*.sh src/java-framework/build.sh
           ./scripts/fetch_prebuilts.sh
 
+      - name: Fetch Mesa Zink (OpenGL ES over MoltenVK)
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          mkdir -p build/ios-arm64
+          gh release download mesa-zink-ios -R "$GITHUB_REPOSITORY" -p mesa-zink-ios.tar.gz -D build/ios-arm64 --clobber
+          tar -xzf build/ios-arm64/mesa-zink-ios.tar.gz -C build/ios-arm64
+          ls -la build/ios-arm64/zink/lib
+
       - name: Build rppairing
         run: |
           ./scripts/build_rppairing_ios.sh
