@@ -3,6 +3,7 @@
 #include "husk-tl-nativeactivity.h"
 
 #include <dirent.h>
+#include <fcntl.h>
 #include <limits.h>
 #include <pthread.h>
 #include <stdatomic.h>
@@ -72,6 +73,7 @@ static struct {
     jobj *activity;
     ANativeActivity na;
     ANativeActivityCallbacks callbacks;
+    bool vulkan;                           /* Unreal is told to use Vulkan (MoltenVK there, and the game packaged with Vulkan shaders) */
     bool generic;                          /* a NativeActivity game of its own (no libUE4): nothing of Unreal is set up for it */
     char main_lib[64];                     /* the library that exports ANativeActivity_onCreate */
     void *window;
@@ -227,6 +229,69 @@ static bool engine_is_64bit(const char *libname)
     return false;
 }
 
+/*
+ * Which shader formats the game was packaged with, from the names of its shader libraries (ShaderArchive-*-<format>.ushaderbytecode) in the index of
+ * each .pak inside its OBB. A project built without Vulkan has no SF_VULKAN_* library, and an engine told to use Vulkan anyway stops in
+ * FShaderCodeLibrary::InitForRuntime (ForceQuit, a black screen). 1: Vulkan shaders are there; 0: only other formats (OpenGL ES); -1: cannot tell
+ * (no shader library, or an encrypted index), and the old choice stands.
+ */
+static int pak_index_vulkan(int fd, unsigned long long pak, unsigned long long size)
+{
+    if (size < 256) return -1;
+    uint8_t tail[512]; size_t tn = size < sizeof(tail) ? (size_t)size : sizeof(tail);
+    if (pread(fd, tail, tn, (off_t)(pak + size - tn)) != (ssize_t)tn) return -1;
+    static const uint8_t magic[4] = { 0xE1, 0x12, 0x6F, 0x5A };
+    int at = -1;
+    for (int i = (int)tn - 24; i >= 17; i--) if (!memcmp(tail + i, magic, 4)) { at = i; break; }
+    if (at < 0 || tail[at - 1] == 1) return -1;                       /* no footer, or bEncryptedIndex */
+    uint64_t index_off; memcpy(&index_off, tail + at + 8, 8);
+    if (index_off >= size) return -1;
+    unsigned long long n = size - index_off;
+    if (n > (64ull << 20)) return -1;
+    uint8_t *ix = malloc((size_t)n);
+    if (!ix) return -1;
+    int r = -1;
+    if (pread(fd, ix, (size_t)n, (off_t)(pak + index_off)) == (ssize_t)n) {
+        bool vk = false, other = false;
+        static const char key[] = "ShaderArchive-";
+        for (uint8_t *q = ix; (q = memmem(q, (size_t)(ix + n - q), key, sizeof(key) - 1)); q += sizeof(key) - 1) {
+            const char *name = (const char *)q; size_t len = 0;
+            while (q + len < ix + n && len < 160 && q[len] >= 0x20 && q[len] < 0x7F) len++;
+            if (!memmem(name, len, ".ushaderbytecode", 16)) continue;
+            if (memmem(name, len, "SF_VULKAN", 9)) vk = true; else other = true;
+        }
+        r = vk ? 1 : other ? 0 : -1;
+    }
+    free(ix);
+    return r;
+}
+static int obb_has_vulkan_shaders(const char *apk, unsigned long long obb, unsigned long long obb_size)
+{
+    int fd = open(apk, O_RDONLY);
+    if (fd < 0) return -1;
+    int result = -1;
+    unsigned long long p = obb;
+    for (int k = 0; k < 4096 && p + 30 <= obb + obb_size; k++) {    /* the OBB is a zip of stored .pak files: walk its local headers */
+        uint8_t h[30];
+        if (pread(fd, h, 30, (off_t)p) != 30 || memcmp(h, "PK\3\4", 4)) break;
+        uint16_t method, nlen, elen; uint32_t csize;
+        memcpy(&method, h + 8, 2); memcpy(&csize, h + 18, 4); memcpy(&nlen, h + 26, 2); memcpy(&elen, h + 28, 2);
+        char name[256] = { 0 };
+        if (pread(fd, name, nlen < 255 ? nlen : 255, (off_t)(p + 30)) < 0) break;
+        unsigned long long data = p + 30 + nlen + elen;
+        size_t L = strlen(name);
+        if (method == 0 && L > 4 && !strcmp(name + L - 4, ".pak")) {
+            int r = pak_index_vulkan(fd, data, csize);
+            if (r == 1) { result = 1; break; }
+            if (r == 0) result = 0;
+        }
+        if (!csize) break;
+        p = data + csize;
+    }
+    close(fd);
+    return result;
+}
+
 bool tl_na_start(const tl_ga_config *cfg)
 {
     N.cfg = *cfg;
@@ -255,8 +320,16 @@ bool tl_na_start(const tl_ga_config *cfg)
     if (!tl_ld_add_apk(cfg->apk_path)) return false;
     N.generic = !tl_ld_has_lib("libUE4.so");
     if (!N.generic) {
+        N.vulkan = !getenv("TL_UE4_NO_VULKAN") && (getenv("TL_UE4_FORCE_VULKAN") || tl_vk_available());
+        if (N.vulkan && !getenv("TL_UE4_FORCE_VULKAN")) {
+            unsigned long long off = 0, size = 0;
+            const char *entry = getenv("TL_UE4_OBB_ENTRY") ? getenv("TL_UE4_OBB_ENTRY") : "assets/main.obb.png";
+            int vk = stored_range(N.apk, entry, &off, &size) ? obb_has_vulkan_shaders(N.apk, off, size) : -1;
+            if (vk == 0) { N.vulkan = false; tl_log_line("ue4: the game was packaged without Vulkan shaders; it runs on OpenGL ES, as it would on a phone"); }
+            else tl_log_line("ue4: Vulkan shaders in the package: %s", vk == 1 ? "yes" : "could not tell");
+        }
         tl_egl_es31_shim(true);
-        tl_egl_offscreen_windows(!getenv("TL_UE4_NO_VULKAN") && (getenv("TL_UE4_FORCE_VULKAN") || tl_vk_available()));
+        tl_egl_offscreen_windows(N.vulkan);
     }
     if (cfg->angle_egl && !tl_egl_init(cfg->angle_egl, cfg->angle_gles, cfg->frame_dir, cfg->frame_every)) return false;
     tl_jni_init();
@@ -282,13 +355,13 @@ bool tl_na_start(const tl_ga_config *cfg)
         load_library(libs[i]);
         if (tl_jni_pending()) { tl_log_line("ue4: loading lib%s.so failed", libs[i]); return false; }
     }
-    if (getenv("TL_UE4_NO_VULKAN")) {
+    if (!N.vulkan) {
         tl_lib *ue = tl_ld_find_lib("libUE4.so");
         if (ue) { patch_return(ue, "_ZN12FAndroidMisc15ShouldUseVulkanEv", 0); patch_return(ue, "_ZN12FAndroidMisc22ShouldUseDesktopVulkanEv", 0); }
     }
     /* ANGLE over Metal speaks OpenGL ES 3.0 and the engine's ES 3.1 shaders will not compile on it, so when MoltenVK is there the engine is asked for Vulkan -- also for a project
      * that defaults to OpenGL ES (bDetectVulkanByDefault off), which Minecraft Dungeons is. TL_UE4_NO_VULKAN opts out; TL_UE4_FORCE_VULKAN forces it even with no MoltenVK. */
-    if ((getenv("TL_UE4_FORCE_VULKAN") || (tl_vk_available() && !getenv("TL_UE4_NO_VULKAN")))) {
+    if (N.vulkan) {
         tl_lib *ue = tl_ld_find_lib("libUE4.so");
         if (ue) { patch_return(ue, "_ZN12FAndroidMisc15ShouldUseVulkanEv", 1); patch_return(ue, "_ZN12FAndroidMisc17IsVulkanAvailableEv", 1); }
     }
