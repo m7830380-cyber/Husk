@@ -571,7 +571,7 @@ static void diag_report_prog(unsigned prog, unsigned mode, int count, bool probe
 /* ---- frame captures */
 #define CAP_DRAWS 4096
 #define CAP_CLEARED 0xFFFF
-static const unsigned long k_cap_frames[] = { 900, 1800, 2700, 3600, 4800 };
+static const unsigned long k_cap_frames[] = { 150, 300, 900, 1800, 3600 };
 #define CAP_N (sizeof(k_cap_frames) / sizeof(k_cap_frames[0]))
 static struct {
     int k;                                   /* capture number (1-based) of the frame being captured, 0 none */
