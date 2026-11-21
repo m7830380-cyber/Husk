@@ -228,6 +228,26 @@ static EGLContext w_eglCreateContext(EGLDisplay d, EGLConfig c, EGLContext share
 {
     /* A game that insists on ES 3.1 or 3.2 (Unreal Engine tries 3.2, then 3.1) is given the 3.0 context ANGLE can make: the version it is then told is the shim's. */
     EGLint patched[40];
+    /* A newer ANGLE can make a real 3.1 context on Metal: when it does, the game gets what it asked for and the 3.0 shim steps aside
+       (its shaders compile as written, with samplerBuffer and the varyings' explicit locations Unreal's 3.1 shaders use). TL_GL_NO_NATIVE_ES31: always the shim. */
+    static int native;                                         /* 1: a real 3.x context was made; bit 1<<minor: ANGLE refused 3.minor */
+    int want_minor = 0;
+    for (int n = 0; at && at[n] != EGL_NONE && n < 36; n += 2) if (at[n] == 0x30fb) want_minor = at[n + 1];
+    /* from the version asked for down to 3.1 (a game asking for 3.2 takes 3.1 as well: Unreal asks for 3.2, then 3.1) */
+    for (int m = want_minor < 8 ? want_minor : 0; g_es31_shim && at && m > 0 && !getenv("TL_GL_NO_NATIVE_ES31"); m--) {
+        if (native & (1 << m)) continue;
+        EGLint try_at[40]; int n = 0;
+        for (; at[n] != EGL_NONE && n < 36; n += 2) { try_at[n] = at[n]; try_at[n + 1] = at[n] == 0x30fb ? m : at[n + 1]; }
+        try_at[n] = EGL_NONE;
+        EGLContext real = a_eglCreateContext(d, cfg_real(c), share, try_at);
+        if (real) {
+            if (!(native & 1)) tl_log_line("egl: ANGLE made a real OpenGL ES 3.%d context; the 3.0 shim is off", m);
+            native |= 1; g_es31_shim = false;
+            return real;
+        }
+        tl_log_line("egl: ANGLE has no OpenGL ES 3.%d context (eglGetError %#x)", m, a_eglGetError ? a_eglGetError() : 0);
+        native |= 1 << m;
+    }
     if (g_es31_shim && at) {
         int n = 0;
         for (; at[n] != EGL_NONE && n < 36; n += 2) {
@@ -820,6 +840,23 @@ static void w_glCompileShader(unsigned sh)
     if (slen > 0) getsrc(sh, slen, &got, src);
     for (char *q = log; *q; q++) if (*q == '\n') *q = '|';
     tl_log_line("gl: shader %u failed to compile (%d bytes of source): %.380s", sh, slen, log);
+    /* the source lines the first errors point at ("ERROR: 0:<line>:"), and the version line, so a log shows what did not compile */
+    if (n < 4) {
+        int lines[3], nl = 0;
+        for (const char *e = log; nl < 3 && (e = strstr(e, "ERROR: 0:")); e += 9) {
+            int ln = atoi(e + 9);
+            bool dup = false; for (int i = 0; i < nl; i++) dup |= lines[i] == ln;
+            if (ln > 0 && !dup) lines[nl++] = ln;
+        }
+        int ln = 1; const char *l = src;
+        while (l && *l) {
+            const char *eol = strchr(l, '\n'); int len = eol ? (int)(eol - l) : (int)strlen(l);
+            bool show = !strncmp(l, "#version", 8);
+            for (int i = 0; i < nl; i++) show |= ln >= lines[i] - 2 && ln <= lines[i] + 1;
+            if (show) tl_log_line("gl:   %4d| %.*s", ln, len > 200 ? 200 : len, l);
+            l = eol ? eol + 1 : NULL; ln++;
+        }
+    }
     const char *dir = getenv("TL_GL_SHADER_DUMP");
     if (dir) {
         char path[600]; snprintf(path, sizeof(path), "%s/shader-%d.txt", dir, n);
