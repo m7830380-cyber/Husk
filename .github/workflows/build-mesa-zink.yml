@@ -1,0 +1,43 @@
+name: Build Mesa Zink iOS
+
+on:
+  push:
+    branches: [ main ]
+    paths: [ 'scripts/build_mesa_zink_ios.sh', 'patches/mesa/**', '.github/workflows/build-mesa-zink.yml' ]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  mesa:
+    runs-on: macos-15
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+      - name: Tools
+        run: |
+          brew install meson ninja glslang bison flex pkg-config
+          pip3 install --break-system-packages mako pyyaml packaging || pip3 install mako pyyaml packaging
+          echo "/opt/homebrew/opt/bison/bin:/opt/homebrew/opt/flex/bin" >> $GITHUB_PATH
+      - name: MoltenVK
+        run: |
+          curl -fL --retry 3 -o mvk.tar https://github.com/KhronosGroup/MoltenVK/releases/download/v1.4.2/MoltenVK-ios.tar
+          tar -xf mvk.tar
+          mkdir -p build/ios-arm64/lib && cp -R MoltenVK/MoltenVK/dynamic/MoltenVK.xcframework build/ios-arm64/lib/
+      - name: Build
+        run: ./scripts/build_mesa_zink_ios.sh
+      - name: Logs
+        if: always()
+        run: |
+          tail -150 build/mesa-configure.log || true
+          tail -60 third_party/mesa/build-ios/meson-logs/meson-log.txt || true
+      - name: Package
+        run: |
+          cd build/ios-arm64 && tar -czf "$GITHUB_WORKSPACE/mesa-zink-ios.tar.gz" zink
+      - name: Publish
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release delete mesa-zink-ios -y --cleanup-tag || true
+          gh release create mesa-zink-ios mesa-zink-ios.tar.gz -t "Mesa Zink for iOS" -n "Build commit ${GITHUB_SHA::7}" --prerelease

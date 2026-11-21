@@ -1,0 +1,56 @@
+#!/bin/bash
+# Build Mesa's Zink (OpenGL ES 3.2 over Vulkan) for iOS arm64, against MoltenVK, with EGL (surfaceless).
+#
+# ANGLE's Metal backend stops at ES 3.0 plus a partial 3.1 with no compute; Zink on MoltenVK gives a real ES 3.1/3.2
+# with compute, which Unreal's ES 3.1 path needs. Output: build/ios-arm64/zink/{libEGL,libGLESv2,...}.dylib
+set -euo pipefail
+
+HUSK_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+MESA_TAG="${MESA_TAG:-mesa-25.2.0}"
+SRC="$HUSK_ROOT/third_party/mesa"
+OUT="$HUSK_ROOT/build/ios-arm64/zink"
+MVK="${MOLTENVK_DIR:-$HUSK_ROOT/build/ios-arm64/lib/MoltenVK.xcframework}"
+mkdir -p "$HUSK_ROOT/third_party" "$OUT"
+
+[ -d "$SRC" ] || git clone --depth 1 --branch "$MESA_TAG" https://gitlab.freedesktop.org/mesa/mesa.git "$SRC"
+
+SDK="$(xcrun --sdk iphoneos --show-sdk-path)"
+CC="$(xcrun --sdk iphoneos -f clang)"
+CXX="$(xcrun --sdk iphoneos -f clang++)"
+AR="$(xcrun --sdk iphoneos -f ar)"
+STRIP="$(xcrun --sdk iphoneos -f strip)"
+CROSS="$HUSK_ROOT/build/mesa-ios-cross.txt"
+cat > "$CROSS" <<CF
+[binaries]
+c = ['$CC', '-arch', 'arm64', '-isysroot', '$SDK', '-miphoneos-version-min=15.0']
+cpp = ['$CXX', '-arch', 'arm64', '-isysroot', '$SDK', '-miphoneos-version-min=15.0']
+objc = ['$CC', '-arch', 'arm64', '-isysroot', '$SDK', '-miphoneos-version-min=15.0']
+ar = '$AR'
+strip = '$STRIP'
+[host_machine]
+system = 'darwin'
+subsystem = 'ios'
+kernel = 'xnu'
+cpu_family = 'aarch64'
+cpu = 'arm64'
+endian = 'little'
+CF
+
+# MoltenVK's ios-arm64 slice: Zink links the Vulkan loader-less ICD directly.
+MVK_LIB="$(find "$MVK" -path '*ios-arm64/*' -name MoltenVK -type f | grep -v simulator | head -1)"
+echo "==> MoltenVK: $MVK_LIB"
+
+cd "$SRC"
+for p in "$HUSK_ROOT"/patches/mesa/*.patch; do [ -f "$p" ] && { git apply --check "$p" 2>/dev/null && git apply "$p" && echo "applied $(basename "$p")"; } ; done
+
+rm -rf build-ios
+meson setup build-ios --cross-file "$CROSS" \
+    -Dbuildtype=release -Db_ndebug=true \
+    -Dgallium-drivers=zink -Dvulkan-drivers= \
+    -Dplatforms= -Degl=enabled -Dgbm=disabled -Dglx=disabled \
+    -Dopengl=true -Dgles1=disabled -Dgles2=enabled \
+    -Dllvm=disabled -Dshared-llvm=disabled -Dzstd=disabled -Dexpat=disabled -Dvalgrind=disabled -Dlibunwind=disabled \
+    -Dbuild-tests=false -Dmoltenvk-dir="$(dirname "$(dirname "$MVK_LIB")")" \
+    -Dprefix="$OUT" 2>&1 | tee "$HUSK_ROOT/build/mesa-configure.log"
+ninja -C build-ios install 2>&1 | tail -80
+find "$OUT" -name '*.dylib' -exec ls -la {} \;
