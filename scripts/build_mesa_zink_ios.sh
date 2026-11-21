@@ -36,8 +36,10 @@ cpu = 'arm64'
 endian = 'little'
 [built-in options]
 # Generated lexers include u_endian.h under _POSIX_C_SOURCE, which hides Darwin's byte-order macros; arm64 iOS is little-endian.
-c_args = ['-DUTIL_ARCH_LITTLE_ENDIAN=1', '-DUTIL_ARCH_BIG_ENDIAN=0']
-cpp_args = ['-DUTIL_ARCH_LITTLE_ENDIAN=1', '-DUTIL_ARCH_BIG_ENDIAN=0']
+# MoltenVK's mvk_vulkan.h turns on the Metal/iOS Vulkan platforms after vulkan.h is already in, so Mesa's dispatch tables see
+# the guards without the types; define them up front so every translation unit includes vulkan_metal.h / vulkan_ios.h.
+c_args = ['-DUTIL_ARCH_LITTLE_ENDIAN=1', '-DUTIL_ARCH_BIG_ENDIAN=0', '-DVK_USE_PLATFORM_METAL_EXT', '-DVK_USE_PLATFORM_IOS_MVK']
+cpp_args = ['-DUTIL_ARCH_LITTLE_ENDIAN=1', '-DUTIL_ARCH_BIG_ENDIAN=0', '-DVK_USE_PLATFORM_METAL_EXT', '-DVK_USE_PLATFORM_IOS_MVK']
 CF
 
 # MoltenVK's ios-arm64 slice: Zink links the Vulkan loader-less ICD directly.
