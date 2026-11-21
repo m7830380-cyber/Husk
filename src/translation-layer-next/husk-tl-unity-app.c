@@ -198,6 +198,7 @@ static void *heartbeat_thread(void *arg)
 #else
         tl_log_line("unity: alive: %lu frames (+%lu)", f, f - last);
 #endif
+        { extern void tl_dvm_log_main_if_stuck(void); if (f == last && tick > 4) tl_dvm_log_main_if_stuck(); }
         last = f;
         { extern volatile struct { uint64_t count, x21, impl, mask; } tl_va_clobber;
           static uint64_t seen;

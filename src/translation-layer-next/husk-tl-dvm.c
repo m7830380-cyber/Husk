@@ -959,6 +959,40 @@ int dvm_capture_frames(void **out, uint32_t *pcs, int max)
     return n;
 }
 
+/* The app's main thread (the one that ran Looper.prepareMainLooper), so a hang can be told apart from idling: the
+   heartbeat calls tl_dvm_log_main_if_stuck when no frame was drawn, and if the main thread is anywhere but waiting for its
+   next message, its Java stack goes to the log (once per distinct place, at most 24 times). */
+static dvm_method **g_main_frames; static uint32_t *g_main_pcs; static int *g_main_depth;
+static void note_main_thread(dvm_method *m)
+{
+    if (m->name[0] == 'p' && !strcmp(m->name, "prepareMainLooper") && !strcmp(m->cls->name, "android/os/Looper")) {
+        g_main_frames = t_frames; g_main_pcs = t_pcs; __atomic_store_n(&g_main_depth, &t_depth, __ATOMIC_RELEASE);
+    }
+}
+void tl_dvm_log_main_if_stuck(void);
+void tl_dvm_log_main_if_stuck(void)
+{
+    static dvm_method *last_top; static uint32_t last_pc; static int logged, same;
+    int *dp = __atomic_load_n(&g_main_depth, __ATOMIC_ACQUIRE);
+    if (!dp) return;
+    int d = *dp; if (d <= 0) return; if (d > 8192) d = 8192;
+    dvm_method *top = g_main_frames[d - 1];
+    if (!top) return;
+    if (!strcmp(top->name, "nativePollOnce") || (d >= 2 && g_main_frames[d - 2] && !strcmp(g_main_frames[d - 2]->name, "nativePollOnce"))) { same = 0; return; }
+    uint32_t pc = g_main_pcs[d - 1];
+    if (top == last_top && pc == last_pc) { if (++same != 3) return; }   /* the same place three beats running: say it again */
+    else same = 0;
+    last_top = top; last_pc = pc;
+    if (logged >= 24) return;
+    logged++;
+    char b[3800]; size_t k = 0;
+    for (int i = d - 1; i >= 0 && d - i <= 40 && k + 200 < sizeof(b); i--) {
+        dvm_method *f = g_main_frames[i];
+        k += (size_t)snprintf(b + k, sizeof(b) - k, "%s%s.%s@%u", i == d - 1 ? "" : " <- ", f ? f->cls->name : "?", f ? f->name : "?", g_main_pcs[i]);
+    }
+    tl_log_line("dvm: main thread busy, no frame drawn (depth %d): %s", d, b);
+}
+
 /* The calling thread's Java frames, innermost first, for a crash report. */
 void tl_dvm_print_stack(FILE *f, int max)
 {
@@ -986,6 +1020,7 @@ static bool watch_hit(const char *w, const dvm_method *m)
 
 bool dvm_call(dvm_method *m, jobj *self, const jvalue *params, jvalue *ret)
 {
+    if (__builtin_expect(!g_main_depth, 0)) note_main_thread(m);
     if (t_depth < 8192) { t_frames[t_depth] = m; t_pcs[t_depth] = 0; }
     t_depth++;
     /* past 8000 frames: StackOverflowError, which is made with calls of its own, so those get 200 frames more (a deeper one
