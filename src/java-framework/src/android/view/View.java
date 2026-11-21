@@ -434,7 +434,7 @@ public class View implements Drawable.Callback, KeyEvent.Callback {
         return false;
     }
     public boolean isEnabled() { return mEnabled; }
-    public void setEnabled(boolean e) { if (mEnabled != e) { mEnabled = e; refreshDrawableState(); invalidate(); if (!e) cancelPendingInputEvents(); } }
+    public void setEnabled(boolean e) { if (mEnabled != e) { mEnabled = e; refreshDrawableState(); invalidateHusk(); if (!e) cancelPendingInputEvents(); } }
     public boolean isClickable() { return mClickable; }
     public void setClickable(boolean c) { mClickable = c; }
     public boolean isLongClickable() { return mLongClickable; }
@@ -452,14 +452,14 @@ public class View implements Drawable.Callback, KeyEvent.Callback {
     public void setSelected(boolean s) {
         if (s == isSelected()) return;
         if (s) mPrivateFlags |= PFLAG_SELECTED; else mPrivateFlags &= ~PFLAG_SELECTED;
-        invalidate(); refreshDrawableState(); dispatchSetSelected(s);
+        invalidateHusk(); refreshDrawableState(); dispatchSetSelected(s);
     }
     protected void dispatchSetSelected(boolean s) {}
     public boolean isActivated() { return (mPrivateFlags & PFLAG_ACTIVATED) != 0; }
     public void setActivated(boolean a) {
         if (a == isActivated()) return;
         if (a) mPrivateFlags |= PFLAG_ACTIVATED; else mPrivateFlags &= ~PFLAG_ACTIVATED;
-        invalidate(); refreshDrawableState(); dispatchSetActivated(a);
+        invalidateHusk(); refreshDrawableState(); dispatchSetActivated(a);
     }
     protected void dispatchSetActivated(boolean a) {}
     public boolean isHovered() { return (mPrivateFlags & PFLAG_HOVERED) != 0; }
@@ -515,8 +515,8 @@ public class View implements Drawable.Callback, KeyEvent.Callback {
     public boolean dispatchNestedFling(float vx, float vy, boolean consumed) { return false; }
     public boolean dispatchNestedPreFling(float vx, float vy) { return false; }
     public int getLayerType() { return mLayerType; }
-    public void setLayerType(int t, Paint p) { mLayerType = t; mLayerPaint = p; invalidate(); }
-    public void setLayerPaint(Paint p) { mLayerPaint = p; invalidate(); }
+    public void setLayerType(int t, Paint p) { mLayerType = t; mLayerPaint = p; invalidateHusk(); }
+    public void setLayerPaint(Paint p) { mLayerPaint = p; invalidateHusk(); }
     public void buildLayer() {}
     public void setDrawingCacheEnabled(boolean e) {}
     public boolean isDrawingCacheEnabled() { return false; }
@@ -665,10 +665,10 @@ public class View implements Drawable.Callback, KeyEvent.Callback {
             applyBackgroundTint();
         }
         requestLayout();
-        invalidate();
+        invalidateHusk();
     }
     public void setBackgroundColor(int c) {
-        if (mBackground instanceof android.graphics.drawable.ColorDrawable) { ((android.graphics.drawable.ColorDrawable) mBackground.mutate()).setColor(c); invalidate(); }
+        if (mBackground instanceof android.graphics.drawable.ColorDrawable) { ((android.graphics.drawable.ColorDrawable) mBackground.mutate()).setColor(c); invalidateHusk(); }
         else setBackground(new android.graphics.drawable.ColorDrawable(c));
     }
     public void setBackgroundResource(int id) { setBackground(id == 0 ? null : mContext.getDrawable(id)); }
@@ -683,7 +683,7 @@ public class View implements Drawable.Callback, KeyEvent.Callback {
             if (mBackgroundTint != null) mBackground.setTintList(mBackgroundTint);
             if (mBackgroundTintMode != null) mBackground.setTintMode(mBackgroundTintMode);
             if (mBackground.isStateful()) mBackground.setState(getDrawableState());
-            invalidate();
+            invalidateHusk();
         }
     }
     public Drawable getForeground() { return mForeground; }
@@ -694,7 +694,7 @@ public class View implements Drawable.Callback, KeyEvent.Callback {
         invalidate();
     }
     public int getForegroundGravity() { return mForegroundGravity; }
-    public void setForegroundGravity(int g) { mForegroundGravity = g; invalidate(); }
+    public void setForegroundGravity(int g) { mForegroundGravity = g; invalidateHusk(); }
     public void setForegroundTintList(ColorStateList t) { if (mForeground != null) mForeground.setTintList(t); }
 
     // ---- padding
@@ -702,7 +702,7 @@ public class View implements Drawable.Callback, KeyEvent.Callback {
         mUserPaddingStart = mUserPaddingEnd = Integer.MIN_VALUE;
         if (mPaddingLeft != l || mPaddingTop != t || mPaddingRight != r || mPaddingBottom != b) {
             mPaddingLeft = l; mPaddingTop = t; mPaddingRight = r; mPaddingBottom = b;
-            requestLayout(); invalidate();
+            requestLayout(); invalidateHusk();
         }
     }
     public void setPaddingRelative(int s, int t, int e, int b) { setPadding(s, t, e, b); mUserPaddingStart = s; mUserPaddingEnd = e; }
@@ -727,7 +727,7 @@ public class View implements Drawable.Callback, KeyEvent.Callback {
     public final void setRight(int r) { if (r != mRight) { int ow = getWidth(); invalidateParent(); mRight = r; sizeChange(getWidth(), getHeight(), ow, getHeight()); } }
     public final void setBottom(int b) { if (b != mBottom) { int oh = getHeight(); invalidateParent(); mBottom = b; sizeChange(getWidth(), getHeight(), getWidth(), oh); } }
     public void setLeftTopRightBottom(int l, int t, int r, int b) { setFrame(l, t, r, b); }
-    private void sizeChange(int w, int h, int ow, int oh) { mMatrixDirty = true; onSizeChanged(w, h, ow, oh); if (mBackground != null) mBackground.setBounds(0, 0, w, h); invalidate(); }
+    private void sizeChange(int w, int h, int ow, int oh) { mMatrixDirty = true; onSizeChanged(w, h, ow, oh); if (mBackground != null) mBackground.setBounds(0, 0, w, h); invalidateHusk(); }
     public float getX() { return mLeft + mTranslationX; }
     public float getY() { return mTop + mTranslationY; }
     public float getZ() { return mElevation + mTranslationZ; }
@@ -777,11 +777,11 @@ public class View implements Drawable.Callback, KeyEvent.Callback {
     public void setClipBounds(Rect r) { mClipBounds = r == null ? null : new Rect(r); invalidate(); }
     public Rect getClipBounds() { return mClipBounds == null ? null : new Rect(mClipBounds); }
     public boolean getClipBounds(Rect out) { if (mClipBounds == null) return false; out.set(mClipBounds); return true; }
-    public void setClipToOutline(boolean c) { if (c) mPrivateFlags |= PFLAG_CLIP_TO_OUTLINE; else mPrivateFlags &= ~PFLAG_CLIP_TO_OUTLINE; invalidate(); }
+    public void setClipToOutline(boolean c) { if (c) mPrivateFlags |= PFLAG_CLIP_TO_OUTLINE; else mPrivateFlags &= ~PFLAG_CLIP_TO_OUTLINE; invalidateHusk(); }
     public final boolean getClipToOutline() { return (mPrivateFlags & PFLAG_CLIP_TO_OUTLINE) != 0; }
     public void setOutlineProvider(ViewOutlineProvider p) { mOutlineProvider = p; invalidateOutline(); }
     public ViewOutlineProvider getOutlineProvider() { return mOutlineProvider; }
-    public void invalidateOutline() { invalidate(); }
+    public void invalidateOutline() { invalidateHusk(); }
     public void setOutlineAmbientShadowColor(int c) {}
     public void setOutlineSpotShadowColor(int c) {}
     public float getElevation() { return mElevation; }
@@ -1063,7 +1063,7 @@ public class View implements Drawable.Callback, KeyEvent.Callback {
             int ox = mScrollX, oy = mScrollY;
             mScrollX = x; mScrollY = y;
             onScrollChanged(x, y, ox, oy);
-            invalidate();
+            invalidateHusk();
         }
     }
     public void scrollBy(int x, int y) { scrollTo(mScrollX + x, mScrollY + y); }
