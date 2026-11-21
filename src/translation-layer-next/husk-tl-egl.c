@@ -230,6 +230,7 @@ PASS_BOOL(eglReleaseThread, (void), ())
 
 static const char *w_eglQueryString(EGLDisplay d, EGLint name) { return a_eglQueryString(d, name); }
 static bool g_es31_shim;           /* defined with the rest of the shim, below */
+static bool g_es31_native;         /* the game runs on a real 3.1 context ANGLE made (the OpenGL ES 3.1 game setting) */
 
 /*
  * OpenGL ES 3.1 on ANGLE's Metal backend, experimental (the game's "OpenGL ES 3.1" setting, TL_GL_ES31=1). The backend caps the version
@@ -295,6 +296,7 @@ static EGLContext w_eglCreateContext(EGLDisplay d, EGLConfig c, EGLContext share
     /* A newer ANGLE can make a real 3.1 context on Metal: when it does, the game gets what it asked for and the 3.0 shim steps aside
        (its shaders compile as written, with the varyings' explicit locations Unreal's 3.1 shaders use). Only with the game's OpenGL ES 3.1 setting (TL_GL_ES31=1). */
     static int native;                                         /* 1: a real 3.x context was made; bit 1<<minor: ANGLE refused 3.minor */
+    static int native_minor;                                   /* the minor version of that real context */
     int want_minor = 0;
     for (int n = 0; at && at[n] != EGL_NONE && n < 36; n += 2) if (at[n] == 0x30fb) want_minor = at[n + 1];
     /* from the version asked for down to 3.1 (a game asking for 3.2 takes 3.1 as well: Unreal asks for 3.2, then 3.1) */
@@ -309,11 +311,19 @@ static EGLContext w_eglCreateContext(EGLDisplay d, EGLConfig c, EGLContext share
         EGLContext real = a_eglCreateContext(d, cfg_real(c), share, try_at);
         if (real) {
             if (!(native & 1)) tl_log_line("egl: ANGLE made a real OpenGL ES 3.%d context; the 3.0 shim is off", m);
-            native |= 1; g_es31_shim = false;
+            native |= 1; native_minor = m; g_es31_shim = false; g_es31_native = true;
             return real;
         }
         tl_log_line("egl: ANGLE has no OpenGL ES 3.%d context (eglGetError %#x)", m, a_eglGetError ? a_eglGetError() : 0);
         native |= 1 << m;
+    }
+    /* Once a real 3.x context exists, later ones (shared contexts, the rendering thread's) asking for more are given that version too:
+       the game is already running on it, and ANGLE refuses the higher minor every time. */
+    if (es31 && !g_es31_shim && (native & 1) && at && want_minor > native_minor) {
+        int n = 0;
+        for (; at[n] != EGL_NONE && n < 36; n += 2) { patched[n] = at[n]; patched[n + 1] = at[n] == 0x30fb ? native_minor : at[n + 1]; }
+        patched[n] = EGL_NONE;
+        at = patched;
     }
     if (g_es31_shim && at) {
         int n = 0;
@@ -821,7 +831,9 @@ static const unsigned char *w_glGetString(unsigned name)
             p += n; if (e) p++;
         }
         /* The engines that need ES 3.1 buffer textures check for the extension before asking for its entry points. */
-        if (g_es31_shim) { k += (size_t)snprintf(filtered + k, 62, "%sGL_EXT_texture_buffer", k ? " " : ""); }
+        /* On a real 3.1 context whose ANGLE lacks it, too: Unreal's ES 3.1 renderer calls glTexBufferEXT whether or not it found the
+           extension, and only resolves it when the extension is listed (a jump to address 0 otherwise). */
+        if ((g_es31_shim || g_es31_native) && !strstr((const char *)s, "GL_EXT_texture_buffer")) { k += (size_t)snprintf(filtered + k, 62, "%sGL_EXT_texture_buffer", k ? " " : ""); }
         /* copy_image, done by copyimg_emulate where ANGLE does not */
         if (copyimg_extra()) for (int i = 0; i < COPYIMG_EXT_COUNT; i++) k += (size_t)snprintf(filtered + k, 62, "%s%s", k ? " " : "", k_copyimg_ext[i]);
         filtered[k] = 0;
@@ -1132,7 +1144,8 @@ void *tl_egl_resolve(const char *name)
 static void *egl_resolve(const char *name)
 {
     for (int i = 0; k_noop_names[i]; i++) if (!strcmp(k_noop_names[i], name)) return (void *)w_gl_noop;
-    if (g_es31_shim) for (int i = 0; k_es31_stub_names[i]; i++) if (!strcmp(k_es31_stub_names[i], name)) {
+    /* under the 3.0 shim, and on a real 3.1 context whose ANGLE has no such entry point */
+    if (g_es31_shim || g_es31_native) for (int i = 0; k_es31_stub_names[i]; i++) if (!strcmp(k_es31_stub_names[i], name)) {
         void *real = E.ready && a_eglGetProcAddress ? a_eglGetProcAddress(name) : NULL;
         if (real) break;
         static int said; if (!said++) tl_log_line("gl: stubbing ES 3.1 entry points ANGLE lacks (first: %s)", name);
