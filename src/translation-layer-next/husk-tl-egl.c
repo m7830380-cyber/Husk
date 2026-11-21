@@ -565,6 +565,12 @@ static EGLBoolean w_eglGetNextFrameIdANDROID(EGLDisplay d, EGLSurface s, uint64_
 static EGLBoolean w_eglGetFrameTimestampsANDROID(EGLDisplay d, EGLSurface s, uint64_t id, EGLint n, const EGLint *t, int64_t *v) { (void)d; (void)s; (void)id; (void)n; (void)t; (void)v; return EGL_FALSE; }
 static EGLBoolean w_eglGetCompositorTimingANDROID(EGLDisplay d, EGLSurface s, EGLint n, const EGLint *t, int64_t *v) { (void)d; (void)s; (void)n; (void)t; (void)v; return EGL_FALSE; }
 
+/* texture buffers where ANGLE has none (husk-tl-egl-tbo.inc) */
+static bool g_tbo_any;
+static bool tbo_on(void);
+static void tbo_draw(void);
+static void tbo_forget_tex(unsigned tex);
+
 #include "husk-tl-egl-tex.inc"
 #include "husk-tl-egl-diag.inc"
 
@@ -802,6 +808,7 @@ static bool ext_hidden(const char *name, size_t n)
     return false;
 }
 
+#include "husk-tl-egl-tbo.inc"
 #include "husk-tl-egl-es31.inc"
 
 static const unsigned char *(*r_glGetString)(unsigned);
@@ -985,6 +992,10 @@ static const struct { const char *name; void *wrap; void **real; } k_adapt[] = {
     ADAPT(glDrawElements), ADAPT(glDrawElementsInstanced), ADAPT(glDrawRangeElements), ADAPT(glDrawArrays), ADAPT(glDrawArraysInstanced), ADAPT(glClear), ADAPT(glGenerateMipmap),
     { "glCopyImageSubDataEXT", (void *)w_glCopyImageSubData, (void **)&r_glCopyImageSubData },
     { "glCopyImageSubDataOES", (void *)w_glCopyImageSubData, (void **)&r_glCopyImageSubData }, ADAPT(glGetString), ADAPT(glGetStringi), ADAPT(glCompileShader), ADAPT(glShaderSource), ADAPT(glAttachShader), ADAPT(glLinkProgram), ADAPT(glGetIntegerv), ADAPT(glBindBufferBase), ADAPT(glBindBuffer), ADAPT(glBufferData), ADAPT(glBufferSubData), ADAPT(glBindBufferRange),
+    ADAPT(glBindTexture), ADAPT(glActiveTexture), ADAPT(glBindSampler), ADAPT(glMapBufferRange), { "glMapBufferRangeEXT", (void *)w_glMapBufferRange, (void **)&r_glMapBufferRange },
+    ADAPT(glUnmapBuffer), { "glUnmapBufferOES", (void *)w_glUnmapBuffer, (void **)&r_glUnmapBuffer }, ADAPT(glFlushMappedBufferRange),
+    { "glFlushMappedBufferRangeEXT", (void *)w_glFlushMappedBufferRange, (void **)&r_glFlushMappedBufferRange }, ADAPT(glCopyBufferSubData),
+    ADAPT(glGetBufferParameteriv), ADAPT(glGetBufferParameteri64v), ADAPT(glGetBufferPointerv), { "glGetBufferPointervOES", (void *)w_glGetBufferPointerv, (void **)&r_glGetBufferPointerv },
     ADAPT(glGetProgramInterfaceiv), ADAPT(glGetProgramResourceIndex), ADAPT(glGetProgramResourceName), ADAPT(glGetProgramResourceiv), ADAPT(glGetIntegeri_v),
     ADAPT(eglClientWaitSyncKHR), ADAPT(eglDestroySyncKHR), ADAPT(eglGetSyncAttribKHR), ADAPT(eglClientWaitSync), ADAPT(eglDestroySync),
 };
@@ -1127,7 +1138,6 @@ static const char *const k_noop_names[] = {
 /* ES 3.1 entry points an ES 3.0 context cannot honour. Under the 3.1 shim a game that asks for them is handed an empty function,
  * so that setup which merely creates the objects goes through; whatever really depends on them draws nothing. */
 static const char *const k_es31_stub_names[] = {
-    "glTexBufferEXT", "glTexBufferOES", "glTexBuffer", "glTexBufferRangeEXT", "glTexBufferRangeOES", "glTexBufferRange",
     "glBindImageTexture", "glDispatchCompute", "glDispatchComputeIndirect", "glMemoryBarrier", "glMemoryBarrierByRegion",
     "glFramebufferParameteri", "glGetFramebufferParameteriv", "glTexStorage2DMultisample", NULL
 };
@@ -1144,6 +1154,11 @@ void *tl_egl_resolve(const char *name)
 static void *egl_resolve(const char *name)
 {
     for (int i = 0; k_noop_names[i]; i++) if (!strcmp(k_noop_names[i], name)) return (void *)w_gl_noop;
+    /* texture buffers: emulated where the context has none (husk-tl-egl-tbo.inc), ANGLE's own where it has them */
+    if (g_es31_shim || g_es31_native) {
+        if (!strcmp(name, "glTexBufferEXT") || !strcmp(name, "glTexBufferOES") || !strcmp(name, "glTexBuffer")) return (void *)w_glTexBuffer;
+        if (!strcmp(name, "glTexBufferRangeEXT") || !strcmp(name, "glTexBufferRangeOES") || !strcmp(name, "glTexBufferRange")) return (void *)w_glTexBufferRange;
+    }
     /* under the 3.0 shim, and on a real 3.1 context whose ANGLE has no such entry point */
     if (g_es31_shim || g_es31_native) for (int i = 0; k_es31_stub_names[i]; i++) if (!strcmp(k_es31_stub_names[i], name)) {
         void *real = E.ready && a_eglGetProcAddress ? a_eglGetProcAddress(name) : NULL;

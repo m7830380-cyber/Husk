@@ -318,6 +318,8 @@ static void w_glShaderSource(unsigned sh, int count, const char *const *str, con
     diag_shader_source(sh, cat);
     char *ext = oes_external_rewrite(cat);
     if (ext) { free(cat); cat = ext; k = strlen(cat); }
+    char *tb = tbo_shader_source(sh, cat);
+    if (tb) { free(cat); cat = tb; k = strlen(cat); }
     static void (*getiv)(unsigned, unsigned, int *);
     if (!getiv && a_eglGetProcAddress) getiv = a_eglGetProcAddress("glGetShaderiv");
     int type = 0; if (getiv) getiv(sh, 0x8B4F /* GL_SHADER_TYPE */, &type);
@@ -372,6 +374,7 @@ static void w_glAttachShader(unsigned prog, unsigned sh)
 {
     r_glAttachShader(prog, sh);
     diag_attach(prog, sh);
+    tbo_attach(prog, sh);
     if (!g_es31_shim) return;
     pthread_mutex_lock(&g_es31_mu);
     g_es31_att[g_es31_natt % ES31_ATTACHED].prog = prog; g_es31_att[g_es31_natt % ES31_ATTACHED].shader = sh; g_es31_natt++;
@@ -382,6 +385,7 @@ static void (*r_glLinkProgram)(unsigned);
 static void w_glLinkProgram(unsigned prog)
 {
     r_glLinkProgram(prog);
+    tbo_linked(prog);
     /* a program that does not link draws nothing, and an engine seldom says so: say why, for the first few */
     if (diag_on() && a_eglGetProcAddress) {
         static atomic_int told;
@@ -429,6 +433,7 @@ static void w_glLinkProgram(unsigned prog)
 static void (*r_glGetIntegerv)(unsigned, int *);
 static void w_glGetIntegerv(unsigned pname, int *data)
 {
+    if (tbo_get_integer(pname, data)) return;
     if (g_es31_shim && data) *data = 0;   /* a 3.1-only limit is an error on the 3.0 context, which writes nothing */
     r_glGetIntegerv(pname, data);
     if (g_es31_shim && pname == 0x821C /* GL_MINOR_VERSION */ && data && *data == 0) *data = g_es3_minor;
@@ -482,11 +487,24 @@ static void w_glBindBufferBase(unsigned target, unsigned index, unsigned buffer)
 /* The other calls that name the storage target: it is the uniform one here. */
 #define ES31_STORAGE(t) ((t) == 0x90D2 ? 0x8A11u : (t))
 static void (*r_glBindBuffer)(unsigned, unsigned);
-static void w_glBindBuffer(unsigned t, unsigned b) { es31_note_storage("glBindBuffer", t); r_glBindBuffer(g_es31_shim ? ES31_STORAGE(t) : t, b); }
+static void w_glBindBuffer(unsigned t, unsigned b)
+{
+    /* the texture-buffer target is remembered; binding the name once makes it a buffer object, as the game's bind would */
+    if (TBO_ALIASED(t)) { int sv; t_tbo_buf = b; tbo_alias_begin(0x8F37, &sv); tbo_alias_end(0x8F37, sv); return; }
+    es31_note_storage("glBindBuffer", t); r_glBindBuffer(g_es31_shim ? ES31_STORAGE(t) : t, b);
+}
 static void (*r_glBufferData)(unsigned, long, const void *, unsigned);
-static void w_glBufferData(unsigned t, long n, const void *d, unsigned u) { es31_note_storage("glBufferData", t); r_glBufferData(g_es31_shim ? ES31_STORAGE(t) : t, n, d, u); }
+static void w_glBufferData(unsigned t, long n, const void *d, unsigned u)
+{
+    if (TBO_ALIASED(t)) { int sv; unsigned a = tbo_alias_begin(0x8F37, &sv); r_glBufferData(a, n, d, u); tbo_alias_end(a, sv); tbo_dirty_buf(t_tbo_buf); return; }
+    es31_note_storage("glBufferData", t); t = g_es31_shim ? ES31_STORAGE(t) : t; r_glBufferData(t, n, d, u); tbo_written(t);
+}
 static void (*r_glBufferSubData)(unsigned, long, long, const void *);
-static void w_glBufferSubData(unsigned t, long o, long n, const void *d) { es31_note_storage("glBufferSubData", t); r_glBufferSubData(g_es31_shim ? ES31_STORAGE(t) : t, o, n, d); }
+static void w_glBufferSubData(unsigned t, long o, long n, const void *d)
+{
+    if (TBO_ALIASED(t)) { int sv; unsigned a = tbo_alias_begin(0x8F37, &sv); r_glBufferSubData(a, o, n, d); tbo_alias_end(a, sv); tbo_dirty_buf(t_tbo_buf); return; }
+    es31_note_storage("glBufferSubData", t); t = g_es31_shim ? ES31_STORAGE(t) : t; r_glBufferSubData(t, o, n, d); tbo_written(t);
+}
 static void (*r_glBindBufferRange)(unsigned, unsigned, unsigned, long, long);
 static void w_glBindBufferRange(unsigned t, unsigned i, unsigned b, long o, long n)
 {

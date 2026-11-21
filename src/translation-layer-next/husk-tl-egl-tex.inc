@@ -150,6 +150,6 @@ static void w_glTexImage2D(unsigned t, int level, int ifmt, int w, int h, int bo
 static void (*r_glDeleteTextures)(int, const unsigned *);
 static void w_glDeleteTextures(int n, const unsigned *names)
 {
-    if (names) for (int k = 0; k < n; k++) { int i = tf_slot(names[k], false); if (i >= 0) g_tf[i].name = 0; }
+    if (names) for (int k = 0; k < n; k++) { int i = tf_slot(names[k], false); if (i >= 0) g_tf[i].name = 0; tbo_forget_tex(names[k]); }
     r_glDeleteTextures(n, names);
 }

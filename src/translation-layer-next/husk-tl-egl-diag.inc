@@ -105,7 +105,7 @@ static void diag_write_prog_src(unsigned prog)
  * and a binary without the current tag is refused -- the program stays unlinked, and the engine, seeing LINK_STATUS false (as
  * after a driver update), compiles it from source again.
  */
-#define HUSK_BIN_REV 2u   /* bumped whenever a shader rewrite changes */
+#define HUSK_BIN_REV 3u   /* bumped whenever a shader rewrite changes */
 #define HUSK_BIN_TAG (0x48000000u | (HUSK_BIN_REV << 16))
 static void (*r_glGetProgramBinary)(unsigned, int, int *, unsigned *, void *);
 static void w_glGetProgramBinary(unsigned prog, int size, int *len, unsigned *fmt, void *bin)
@@ -120,6 +120,12 @@ static void w_glProgramBinary(unsigned prog, unsigned fmt, const void *bin, int 
         static atomic_int said;
         if (!atomic_exchange(&said, 1)) tl_log_line("gldiag: program binaries refused on this launch, so shaders are compiled from source");
         return;   /* the program stays unlinked: the engine sees LINK_STATUS false and compiles it */
+    }
+    if (tbo_on()) {
+        /* a binary has no shader source, and the emulated buffer samplers are found by their names in it */
+        static atomic_int said;
+        if (!atomic_exchange(&said, 1)) tl_log_line("gl: program binaries refused while texture buffers are emulated, so shaders are compiled from source");
+        return;
     }
     if ((fmt & 0xFFFF0000u) != HUSK_BIN_TAG) {
         static atomic_int said;
@@ -1073,19 +1079,19 @@ static unsigned w_glGetError(void)
 
 static void (*r_glDrawElements)(unsigned, int, unsigned, const void *);
 static void w_glDrawElements(unsigned mode, int count, unsigned type, const void *idx)
-{ t_diag_draws++; if (t_layer_draws >= 0) t_layer_draws++; bt_draw(mode, count); CUBE_PRE(mode, count); bool c = cap_here(); if (c) cap_pre(); { bool zf = zb_pre(); r_glDrawElements(mode, count, type, idx); zb_post(zf); } CUBE_POST(); if (c) cap_post(mode, count); else err_check("a draw"); }
+{ if (g_tbo_any) tbo_draw(); t_diag_draws++; if (t_layer_draws >= 0) t_layer_draws++; bt_draw(mode, count); CUBE_PRE(mode, count); bool c = cap_here(); if (c) cap_pre(); { bool zf = zb_pre(); r_glDrawElements(mode, count, type, idx); zb_post(zf); } CUBE_POST(); if (c) cap_post(mode, count); else err_check("a draw"); }
 static void (*r_glDrawElementsInstanced)(unsigned, int, unsigned, const void *, int);
 static void w_glDrawElementsInstanced(unsigned mode, int count, unsigned type, const void *idx, int inst)
-{ t_diag_draws++; if (t_layer_draws >= 0) t_layer_draws++; bt_draw(mode, count); CUBE_PRE(mode, count); bool c = cap_here(); if (c) cap_pre(); { bool zf = zb_pre(); r_glDrawElementsInstanced(mode, count, type, idx, inst); zb_post(zf); } CUBE_POST(); if (c) cap_post(mode, count); else err_check("a draw"); }
+{ if (g_tbo_any) tbo_draw(); t_diag_draws++; if (t_layer_draws >= 0) t_layer_draws++; bt_draw(mode, count); CUBE_PRE(mode, count); bool c = cap_here(); if (c) cap_pre(); { bool zf = zb_pre(); r_glDrawElementsInstanced(mode, count, type, idx, inst); zb_post(zf); } CUBE_POST(); if (c) cap_post(mode, count); else err_check("a draw"); }
 static void (*r_glDrawRangeElements)(unsigned, unsigned, unsigned, int, unsigned, const void *);
 static void w_glDrawRangeElements(unsigned mode, unsigned s, unsigned e, int count, unsigned type, const void *idx)
-{ t_diag_draws++; if (t_layer_draws >= 0) t_layer_draws++; bt_draw(mode, count); CUBE_PRE(mode, count); bool c = cap_here(); if (c) cap_pre(); { bool zf = zb_pre(); r_glDrawRangeElements(mode, s, e, count, type, idx); zb_post(zf); } CUBE_POST(); if (c) cap_post(mode, count); else err_check("a draw"); }
+{ if (g_tbo_any) tbo_draw(); t_diag_draws++; if (t_layer_draws >= 0) t_layer_draws++; bt_draw(mode, count); CUBE_PRE(mode, count); bool c = cap_here(); if (c) cap_pre(); { bool zf = zb_pre(); r_glDrawRangeElements(mode, s, e, count, type, idx); zb_post(zf); } CUBE_POST(); if (c) cap_post(mode, count); else err_check("a draw"); }
 static void (*r_glDrawArrays)(unsigned, int, int);
 static void w_glDrawArrays(unsigned mode, int first, int count)
-{ t_diag_draws++; if (t_layer_draws >= 0) t_layer_draws++; bt_draw(mode, count); CUBE_PRE(mode, count); bool c = cap_here(); if (c) cap_pre(); { bool zf = zb_pre(); r_glDrawArrays(mode, first, count); zb_post(zf); } CUBE_POST(); if (c) cap_post(mode, count); else err_check("a draw"); }
+{ if (g_tbo_any) tbo_draw(); t_diag_draws++; if (t_layer_draws >= 0) t_layer_draws++; bt_draw(mode, count); CUBE_PRE(mode, count); bool c = cap_here(); if (c) cap_pre(); { bool zf = zb_pre(); r_glDrawArrays(mode, first, count); zb_post(zf); } CUBE_POST(); if (c) cap_post(mode, count); else err_check("a draw"); }
 static void (*r_glDrawArraysInstanced)(unsigned, int, int, int);
 static void w_glDrawArraysInstanced(unsigned mode, int first, int count, int inst)
-{ t_diag_draws++; if (t_layer_draws >= 0) t_layer_draws++; bt_draw(mode, count); CUBE_PRE(mode, count); bool c = cap_here(); if (c) cap_pre(); { bool zf = zb_pre(); r_glDrawArraysInstanced(mode, first, count, inst); zb_post(zf); } CUBE_POST(); if (c) cap_post(mode, count); else err_check("a draw"); }
+{ if (g_tbo_any) tbo_draw(); t_diag_draws++; if (t_layer_draws >= 0) t_layer_draws++; bt_draw(mode, count); CUBE_PRE(mode, count); bool c = cap_here(); if (c) cap_pre(); { bool zf = zb_pre(); r_glDrawArraysInstanced(mode, first, count, inst); zb_post(zf); } CUBE_POST(); if (c) cap_post(mode, count); else err_check("a draw"); }
 static void (*r_glClear)(unsigned);
 static void w_glClear(unsigned mask) { r_glClear(mask); cap_dirty(); if (!cap_here()) err_check("glClear"); }
 
