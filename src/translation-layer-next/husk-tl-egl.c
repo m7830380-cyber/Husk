@@ -139,9 +139,15 @@ reload:
         EGLDisplay d = a_eglGetPlatformDisplayEXT(0x31DD /* EGL_PLATFORM_SURFACELESS_MESA */, NULL, NULL);
         EGLint mj = 0, mn = 0;
         EGLint es3 = 0;
-        const EGLint want_es3[] = { 0x3040 /* EGL_RENDERABLE_TYPE */, 0x40 /* EGL_OPENGL_ES3_BIT */, EGL_NONE };
+        /* surfaceless offers pbuffer configs only, and eglChooseConfig's SURFACE_TYPE defaults to WINDOW_BIT: ask for any */
+        const EGLint want_es3[] = { 0x3040 /* EGL_RENDERABLE_TYPE */, 0x40 /* EGL_OPENGL_ES3_BIT */, 0x3033 /* EGL_SURFACE_TYPE */, -1 /* EGL_DONT_CARE */, EGL_NONE };
         bool up = d && a_eglInitialize(d, &mj, &mn);
-        if (up) a_eglChooseConfig(d, want_es3, NULL, 0, &es3);
+        if (up) {
+            EGLint all = 0;
+            a_eglGetConfigs(d, NULL, 0, &all);
+            a_eglChooseConfig(d, want_es3, NULL, 0, &es3);
+            tl_log_line("egl: Zink client APIs \"%s\", %d config(s), %d with ES 3", a_eglQueryString(d, 0x308D /* EGL_CLIENT_APIS */), all, es3);
+        }
         /* a device Zink takes but cannot give OpenGL ES 3 on: games here want 3, so ANGLE serves them instead */
         if (up && !es3) tl_log_line("egl: Zink offers no OpenGL ES 3 config");
         if (up && es3) { E.display = d; tl_log_line("egl: Zink display up, EGL %d.%d, %d ES 3 config(s)", mj, mn, es3); }
