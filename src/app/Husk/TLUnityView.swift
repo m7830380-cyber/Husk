@@ -332,7 +332,15 @@ final class TLUnityUIView: UIView, UIKeyInput {
             }
             started = husk_flutter_launch(apk, dataDir, layerPtr, Int32(width), Int32(height), angle, ca)
         case .minecraft: started = husk_gameactivity_launch(apk, dataDir, layerPtr, Int32(width), Int32(height), angle, ca)
-        case .unity: started = husk_unity_launch(apk, dataDir, layerPtr, Int32(width), Int32(height), angle, ca)
+        case .unity:
+            // The renderer the game's settings ask for. Vulkan: MoltenVK is the device's Vulkan, and the game picks between it and OpenGL ES
+            // as it does on a phone. OpenGL ES: there is no Vulkan, so it runs on ANGLE.
+            let appID = ((dataDir as NSString).deletingLastPathComponent as NSString).lastPathComponent
+            let renderer = TLAppSettings.load(appID).renderer
+            let mvk = Bundle.main.privateFrameworksPath.map { $0 + "/MoltenVK.framework/MoltenVK" } ?? ""
+            husk_ue4_set_vulkan(renderer == .vulkan ? mvk : "")
+            HuskLog.log("tl", "unity: renderer \(renderer.title) (game settings)")
+            started = husk_unity_launch(apk, dataDir, layerPtr, Int32(width), Int32(height), angle, ca)
         }
         if !started { HuskLog.log("tl", "native: launch refused") }
     }

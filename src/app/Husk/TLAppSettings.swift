@@ -77,7 +77,22 @@ struct TLAppSettings: Codable, Equatable {
         }
     }
 
+    /// Which graphics API a Unity game is given. Vulkan: the game is offered Vulkan (MoltenVK, over Metal) and OpenGL ES, and picks
+    /// as it does on an Android phone -- a game built for Vulkan uses it, and one that cannot start it falls back to OpenGL ES.
+    /// OpenGL ES: Vulkan is not there, so the game runs on OpenGL ES (ANGLE, over Metal), as Husk did before this setting.
+    enum Renderer: String, Codable, CaseIterable, Identifiable {
+        case vulkan, opengl
+        var id: String { rawValue }
+        var title: String {
+            switch self {
+            case .vulkan: return "Vulkan"
+            case .opengl: return "OpenGL ES"
+            }
+        }
+    }
+
     var orientation: Orientation = .auto
+    var renderer: Renderer = .vulkan
     var window: WindowMode = .auto
     var resolution: Resolution = .high
     /// The frames-per-second readout in the top bar.
@@ -110,6 +125,7 @@ struct TLAppSettings: Codable, Equatable {
         haptics = try c.decodeIfPresent(Bool.self, forKey: .haptics) ?? true
         geode = try c.decodeIfPresent(Bool.self, forKey: .geode) ?? false
         window = try c.decodeIfPresent(WindowMode.self, forKey: .window) ?? .auto
+        renderer = try c.decodeIfPresent(Renderer.self, forKey: .renderer) ?? .vulkan
     }
 
     private static func url(_ id: String) -> URL {
@@ -193,6 +209,22 @@ struct TLAppSettingsView: View {
             } footer: {
                 Text("\(settings.resolution.detail) Orientation and resolution apply the next time the game starts, and a game already "
                    + "running in this session needs Husk closed and opened again.")
+            }
+
+            if app.screenEngine == .unity {
+                Section {
+                    Picker("Renderer", selection: $settings.renderer) {
+                        ForEach(TLAppSettings.Renderer.allCases) { Text($0.title).tag($0) }
+                    }
+                } header: {
+                    Text("Graphics")
+                } footer: {
+                    Text(settings.renderer == .vulkan
+                         ? "The game is offered Vulkan, as on an Android phone, and uses it if it was built for it. A game that cannot start "
+                           + "Vulkan falls back to OpenGL ES by itself. Applies the next time the game starts."
+                         : "The game runs on OpenGL ES only. Pick this if the game looks or runs worse with Vulkan. Applies the next time "
+                           + "the game starts.")
+                }
             }
 
             Section {

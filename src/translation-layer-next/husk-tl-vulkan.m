@@ -148,11 +148,23 @@ static int w_vkEnumerateInstanceExtensionProperties(const char *layer, uint32_t 
     return r;
 }
 
+/*
+ * The Java runtime's compositor (husk-tl-dvm-android.c), where it is linked, holds the screen's layer with ANGLE: it draws the app's
+ * window there with the app's views over it. A game that draws its window with Vulkan (Unity on GameActivity) cannot present to that
+ * layer as well, so its swapchain is on a layer of its own that is not on screen, and each frame it presents is read back and handed
+ * to the compositor -- what the OpenGL ES path does with its frames (husk-tl-egl.c, comp_surface).
+ */
+__attribute__((weak)) bool tl_javaapp_compositing(void);
+__attribute__((weak)) void tl_javaapp_app_pixels(const void *px, int w, int h);
+static bool g_vk_comp;
+
 /* On the phone the window's layer is the app's own; for a test on a Mac there is no view, so make one the size of the window. */
 static void *layer_for(void *window)
 {
     void *layer = tl_nwindow_native(window);
-    if (layer) return layer;
+    g_vk_comp = layer && tl_javaapp_compositing && tl_javaapp_app_pixels && tl_javaapp_compositing();
+    if (g_vk_comp) tl_log_line("vulkan: the screen's layer is the compositor's: the swapchain is off screen and its frames are composited under the app's views");
+    if (layer && !g_vk_comp) return layer;
     static CAMetalLayer *offscreen;
     if (!offscreen) {
         offscreen = [CAMetalLayer layer];
@@ -294,11 +306,75 @@ static void probe_frame(void *queue, const void *info, unsigned long n)
                 (unsigned long)tex.usage, tex.framebufferOnly, readable ? px : " (not readable)");
 }
 
+/* A composited swapchain's frame, read back once the GPU has finished it, as bottom-up RGBA (what glReadPixels gives the GL path) for the compositor */
+static void comp_frame(void *queue, const void *info)
+{
+    typedef int (*pfn_wait)(void *);
+    typedef int (*pfn_get_images)(void *, uint64_t, uint32_t *, uint64_t *);
+    typedef void (*pfn_get_tex)(uint64_t, void *);
+    static pfn_wait wait_idle; static pfn_get_images get_images; static pfn_get_tex get_tex;
+    static id<MTLCommandQueue> mq; static id<MTLBuffer> buf; static uint8_t *out; static size_t out_cap;
+    static atomic_int said;
+    if (!wait_idle && V.lib) {
+        wait_idle = (pfn_wait)dlsym(V.lib, "vkQueueWaitIdle");
+        get_images = (pfn_get_images)dlsym(V.lib, "vkGetSwapchainImagesKHR");
+        get_tex = (pfn_get_tex)dlsym(V.lib, "vkGetMTLTextureMVK");
+    }
+    if (!wait_idle || !get_images || !get_tex) { if (atomic_fetch_add(&said, 1) < 1) tl_log_line("vulkan: composite: missing entry points"); return; }
+    const uint8_t *pi = info;
+    uint32_t nsw; memcpy(&nsw, pi + 32, 4);
+    const uint64_t *sws; memcpy(&sws, pi + 40, 8);
+    const uint32_t *idx; memcpy(&idx, pi + 48, 8);
+    if (nsw < 1 || !sws || !idx) return;
+    wait_idle(queue);
+    uint32_t cnt = 0; get_images(NULL, sws[0], &cnt, NULL);
+    if (idx[0] >= cnt || cnt > 8) return;
+    uint64_t imgs[8]; get_images(NULL, sws[0], &cnt, imgs);
+    void *raw = NULL; get_tex(imgs[idx[0]], &raw);
+    if (!raw) { if (atomic_fetch_add(&said, 1) < 3) tl_log_line("vulkan: composite: no texture for image %u", idx[0]); return; }
+    id<MTLTexture> tex = (__bridge id<MTLTexture>)raw;
+    int w = (int)tex.width, h = (int)tex.height;
+    MTLPixelFormat pf = tex.pixelFormat;
+    bool bgra = pf == MTLPixelFormatBGRA8Unorm || pf == MTLPixelFormatBGRA8Unorm_sRGB;
+    bool rgba = pf == MTLPixelFormatRGBA8Unorm || pf == MTLPixelFormatRGBA8Unorm_sRGB;
+    if (w <= 0 || h <= 0 || (!bgra && !rgba) || tex.framebufferOnly) {
+        if (atomic_fetch_add(&said, 1) < 3) tl_log_line("vulkan: composite: image %dx%d format %lu framebufferOnly %d cannot be read back", w, h, (unsigned long)pf, tex.framebufferOnly);
+        return;
+    }
+    size_t bpr = (size_t)w * 4, n = bpr * h;
+    @autoreleasepool {
+        if (!mq) mq = [tex.device newCommandQueue];
+        if (!buf || buf.length < n) buf = [tex.device newBufferWithLength:n options:MTLResourceStorageModeShared];
+        if (!mq || !buf) return;
+        id<MTLCommandBuffer> cb = [mq commandBuffer];
+        id<MTLBlitCommandEncoder> bl = [cb blitCommandEncoder];
+        [bl copyFromTexture:tex sourceSlice:0 sourceLevel:0 sourceOrigin:MTLOriginMake(0, 0, 0) sourceSize:MTLSizeMake(w, h, 1)
+                   toBuffer:buf destinationOffset:0 destinationBytesPerRow:bpr destinationBytesPerImage:n];
+        [bl endEncoding];
+        [cb commit];
+        [cb waitUntilCompleted];
+    }
+    if (n > out_cap) { free(out); out = malloc(n); out_cap = out ? n : 0; }
+    if (!out) return;
+    const uint8_t *src = buf.contents;
+    for (int y = 0; y < h; y++) {
+        const uint32_t *s = (const uint32_t *)(src + (size_t)y * bpr);
+        uint32_t *d = (uint32_t *)(out + (size_t)(h - 1 - y) * bpr);
+        if (bgra) for (int x = 0; x < w; x++) { uint32_t v = s[x]; d[x] = (v & 0x0000FF00u) | ((v >> 16) & 0xFFu) | ((v & 0xFFu) << 16) | 0xFF000000u; }
+        else for (int x = 0; x < w; x++) d[x] = s[x] | 0xFF000000u;
+    }
+    if (atomic_fetch_add(&said, 1) < 1) tl_log_line("vulkan: composite: first frame %dx%d (format %lu) handed to the compositor", w, h, (unsigned long)pf);
+    tl_javaapp_app_pixels(out, w, h);
+}
+
 typedef int (*pfn_create_swapchain)(void *, const void *, const void *, uint64_t *);
 static int w_vkCreateSwapchainKHR(void *device, const void *ci, const void *alloc, uint64_t *out)
 {
     static pfn_create_swapchain real;
     if (!real && V.lib) real = (pfn_create_swapchain)dlsym(V.lib, "vkCreateSwapchainKHR");
+    /* a composited swapchain's images are read back each frame: they must be a transfer source (MoltenVK then makes them readable, not framebufferOnly) */
+    uint8_t copy[104];
+    if (g_vk_comp) { memcpy(copy, ci, sizeof(copy)); uint32_t u; memcpy(&u, copy + 56, 4); u |= 0x1 /* TRANSFER_SRC */; memcpy(copy + 56, &u, 4); ci = copy; }
     const uint8_t *c = ci; uint32_t minimg, fmt, cs, w, h, usage, alpha, mode;
     memcpy(&minimg, c + 32, 4); memcpy(&fmt, c + 36, 4); memcpy(&cs, c + 40, 4); memcpy(&w, c + 44, 4); memcpy(&h, c + 48, 4);
     memcpy(&usage, c + 56, 4); memcpy(&alpha, c + 84, 4); memcpy(&mode, c + 88, 4);
@@ -346,6 +422,7 @@ static int w_vkQueuePresentKHR(void *queue, const void *info)
             uint64_t zero = 0; memcpy(times + i * 16 + 8, &zero, 8);
         }
     }
+    if (g_vk_comp) comp_frame(queue, info);
     int r = real ? real(queue, info) : -3;
     { static atomic_int bad; if (r != VK_SUCCESS && atomic_fetch_add(&bad, 1) < 20) tl_log_line("vulkan: vkQueuePresentKHR #%lu -> %d", n, r); }
     { static int tr = -1; if (tr < 0) tr = getenv("TL_VK_TRACE") ? 1 : 0; if (tr && n <= 5) tl_log_line("vulkan: vkQueuePresentKHR #%lu -> %d", n, r); }
