@@ -66,6 +66,10 @@ grep -n 'Options.Zink)) {' src/egl/drivers/dri2/platform_surfaceless.c
 # are tolerated there. Warn instead of refusing the device.
 perl -0pi -e 's/(Zink requires the nullDescriptor feature of KHR\/EXT robustness2\.\"\);\n)\s*goto fail;/$1/' src/gallium/drivers/zink/zink_screen.c
 perl -0ne 'exit(/nullDescriptor feature of KHR\/EXT robustness2\.\"\);\n\s*goto fail;/ ? 1 : 0)' src/gallium/drivers/zink/zink_screen.c
+# MoltenVK has no transform feedback (Metal has no such stage), and Mesa counts it among OpenGL ES 3.0's requirements: without it
+# only ES 2.0 is offered and every ES 3 context is refused. Offer ES 3 regardless; a program that captures varyings gets nothing.
+perl -0pi -e 's/(extensions->EXT_texture_sRGB &&\n)\s*extensions->EXT_transform_feedback &&\n/$1/' src/mesa/main/version.c
+perl -0ne 'exit(/EXT_texture_sRGB &&\n\s*extensions->EXT_transform_feedback &&\n\s*extensions->ARB_draw_instanced/ ? 1 : 0)' src/mesa/main/version.c
 
 rm -rf build-ios
 meson setup build-ios --cross-file "$CROSS" \
