@@ -253,9 +253,26 @@ __attribute__((used)) void husk_caps_fix(uint32_t *c)
 {
     static int at = -1, told;
     if (at < 0) {
-        for (int j = 2; j < 600; j += 2)
-            if (c[j] == 16384 && c[j + 1] == 0 && c[j - 2] == 32 && (c[j + 2] == 16 || c[j + 2] == 256) && c[j + 3] == 32 && c[j + 7] == 0) { at = j + 8; break; }
-        if (at < 0) { at = 0; tl_log_line("egl: es31: ANGLE's caps are laid out differently: uniform locations not raised"); }
+        /* maxUniformBlockSize (int64 16384), uniformBufferOffsetAlignment (16/256), maxCombinedUniformBlocks,
+           maxVaryingComponents, maxVaryingVectors, maxCombinedTextureImageUnits, maxCombinedShaderOutputResources (0),
+           maxUniformLocations (0). Block and sampler counts differ between ANGLE versions, so only their shape is checked. */
+        for (int j = 2; j < 700 && at < 0; j += 2) {
+            if (c[j] != 16384 || c[j + 1] != 0 || (c[j + 2] != 16 && c[j + 2] != 256)) continue;
+            if (c[j + 3] < 4 || c[j + 3] > 128) continue;
+            for (int k = j + 4; k <= j + 8; k++)
+                if (c[k] >= 8 && c[k] <= 128 && c[k + 1] == 0 && c[k + 2] == 0) { at = k + 2; break; }
+        }
+        if (at < 0) {
+            at = 0; tl_log_line("egl: es31: ANGLE's caps are laid out differently: uniform locations not raised");
+            char b[1100];
+            for (int r = 0; r < 700; r += 64) {
+                int n = snprintf(b, sizeof b, "egl: es31: caps[%d]:", r);
+                for (int i = r; i < r + 64 && i < 700 && n < (int)sizeof b - 12; i++) n += snprintf(b + n, sizeof b - n, " %x", c[i]);
+                tl_log_line("%s", b);
+            }
+        } else {
+            tl_log_line("egl: es31: max uniform locations found at caps word %d", at);
+        }
     }
     if (at > 0 && (int32_t)c[at] < 1024) {
         c[at] = 1024;
