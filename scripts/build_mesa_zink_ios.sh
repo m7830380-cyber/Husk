@@ -62,6 +62,10 @@ grep -n 'MoltenVK.framework' src/gallium/drivers/zink/zink_screen.c
 # DRM, so let Zink take the device-less path too.
 sed -i '' 's|if (!driver_loaded \&\& disp->Options.ForceSoftware) {|if (!driver_loaded \&\& (disp->Options.ForceSoftware \|\| disp->Options.Zink)) {|' src/egl/drivers/dri2/platform_surfaceless.c
 grep -n 'Options.Zink)) {' src/egl/drivers/dri2/platform_surfaceless.c
+# MoltenVK has robustness2 but not its nullDescriptor feature; Metal argument buffers take a nil resource, so bindings left empty
+# are tolerated there. Warn instead of refusing the device.
+perl -0pi -e 's/(Zink requires the nullDescriptor feature of KHR\/EXT robustness2\.\"\);\n)\s*goto fail;/$1/' src/gallium/drivers/zink/zink_screen.c
+perl -0ne 'exit(/nullDescriptor feature of KHR\/EXT robustness2\.\"\);\n\s*goto fail;/ ? 1 : 0)' src/gallium/drivers/zink/zink_screen.c
 
 rm -rf build-ios
 meson setup build-ios --cross-file "$CROSS" \
