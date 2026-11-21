@@ -587,6 +587,7 @@ static struct {
 } C;
 static unsigned char g_diag_dark_done[DIAG_PROGS];
 static __thread unsigned long t_diag_draws;   /* draws by this thread since its last swap */
+static atomic_ulong g_diag_draws_all;          /* draws by every thread since the last swap */
 /* a capture follows one thread: other threads present their own surfaces (the app's UI) and draw nothing of the scene */
 static inline bool cap_here(void) { if (!C.active) return false; return pthread_equal(pthread_self(), C.thr); }
 
@@ -1079,19 +1080,19 @@ static unsigned w_glGetError(void)
 
 static void (*r_glDrawElements)(unsigned, int, unsigned, const void *);
 static void w_glDrawElements(unsigned mode, int count, unsigned type, const void *idx)
-{ if (g_tbo_any) tbo_draw(); t_diag_draws++; if (t_layer_draws >= 0) t_layer_draws++; bt_draw(mode, count); CUBE_PRE(mode, count); bool c = cap_here(); if (c) cap_pre(); { bool zf = zb_pre(); r_glDrawElements(mode, count, type, idx); zb_post(zf); } CUBE_POST(); if (c) cap_post(mode, count); else err_check("a draw"); }
+{ if (g_tbo_any) tbo_draw(); t_diag_draws++; atomic_fetch_add_explicit(&g_diag_draws_all, 1, memory_order_relaxed); if (t_layer_draws >= 0) t_layer_draws++; bt_draw(mode, count); CUBE_PRE(mode, count); bool c = cap_here(); if (c) cap_pre(); { bool zf = zb_pre(); r_glDrawElements(mode, count, type, idx); zb_post(zf); } CUBE_POST(); if (c) cap_post(mode, count); else err_check("a draw"); }
 static void (*r_glDrawElementsInstanced)(unsigned, int, unsigned, const void *, int);
 static void w_glDrawElementsInstanced(unsigned mode, int count, unsigned type, const void *idx, int inst)
-{ if (g_tbo_any) tbo_draw(); t_diag_draws++; if (t_layer_draws >= 0) t_layer_draws++; bt_draw(mode, count); CUBE_PRE(mode, count); bool c = cap_here(); if (c) cap_pre(); { bool zf = zb_pre(); r_glDrawElementsInstanced(mode, count, type, idx, inst); zb_post(zf); } CUBE_POST(); if (c) cap_post(mode, count); else err_check("a draw"); }
+{ if (g_tbo_any) tbo_draw(); t_diag_draws++; atomic_fetch_add_explicit(&g_diag_draws_all, 1, memory_order_relaxed); if (t_layer_draws >= 0) t_layer_draws++; bt_draw(mode, count); CUBE_PRE(mode, count); bool c = cap_here(); if (c) cap_pre(); { bool zf = zb_pre(); r_glDrawElementsInstanced(mode, count, type, idx, inst); zb_post(zf); } CUBE_POST(); if (c) cap_post(mode, count); else err_check("a draw"); }
 static void (*r_glDrawRangeElements)(unsigned, unsigned, unsigned, int, unsigned, const void *);
 static void w_glDrawRangeElements(unsigned mode, unsigned s, unsigned e, int count, unsigned type, const void *idx)
-{ if (g_tbo_any) tbo_draw(); t_diag_draws++; if (t_layer_draws >= 0) t_layer_draws++; bt_draw(mode, count); CUBE_PRE(mode, count); bool c = cap_here(); if (c) cap_pre(); { bool zf = zb_pre(); r_glDrawRangeElements(mode, s, e, count, type, idx); zb_post(zf); } CUBE_POST(); if (c) cap_post(mode, count); else err_check("a draw"); }
+{ if (g_tbo_any) tbo_draw(); t_diag_draws++; atomic_fetch_add_explicit(&g_diag_draws_all, 1, memory_order_relaxed); if (t_layer_draws >= 0) t_layer_draws++; bt_draw(mode, count); CUBE_PRE(mode, count); bool c = cap_here(); if (c) cap_pre(); { bool zf = zb_pre(); r_glDrawRangeElements(mode, s, e, count, type, idx); zb_post(zf); } CUBE_POST(); if (c) cap_post(mode, count); else err_check("a draw"); }
 static void (*r_glDrawArrays)(unsigned, int, int);
 static void w_glDrawArrays(unsigned mode, int first, int count)
-{ if (g_tbo_any) tbo_draw(); t_diag_draws++; if (t_layer_draws >= 0) t_layer_draws++; bt_draw(mode, count); CUBE_PRE(mode, count); bool c = cap_here(); if (c) cap_pre(); { bool zf = zb_pre(); r_glDrawArrays(mode, first, count); zb_post(zf); } CUBE_POST(); if (c) cap_post(mode, count); else err_check("a draw"); }
+{ if (g_tbo_any) tbo_draw(); t_diag_draws++; atomic_fetch_add_explicit(&g_diag_draws_all, 1, memory_order_relaxed); if (t_layer_draws >= 0) t_layer_draws++; bt_draw(mode, count); CUBE_PRE(mode, count); bool c = cap_here(); if (c) cap_pre(); { bool zf = zb_pre(); r_glDrawArrays(mode, first, count); zb_post(zf); } CUBE_POST(); if (c) cap_post(mode, count); else err_check("a draw"); }
 static void (*r_glDrawArraysInstanced)(unsigned, int, int, int);
 static void w_glDrawArraysInstanced(unsigned mode, int first, int count, int inst)
-{ if (g_tbo_any) tbo_draw(); t_diag_draws++; if (t_layer_draws >= 0) t_layer_draws++; bt_draw(mode, count); CUBE_PRE(mode, count); bool c = cap_here(); if (c) cap_pre(); { bool zf = zb_pre(); r_glDrawArraysInstanced(mode, first, count, inst); zb_post(zf); } CUBE_POST(); if (c) cap_post(mode, count); else err_check("a draw"); }
+{ if (g_tbo_any) tbo_draw(); t_diag_draws++; atomic_fetch_add_explicit(&g_diag_draws_all, 1, memory_order_relaxed); if (t_layer_draws >= 0) t_layer_draws++; bt_draw(mode, count); CUBE_PRE(mode, count); bool c = cap_here(); if (c) cap_pre(); { bool zf = zb_pre(); r_glDrawArraysInstanced(mode, first, count, inst); zb_post(zf); } CUBE_POST(); if (c) cap_post(mode, count); else err_check("a draw"); }
 static void (*r_glClear)(unsigned);
 static void w_glClear(unsigned mask) { r_glClear(mask); cap_dirty(); if (!cap_here()) err_check("glClear"); }
 
@@ -1110,6 +1111,8 @@ static void diag_swap(unsigned long n)
     if (!diag_on()) return;
     if (!cap_here()) err_check("the end of a frame");
     unsigned long drew = t_diag_draws; t_diag_draws = 0;
+    unsigned long drew_all = atomic_exchange(&g_diag_draws_all, 0);
+    if (n == 100 || n == 600 || n == 1500) tl_log_line("gldiag: swap #%lu: %lu draws by the swapping thread, %lu by all threads, in the last frame", n, drew, drew_all);
 #if defined(__aarch64__)
     if (n == 300) {   /* FPCR.FZ (bit 24) flushes subnormals on the CPU; Android starts threads with it off */
         unsigned long fpcr; __asm__ volatile("mrs %0, fpcr" : "=r"(fpcr));
@@ -1121,7 +1124,7 @@ static void diag_swap(unsigned long n)
         if (C.next >= CAP_N) { diag_summary(n); atomic_store(&g_diag_done, true); tl_log_line("gldiag: done"); return; }
     }
     /* the next capture: the first frame, from the listed swap on, of a thread that drew a scene's worth in its last one */
-    if (!C.active && C.next < CAP_N && n + 1 >= k_cap_frames[C.next] && drew >= 40) {
+    if (!C.active && C.next < CAP_N && n + 1 >= k_cap_frames[C.next] && drew >= 8) {
         C.k = (int)++C.next; C.thr = pthread_self(); C.chosen = C.dirty = C.tracked = C.failed = C.ms = false;
         C.tmp_fb = 0; C.ndraw = C.lines = 0; C.active = true;
         tl_log_line("gldiag: cap%d: capturing the next frame of a thread that drew %lu times in its last one", C.k, drew);
