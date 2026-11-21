@@ -915,7 +915,7 @@ static void w_glEnable(unsigned cap) { r_glEnable(cap); if (cap == 0x0BE2) t_zb_
 static void (*r_glDisable)(unsigned);
 static void w_glDisable(unsigned cap) { r_glDisable(cap); if (cap == 0x0BE2) t_zb_blend_on = false; if (cap == 0x0BE2 && bt_on()) bt_log("glDisable(GL_BLEND)"); }
 static void (*r_glUseProgram)(unsigned);
-static void w_glUseProgram(unsigned p) { r_glUseProgram(p); if (bt_on()) { char w[40]; snprintf(w, sizeof(w), "glUseProgram(%u)", p); bt_log(w); } }
+static void w_glUseProgram(unsigned p) { g_cs_cur = cs_fake(p) ? p : 0; r_glUseProgram(g_cs_cur ? 0 : p); if (bt_on()) { char w[40]; snprintf(w, sizeof(w), "glUseProgram(%u)", p); bt_log(w); } }
 static void (*r_glBlendEquationSeparate)(unsigned, unsigned);
 static void w_glBlendEquationSeparate(unsigned c, unsigned a) { r_glBlendEquationSeparate(c, a); if (bt_on()) { char w[60]; snprintf(w, sizeof(w), "glBlendEquationSeparate(%#x,%#x)", c, a); bt_log(w); } }
 static void (*r_glBlendEquation)(unsigned);

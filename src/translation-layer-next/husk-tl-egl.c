@@ -644,6 +644,10 @@ static void tbo_draw(void);
 static void tbo_forget_tex(unsigned tex);
 
 #include "husk-tl-egl-tex.inc"
+/* compute fallback (husk-tl-egl-cs.inc), reached from earlier wrappers */
+static bool cs_fake(unsigned prog);
+static void cs_linked(unsigned prog);
+static unsigned g_cs_cur;
 #include "husk-tl-egl-diag.inc"
 
 /* ------------------------------------------------- GLES: stack-argument fixes */
@@ -882,6 +886,7 @@ static bool ext_hidden(const char *name, size_t n)
 
 #include "husk-tl-egl-tbo.inc"
 #include "husk-tl-egl-es31.inc"
+#include "husk-tl-egl-cs.inc"
 
 static const unsigned char *(*r_glGetString)(unsigned);
 static const unsigned char *w_glGetString(unsigned name)
@@ -1068,7 +1073,7 @@ static const struct { const char *name; void *wrap; void **real; } k_adapt[] = {
     ADAPT(glUnmapBuffer), { "glUnmapBufferOES", (void *)w_glUnmapBuffer, (void **)&r_glUnmapBuffer }, ADAPT(glFlushMappedBufferRange),
     { "glFlushMappedBufferRangeEXT", (void *)w_glFlushMappedBufferRange, (void **)&r_glFlushMappedBufferRange }, ADAPT(glCopyBufferSubData),
     ADAPT(glGetBufferParameteriv), ADAPT(glGetBufferParameteri64v), ADAPT(glGetBufferPointerv), { "glGetBufferPointervOES", (void *)w_glGetBufferPointerv, (void **)&r_glGetBufferPointerv },
-    ADAPT(glGetProgramInterfaceiv), ADAPT(glGetProgramResourceIndex), ADAPT(glGetProgramResourceName), ADAPT(glGetProgramResourceiv), ADAPT(glGetIntegeri_v),
+    ADAPT(glGetProgramInterfaceiv), ADAPT(glGetProgramResourceIndex), ADAPT(glGetProgramResourceName), ADAPT(glGetProgramResourceiv), ADAPT(glGetIntegeri_v), ADAPT(glGetShaderiv), ADAPT(glGetProgramiv), ADAPT(glGetProgramInfoLog), ADAPT(glDispatchCompute), ADAPT(glDispatchComputeIndirect),
     ADAPT(eglClientWaitSyncKHR), ADAPT(eglDestroySyncKHR), ADAPT(eglGetSyncAttribKHR), ADAPT(eglClientWaitSync), ADAPT(eglDestroySync),
 };
 
