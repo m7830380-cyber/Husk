@@ -100,6 +100,7 @@ bool tl_egl_init(const char *egl_path, const char *gles_path, const char *frame_
     pthread_mutex_lock(&E.lock);
     if (E.ready) { pthread_mutex_unlock(&E.lock); return true; }
     char fallback[600] = "";
+    const bool shim_before = g_es31_shim;   /* what an engine claimed for ANGLE: given back if Zink hands over to it */
 reload:
     snprintf(E.egl_path, sizeof(E.egl_path), "%s", egl_path);
     snprintf(E.gles_path, sizeof(E.gles_path), "%s", gles_path ? gles_path : egl_path);
@@ -115,6 +116,9 @@ reload:
         if (!getenv("EGL_LOG_LEVEL")) setenv("EGL_LOG_LEVEL", "info", 1);
         if (!getenv("MESA_SHADER_CACHE_DIR")) { const char *t = getenv("TMPDIR"); if (t) { char c[600]; snprintf(c, sizeof(c), "%s/mesa-shader-cache", t); setenv("MESA_SHADER_CACHE_DIR", c, 1); } }
         g_es31_shim = false;   /* whatever an engine claimed before this: Zink's versions are real */
+        /* Mesa holds back OpenGL ES 3 for features MoltenVK lacks (transform feedback, and others Metal has no stage for); the rest of
+         * 3.1 is there, and the games here need its contexts. A version set by hand is kept. */
+        if (!getenv("MESA_GLES_VERSION_OVERRIDE")) setenv("MESA_GLES_VERSION_OVERRIDE", "3.1", 1);
     }
     E.egl = dlopen(egl_path, RTLD_NOW | RTLD_LOCAL);
     if (!E.egl) { tl_log_line("egl: cannot load %s: %s", egl_path, dlerror()); pthread_mutex_unlock(&E.lock); return false; }
@@ -145,6 +149,7 @@ reload:
             snprintf(fallback, sizeof(fallback), "%.*slibANGLE-shared.dylib", base ? (int)(base + 1 - egl_path) : 0, egl_path);
             tl_log_line("egl: Zink did not start (display %p, error 0x%x): using ANGLE (%s)", d, a_eglGetError ? a_eglGetError() : 0, fallback);
             egl_path = fallback; gles_path = NULL; E.gles = NULL; E.egl = NULL;
+            g_es31_shim = shim_before;   /* ANGLE's 3.0 shim serves again */
             goto reload;
         }
     }
