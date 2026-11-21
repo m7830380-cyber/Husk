@@ -71,6 +71,11 @@ perl -0ne 'exit(/nullDescriptor feature of KHR\/EXT robustness2\.\"\);\n\s*goto 
 perl -0pi -e 's/(extensions->EXT_texture_sRGB &&\n)\s*extensions->EXT_transform_feedback &&\n/$1/' src/mesa/main/version.c
 perl -0ne 'exit(/EXT_texture_sRGB &&\n\s*extensions->EXT_transform_feedback &&\n\s*extensions->ARB_draw_instanced/ ? 1 : 0)' src/mesa/main/version.c
 
+# Metal has no three-component 32-bit texel buffers, so MoltenVK offers none and Mesa withholds texture buffers altogether
+# (GL_EXT/OES_texture_buffer, and with them ES 3.2). Offer them without the RGB32 formats; a buffer of one of those fails alone.
+perl -0pi -e 's/(extensions->ARB_texture_buffer_range) &&\n\s*extensions->ARB_texture_buffer_object_rgb32;/$1;/' src/mesa/state_tracker/st_extensions.c
+perl -0ne 'exit(/OES_texture_buffer =[^;]*ARB_texture_buffer_object_rgb32;/ ? 1 : 0)' src/mesa/state_tracker/st_extensions.c
+
 rm -rf build-ios
 meson setup build-ios --cross-file "$CROSS" \
     -Dbuildtype=release -Db_ndebug=true \
