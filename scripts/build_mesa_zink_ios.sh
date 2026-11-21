@@ -43,6 +43,11 @@ echo "==> MoltenVK: $MVK_LIB"
 cd "$SRC"
 for p in "$HUSK_ROOT"/patches/mesa/*.patch; do [ -f "$p" ] && { git apply --check "$p" 2>/dev/null && git apply "$p" && echo "applied $(basename "$p")"; } ; done
 
+# Mesa only builds its DRI loader (which EGL's surfaceless platform runs through) on KMS/DRM systems; a Darwin build has the
+# same loader code without the kernel half, so allow it there.
+sed -i '' "s/^if with_gallium and system_has_kms_drm$/if with_gallium and (system_has_kms_drm or host_machine.system() == 'darwin')/" meson.build
+grep -n "^if with_gallium and" meson.build
+
 rm -rf build-ios
 meson setup build-ios --cross-file "$CROSS" \
     -Dbuildtype=release -Db_ndebug=true \
