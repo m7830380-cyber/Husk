@@ -205,6 +205,7 @@ public final class ViewRoot implements ViewParent {
         for (ViewRoot r : roots) if (!r.mRemoved) r.mObserver.dispatchOnDraw();
     }
     private static Boolean sDump;
+    private static int sDialogDumps;
     private long mLastDump;
     /** TL_VIEW_DUMP: the window's views, with their frames, to the log (every 3 s while it lays out). */
     private static void dump(View v, int depth) {
@@ -213,6 +214,9 @@ public final class ViewRoot implements ViewParent {
         b.append(v.getClass().getName()).append(' ').append(v.getLeft()).append(',').append(v.getTop()).append(' ').append(v.getWidth()).append('x').append(v.getHeight());
         if (v.getVisibility() != View.VISIBLE) b.append(v.getVisibility() == View.GONE ? " GONE" : " INVISIBLE");
         if (v.getAlpha() != 1f) b.append(" a=").append(v.getAlpha());
+        if (v.getTranslationY() != 0f || v.getTranslationX() != 0f) b.append(" t=").append(v.getTranslationX()).append(',').append(v.getTranslationY());
+        if (v.getScrollY() != 0 || v.getScrollX() != 0) b.append(" scroll=").append(v.getScrollX()).append(',').append(v.getScrollY());
+        if (v.getPaddingTop() != 0 || v.getPaddingBottom() != 0) b.append(" pad=").append(v.getPaddingLeft()).append(',').append(v.getPaddingTop()).append(',').append(v.getPaddingRight()).append(',').append(v.getPaddingBottom());
         if (v.getLayerType() != View.LAYER_TYPE_NONE) b.append(" layer=").append(v.getLayerType());
         if (v.getId() != View.NO_ID) b.append(" #").append(Integer.toHexString(v.getId()));
         if (v instanceof android.widget.TextView) {
@@ -304,6 +308,11 @@ public final class ViewRoot implements ViewParent {
                 again[0] = () -> { if (mRemoved) return; android.util.Log.d("ViewDump", "---- " + mView.getClass().getName() + " (timer; layout requested " + mView.isLayoutRequested() + ")"); dump(mView, 0); mainHandler().postDelayed(again[0], 4000); };
                 mainHandler().postDelayed(again[0], 4000);
             }
+        }
+        if (mFirst && mLp.type != WindowManager.LayoutParams.TYPE_BASE_APPLICATION && !sDump && sDialogDumps < 6) {
+            /* diagnostics: a dialog/sheet window's tree, a moment after it opens, so a blank or runaway dialog shows why */
+            sDialogDumps++;
+            mainHandler().postDelayed(() -> { if (mRemoved) return; android.util.Log.d("ViewDump", "---- dialog window " + mView.getClass().getName() + " lp=" + mLp.width + "x" + mLp.height + " at " + mX + "," + mY + " " + mW + "x" + mH + " screen " + screenW() + "x" + screenH()); dump(mView, 0); }, 1500);
         }
         if (mFirst) {
             mFirst = false;
