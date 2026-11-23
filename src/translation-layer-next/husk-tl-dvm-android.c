@@ -182,6 +182,30 @@ static const gl_native k_gles_special[] = {
     { NULL, NULL, NULL },
 };
 
+/* GLES30 natives the generator leaves out: a String[] argument, or a String result built from a GL out-buffer */
+NAT(G_glTransformFeedbackVaryings)
+{
+    (void)self; (void)ret;
+    void (*f)(uint32_t, int32_t, const char *const *, uint32_t) = gl_fn("glTransformFeedbackVaryings");
+    jobj *arr = a[1].l;
+    if (!f || !arr || arr->kind != TL_K_OBJ_ARRAY) return true;
+    uint32_t n = arr->oarr.len;
+    const char *names[64];
+    if (n > 64) n = 64;
+    for (uint32_t i = 0; i < n; i++) { names[i] = gl_str(arr->oarr.v[i]); if (!names[i]) names[i] = ""; }
+    f((uint32_t)a[0].i, (int32_t)n, names, (uint32_t)a[2].i);
+    return true;
+}
+NAT(G_glGetTransformFeedbackVarying6) { (void)self; *ret = L(active("glGetTransformFeedbackVarying", a[0].i, a[1].i, gl_array(a[2].l, a[3].i), gl_array(a[4].l, a[5].i))); return true; }
+NAT(G_glGetTransformFeedbackVarying4) { (void)self; *ret = L(active("glGetTransformFeedbackVarying", a[0].i, a[1].i, gl_buffer(a[2].l), gl_buffer(a[3].l))); return true; }
+
+static const gl_native k_gles30_special[] = {
+    { "glTransformFeedbackVaryings", "(I[Ljava/lang/String;I)V", G_glTransformFeedbackVaryings },
+    { "glGetTransformFeedbackVarying", "(II[II[II)Ljava/lang/String;", G_glGetTransformFeedbackVarying6 },
+    { "glGetTransformFeedbackVarying", "(IILjava/nio/IntBuffer;Ljava/nio/IntBuffer;)Ljava/lang/String;", G_glGetTransformFeedbackVarying4 },
+    { NULL, NULL, NULL },
+};
+
 /* ================================================================== husk.Native */
 
 NAT(N_log)
@@ -546,6 +570,9 @@ dvm_native_fn dvm_android_native(const char *cls, const char *name, const char *
         for (int i = 0; k_gles20[i].name; i++) if (!strcmp(k_gles20[i].name, name) && !strcmp(k_gles20[i].sig, sig)) return k_gles20[i].fn;
     } else if (!strncmp(cls, "android/opengl/GLES3", 20) || !strncmp(cls, "android/opengl/GLES1", 20)) {
         const char *v = cls + 19;
+        /* GLES31/32 extend GLES30, so its hand-written natives resolve for them too */
+        if (v[0] == '3')
+            for (int i = 0; k_gles30_special[i].name; i++) if (!strcmp(k_gles30_special[i].name, name) && !strcmp(k_gles30_special[i].sig, sig)) return k_gles30_special[i].fn;
         const gl_native *t = !strcmp(v, "30") ? k_gles30 : !strcmp(v, "31") ? k_gles31 : !strcmp(v, "32") ? k_gles32 : !strcmp(v, "10") ? k_gles10
                            : !strcmp(v, "10Ext") ? k_gles10ext : !strcmp(v, "11") ? k_gles11 : !strcmp(v, "11Ext") ? k_gles11ext : NULL;
         for (int i = 0; t && t[i].name; i++) if (!strcmp(t[i].name, name) && !strcmp(t[i].sig, sig)) return t[i].fn;
