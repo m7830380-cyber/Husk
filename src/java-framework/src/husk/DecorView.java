@@ -83,7 +83,8 @@ public final class DecorView extends FrameLayout {
         }
         mContent = new FrameLayout(c);
         mContent.setId(android.R.id.content);
-        mStack.addView(mContent, new LinearLayout.LayoutParams(LayoutParams.MATCH_PARENT, 0, 1f));
+        // content is last: MATCH_PARENT takes whatever the bars leave, and a wrap-content (dialog) window passes it AT_MOST like AOSP screen_simple, not EXACTLY (custom onMeasure that measures children with the parent spec would blow up)
+        mStack.addView(mContent, new LinearLayout.LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.MATCH_PARENT));
         addView(mStack, new FrameLayout.LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.MATCH_PARENT));
         return mContent;
     }
