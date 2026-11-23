@@ -57,14 +57,17 @@ public class ProgressBar extends View {
         a.recycle();
         if (!mHorizontal) mIndeterminate = true;
         refreshProgress();
+        mConstructed = true;
     }
+    /* subclasses (Material's progress indicators) override invalidate()/getIndeterminateDrawable() and cast what super returns before their own drawables are set, so nothing virtual runs and no placeholder is handed out until construction ends, as on Android */
+    private boolean mConstructed;
     private float dp(float v) { return v * getResources().getDisplayMetrics().density; }
     public synchronized boolean isIndeterminate() { return mIndeterminate; }
     public synchronized void setIndeterminate(boolean i) { if ((!mOnlyIndeterminate || i) && i != mIndeterminate) { mIndeterminate = i; if (i) startAnimation(); else stopAnimation(); invalidate(); } }
     /* never null, as on Android (Flipboard tints it): the one drawn, else the theme's that Husk draws its own spinner in place of */
     private Drawable mThemeIndeterminate;
     public Drawable getIndeterminateDrawable() {
-        if (mIndeterminateDrawable != null) return mIndeterminateDrawable;
+        if (mIndeterminateDrawable != null || !mConstructed) return mIndeterminateDrawable;
         if (mThemeIndeterminate == null) mThemeIndeterminate = new android.graphics.drawable.ColorDrawable(0);
         return mThemeIndeterminate;
     }
@@ -106,7 +109,7 @@ public class ProgressBar extends View {
                 if (sp != null) sp.setLevel((int) (scale2 * MAX_LEVEL));
             } else mProgressDrawable.setLevel((int) (scale * MAX_LEVEL));
         }
-        invalidate();
+        if (mConstructed) invalidate();
     }
     void onProgressRefresh(float scale, boolean fromUser, int progress) {}
     public synchronized void setProgress(int p) { setProgressInternal(p, false, false); }
