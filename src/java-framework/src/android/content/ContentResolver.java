@@ -139,10 +139,46 @@ public class ContentResolver {
         }
     }
     public void notifyChange(Uri u, ContentObserver observer, int flags) { notifyChange(u, observer, true); }
-    public void takePersistableUriPermission(Uri u, int flags) {}
-    public void releasePersistableUriPermission(Uri u, int flags) {}
-    public java.util.List<UriPermission> getPersistedUriPermissions() { return new ArrayList<>(); }
-    public static final class UriPermission {}
+    /* Kept URIs (a folder picked with OPEN_DOCUMENT_TREE, the files an app opens again next run): a line each in the app's data,
+       "<flags> <time> <uri>", so an app that checks its permissions at start finds the folder it was given */
+    private static final Object sPermLock = new Object();
+    private static java.io.File permFile() { return new java.io.File(husk.Native.dataDir(), "husk-uri-permissions"); }
+    private static java.util.List<UriPermission> readPerms() {
+        ArrayList<UriPermission> out = new ArrayList<>();
+        try (java.io.BufferedReader r = new java.io.BufferedReader(new java.io.FileReader(permFile()))) {
+            for (String line; (line = r.readLine()) != null; ) {
+                String[] f = line.split(" ", 3);
+                if (f.length == 3) try { out.add(new UriPermission(Uri.parse(f[2]), Integer.parseInt(f[0]), Long.parseLong(f[1]))); } catch (NumberFormatException e) {}
+            }
+        } catch (java.io.IOException e) {}
+        return out;
+    }
+    private static void writePerms(java.util.List<UriPermission> list) {
+        try (java.io.FileWriter w = new java.io.FileWriter(permFile())) {
+            for (UriPermission p : list) w.write(((p.isReadPermission() ? 1 : 0) | (p.isWritePermission() ? 2 : 0)) + " " + p.getPersistedTime() + " " + p.getUri() + "\n");
+        } catch (java.io.IOException e) {}
+    }
+    public void takePersistableUriPermission(Uri u, int flags) {
+        if (u == null) return;
+        synchronized (sPermLock) {
+            java.util.List<UriPermission> list = readPerms();
+            int keep = flags & 3;
+            for (int i = list.size() - 1; i >= 0; i--) if (u.equals(list.get(i).getUri())) {
+                UriPermission p = list.remove(i);
+                keep |= (p.isReadPermission() ? 1 : 0) | (p.isWritePermission() ? 2 : 0);
+            }
+            list.add(new UriPermission(u, keep, System.currentTimeMillis()));
+            writePerms(list);
+        }
+    }
+    public void releasePersistableUriPermission(Uri u, int flags) {
+        synchronized (sPermLock) {
+            java.util.List<UriPermission> list = readPerms();
+            for (int i = list.size() - 1; i >= 0; i--) if (list.get(i).getUri().equals(u)) list.remove(i);
+            writePerms(list);
+        }
+    }
+    public java.util.List<UriPermission> getPersistedUriPermissions() { synchronized (sPermLock) { return readPerms(); } }
     public static void requestSync(android.accounts.Account a, String authority, Bundle extras) {}
     public static void setSyncAutomatically(android.accounts.Account a, String authority, boolean sync) {}
     public static boolean getMasterSyncAutomatically() { return false; }

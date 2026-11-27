@@ -66,9 +66,18 @@ public final class DocumentsContract {
     public static android.net.Uri buildTrashDocumentsUri(java.lang.String p0) { return base(p0).appendPath("trash").build(); }
     public static android.net.Uri buildTreeDocumentUri(java.lang.String p0, java.lang.String p1) { return base(p0).appendPath("tree").appendPath(p1).build(); }
     public static android.net.Uri copyDocument(android.content.ContentResolver p0, android.net.Uri p1, android.net.Uri p2) { return null; }
-    public static android.net.Uri createDocument(android.content.ContentResolver p0, android.net.Uri p1, java.lang.String p2, java.lang.String p3) { return null; }
+    // the provider's own work, through ContentResolver.call as on Android (the methods' names and extras are the platform's)
+    private static android.os.Bundle docCall(android.content.ContentResolver r, android.net.Uri u, String method, String name, String mime) {
+        if (r == null || u == null) return null;
+        android.os.Bundle in = new android.os.Bundle();
+        in.putParcelable("uri", u);
+        if (name != null) in.putString("_display_name", name);
+        if (mime != null) in.putString("mime_type", mime);
+        return r.call(u, method, null, in);
+    }
+    public static android.net.Uri createDocument(android.content.ContentResolver p0, android.net.Uri p1, java.lang.String p2, java.lang.String p3) { android.os.Bundle b = docCall(p0, p1, "android:createDocument", p3, p2); return b == null ? null : (android.net.Uri) b.getParcelable("uri"); }
     public static android.content.IntentSender createWebLinkIntent(android.content.ContentResolver p0, android.net.Uri p1, android.os.Bundle p2) { return null; }
-    public static boolean deleteDocument(android.content.ContentResolver p0, android.net.Uri p1) { return false; }
+    public static boolean deleteDocument(android.content.ContentResolver p0, android.net.Uri p1) { return docCall(p0, p1, "android:deleteDocument", null, null) != null; }
     public static void ejectRoot(android.content.ContentResolver p0, android.net.Uri p1) {}
     public static android.provider.DocumentsContract.Path findDocumentPath(android.content.ContentResolver p0, android.net.Uri p1) { return null; }
     public static java.lang.String getDocumentId(android.net.Uri p0) { java.util.List<String> s = p0.getPathSegments(); if (s.size() >= 2 && "document".equals(s.get(0))) return s.get(1); if (s.size() >= 4 && "tree".equals(s.get(0)) && "document".equals(s.get(2))) return s.get(3); throw new IllegalArgumentException("Invalid URI: " + p0); }
@@ -79,7 +88,7 @@ public final class DocumentsContract {
     public static java.lang.String getSearchDocumentsQuery(android.net.Uri p0) { return p0.getQueryParameter("query"); }
     public static java.lang.String getSearchDocumentsQuery(android.os.Bundle p0) { return null; }
     public static java.lang.String getTreeDocumentId(android.net.Uri p0) { java.util.List<String> s = p0.getPathSegments(); if (s.size() >= 2 && "tree".equals(s.get(0))) return s.get(1); throw new IllegalArgumentException("Invalid URI: " + p0); }
-    public static boolean isChildDocument(android.content.ContentResolver p0, android.net.Uri p1, android.net.Uri p2) { return false; }
+    public static boolean isChildDocument(android.content.ContentResolver p0, android.net.Uri p1, android.net.Uri p2) { try { String a = getDocumentId(p1), b = getDocumentId(p2); return b.startsWith(a.endsWith("/") ? a : a + "/"); } catch (IllegalArgumentException e) { return false; } }
     public static boolean isContentUri(android.net.Uri p0) { return p0 != null && "content".equals(p0.getScheme()); }
     public static boolean isDocumentUri(android.content.Context p0, android.net.Uri p1) { if (!isContentUri(p1)) return false; java.util.List<String> s = p1.getPathSegments(); return (s.size() == 2 && "document".equals(s.get(0))) || (s.size() == 4 && "tree".equals(s.get(0)) && "document".equals(s.get(2))); }
     public static boolean isManageMode(android.net.Uri p0) { return false; }
@@ -90,7 +99,7 @@ public final class DocumentsContract {
     public static android.net.Uri moveDocument(android.content.ContentResolver p0, android.net.Uri p1, android.net.Uri p2, android.net.Uri p3) { return null; }
     public static android.content.res.AssetFileDescriptor openImageThumbnail(java.io.File p0) { return null; }
     public static boolean removeDocument(android.content.ContentResolver p0, android.net.Uri p1, android.net.Uri p2) { return false; }
-    public static android.net.Uri renameDocument(android.content.ContentResolver p0, android.net.Uri p1, java.lang.String p2) { return null; }
+    public static android.net.Uri renameDocument(android.content.ContentResolver p0, android.net.Uri p1, java.lang.String p2) { android.os.Bundle b = docCall(p0, p1, "android:renameDocument", p2, null); return b == null ? null : (android.net.Uri) b.getParcelable("uri"); }
     public static android.net.Uri restoreDocumentFromTrash(android.content.ContentResolver p0, android.net.Uri p1, android.net.Uri p2) { return null; }
     public static android.net.Uri setManageMode(android.net.Uri p0) { return null; }
     public static android.net.Uri trashDocument(android.content.ContentResolver p0, android.net.Uri p1) { return null; }

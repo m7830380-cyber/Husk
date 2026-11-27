@@ -561,24 +561,39 @@ final class TLUnityUIView: UIView, UIKeyInput {
             HuskLog.log("tl", "java: the app asks for orientation \(orientation)")
         })
         husk_java_set_document_picker { mimeTypes, multiple in
-            let types = TLUnityUIView.contentTypes(mimeTypes.map { String(cString: $0) } ?? "*/*")
+            let mime = mimeTypes.map { String(cString: $0) } ?? "*/*"
+            let types = TLUnityUIView.contentTypes(mime)
+            // a folder (OPEN_DOCUMENT_TREE), or files: Husk's own picker over its Documents, the system's for other places
             DispatchQueue.main.async {
-                HuskFilePicker.present(types: types, multiple: multiple != 0, asCopy: true, onPick: { urls in
-                    // copies in a folder of their own: the app reads them by path, long after the picker's access ends
-                    let dir = FileManager.default.temporaryDirectory.appendingPathComponent("picked/\(UUID().uuidString)", isDirectory: true)
-                    try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
-                    var paths: [String] = []
-                    for url in urls {
-                        let scoped = url.startAccessingSecurityScopedResource()
-                        defer { if scoped { url.stopAccessingSecurityScopedResource() } }
-                        let dest = dir.appendingPathComponent(url.lastPathComponent)
-                        do { try FileManager.default.copyItem(at: url, to: dest); paths.append(dest.path) }
-                        catch { HuskLog.log("tl", "java: could not copy the picked \(url.lastPathComponent): \(error.localizedDescription)") }
-                    }
-                    TLUnityUIView.answerDocumentPicker(paths)
-                }, onCancel: { TLUnityUIView.answerDocumentPicker([]) })
+                if mime == "vnd.android.document/directory" {
+                    HuskDocumentBrowser.present(mode: .folder, onPick: { TLUnityUIView.answerDocumentPicker($0) },
+                                                onCancel: { TLUnityUIView.answerDocumentPicker([]) })
+                    return
+                }
+                HuskDocumentBrowser.present(mode: .files(types: types, multiple: multiple != 0),
+                                            onPick: { TLUnityUIView.answerDocumentPicker($0) },
+                                            onCancel: { TLUnityUIView.answerDocumentPicker([]) },
+                                            onOther: { TLUnityUIView.systemDocumentPicker(types: types, multiple: multiple != 0) })
             }
         }
+    }
+
+    /// The system's picker, for files outside Husk's Documents: copied in, since the app reads them long after its access ends.
+    @MainActor private static func systemDocumentPicker(types: [UTType], multiple: Bool) {
+        HuskFilePicker.present(types: types, multiple: multiple, asCopy: true, onPick: { urls in
+            // copies in a folder of their own: the app reads them by path, long after the picker's access ends
+            let dir = FileManager.default.temporaryDirectory.appendingPathComponent("picked/\(UUID().uuidString)", isDirectory: true)
+            try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+            var paths: [String] = []
+            for url in urls {
+                let scoped = url.startAccessingSecurityScopedResource()
+                defer { if scoped { url.stopAccessingSecurityScopedResource() } }
+                let dest = dir.appendingPathComponent(url.lastPathComponent)
+                do { try FileManager.default.copyItem(at: url, to: dest); paths.append(dest.path) }
+                catch { HuskLog.log("tl", "java: could not copy the picked \(url.lastPathComponent): \(error.localizedDescription)") }
+            }
+            TLUnityUIView.answerDocumentPicker(paths)
+        }, onCancel: { TLUnityUIView.answerDocumentPicker([]) })
     }
 
     /// The picker's answer to the Java app (no paths: it was cancelled).

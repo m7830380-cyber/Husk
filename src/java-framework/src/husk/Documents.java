@@ -17,12 +17,17 @@ import java.util.ArrayList;
  * The system's file picker (GET_CONTENT, OPEN_DOCUMENT, PICK): the host shows the iOS document picker and copies what the user
  * picks into the app's cache; the caller gets content://husk.documents/document/<path> URIs, which this provider opens and
  * describes (display name, size, MIME type) like Android's documents providers do.
+ * A folder (OPEN_DOCUMENT_TREE) is picked in Husk's own picker, inside Husk's Documents: the caller gets
+ * content://husk.documents/tree/<path>, lists it through DocumentsContract's child URIs, and reads, writes, makes and deletes
+ * the files in it, as with Android's external storage provider.
  */
 public final class Documents extends ContentProvider {
     public static final String AUTHORITY = "husk.documents";
     private static final Documents sSelf = new Documents();
     private static Activity sCaller;
     private static int sRequest;
+    private static boolean sTree;
+    static final String DIR = "vnd.android.document/directory";
     private static final ArrayList<String> sPicked = new ArrayList<>();
 
     static { ContentResolver.register(AUTHORITY, sSelf); }
@@ -30,7 +35,7 @@ public final class Documents extends ContentProvider {
     /** Whether the intent asks for the system's file picker. */
     public static boolean handles(Intent i) {
         String a = i.getAction();
-        if (Intent.ACTION_GET_CONTENT.equals(a) || Intent.ACTION_OPEN_DOCUMENT.equals(a)) return true;
+        if (Intent.ACTION_GET_CONTENT.equals(a) || Intent.ACTION_OPEN_DOCUMENT.equals(a) || Intent.ACTION_OPEN_DOCUMENT_TREE.equals(a)) return true;
         if (!Intent.ACTION_PICK.equals(a)) return false;
         // PICK from the gallery (images, videos) or with only a type; contacts and other pickers are not files
         Uri d = i.getData();
@@ -45,6 +50,12 @@ public final class Documents extends ContentProvider {
         sCaller = caller;
         sRequest = request;
         sPicked.clear();
+        sTree = Intent.ACTION_OPEN_DOCUMENT_TREE.equals(i.getAction());
+        if (sTree) {
+            android.util.Log.d("Husk", "folder picker");
+            Native.pickDocuments(DIR, false);
+            return;
+        }
         StringBuilder types = new StringBuilder();
         String[] extra = i.getStringArrayExtra(Intent.EXTRA_MIME_TYPES);
         if (extra != null) for (String t : extra) { if (types.length() > 0) types.append(','); types.append(t); }
@@ -67,6 +78,15 @@ public final class Documents extends ContentProvider {
         if (caller == null) return;
         if (!answer || sPicked.isEmpty()) { caller.huskActivityResult(request, Activity.RESULT_CANCELED, null); return; }
         Intent data = new Intent();
+        if (sTree) {
+            Uri tree = android.provider.DocumentsContract.buildTreeDocumentUri(AUTHORITY, new File(sPicked.get(0)).getAbsolutePath());
+            sPicked.clear();
+            data.setData(tree);
+            data.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION | Intent.FLAG_GRANT_WRITE_URI_PERMISSION | Intent.FLAG_GRANT_PERSISTABLE_URI_PERMISSION | Intent.FLAG_GRANT_PREFIX_URI_PERMISSION);
+            android.util.Log.d("Husk", "folder picked: " + tree);
+            caller.huskActivityResult(request, Activity.RESULT_OK, data);
+            return;
+        }
         Uri first = uriFor(new File(sPicked.get(0)));
         data.setData(first);
         ClipData clip = ClipData.newRawUri(null, first);
@@ -80,39 +100,104 @@ public final class Documents extends ContentProvider {
     public static Uri uriFor(File f) {
         return new Uri.Builder().scheme(ContentResolver.SCHEME_CONTENT).authority(AUTHORITY).appendPath("document").appendPath(f.getAbsolutePath()).build();
     }
+    /** The file a URI names: document/<path>, tree/<path>, tree/<root>/document/<path>, each maybe followed by /children */
     private static File fileOf(Uri u) {
+        java.util.List<String> seg = u.getPathSegments();
+        if (seg.size() >= 4 && "tree".equals(seg.get(0)) && "document".equals(seg.get(2))) return new File(seg.get(3));
+        if (seg.size() >= 2 && ("tree".equals(seg.get(0)) || "document".equals(seg.get(0)))) return new File(seg.get(1));
         String enc = u.getEncodedPath();
         if (enc != null && enc.startsWith("/document/")) return new File(Uri.decode(enc.substring("/document/".length())));
-        java.util.List<String> seg = u.getPathSegments();
         return seg.size() >= 2 ? new File(seg.get(seg.size() - 1)) : new File(u.getPath());
+    }
+    private static boolean isChildren(Uri u) {
+        java.util.List<String> seg = u.getPathSegments();
+        return seg.size() >= 3 && "children".equals(seg.get(seg.size() - 1));
+    }
+    private static String mimeOf(File f) {
+        if (f.isDirectory()) return DIR;
+        String t = java.net.URLConnection.guessContentTypeFromName(f.getName());
+        return t != null ? t : "application/octet-stream";
+    }
+    private static Object[] row(File f, String[] cols) {
+        Object[] row = new Object[cols.length];
+        for (int k = 0; k < cols.length; k++) {
+            switch (cols[k]) {
+            case "_display_name": row[k] = f.getName(); break;
+            case "_size": row[k] = f.isDirectory() ? 0L : f.length(); break;
+            case "mime_type": row[k] = mimeOf(f); break;
+            case "document_id": case "_id": row[k] = f.getAbsolutePath(); break;
+            case "last_modified": case "date_modified": row[k] = f.lastModified(); break;
+            // write, delete, rename; a folder also takes new files
+            case "flags": row[k] = 0x2 | 0x4 | 0x40 | (f.isDirectory() ? 0x8 : 0); break;
+            case "_data": row[k] = f.getAbsolutePath(); break;
+            default: row[k] = null;
+            }
+        }
+        return row;
     }
 
     // ---- the provider
     @Override public boolean onCreate() { return true; }
     @Override public Cursor query(Uri u, String[] proj, String sel, String[] args, String sort) {
         File f = fileOf(u);
-        String[] cols = proj != null ? proj : new String[] { "_display_name", "_size", "mime_type", "document_id", "last_modified", "flags" };
+        String[] cols = proj != null ? proj : new String[] { "document_id", "_display_name", "mime_type", "_size", "last_modified", "flags" };
         MatrixCursor c = new MatrixCursor(cols);
         if (!f.exists()) return c;
-        Object[] row = new Object[cols.length];
-        for (int k = 0; k < cols.length; k++) {
-            switch (cols[k]) {
-            case "_display_name": row[k] = f.getName(); break;
-            case "_size": row[k] = f.length(); break;
-            case "mime_type": row[k] = getType(u); break;
-            case "document_id": case "_id": row[k] = f.getAbsolutePath(); break;
-            case "last_modified": case "date_modified": row[k] = f.lastModified(); break;
-            case "flags": row[k] = 0x2 | 0x4; break;           // FLAG_SUPPORTS_WRITE | FLAG_SUPPORTS_DELETE
-            case "_data": row[k] = f.getAbsolutePath(); break;
-            default: row[k] = null;
+        if (isChildren(u)) {
+            File[] kids = f.listFiles();
+            if (kids != null) {
+                java.util.Arrays.sort(kids, (x, y) -> x.getName().compareToIgnoreCase(y.getName()));
+                for (File k : kids) if (!k.getName().startsWith(".")) c.addRow(row(k, cols));
             }
+            return c;
         }
-        c.addRow(row);
+        c.addRow(row(f, cols));
         return c;
     }
-    @Override public String getType(Uri u) {
-        String t = java.net.URLConnection.guessContentTypeFromName(fileOf(u).getName());
-        return t != null ? t : "application/octet-stream";
+    @Override public String getType(Uri u) { return mimeOf(fileOf(u)); }
+    /** DocumentsContract's createDocument, deleteDocument and renameDocument */
+    @Override public android.os.Bundle call(String method, String arg, android.os.Bundle extras) {
+        if (extras == null) return null;
+        Uri u = (Uri) extras.getParcelable("uri");
+        if (u == null) return null;
+        File f = fileOf(u);
+        android.os.Bundle out = new android.os.Bundle();
+        switch (method) {
+        case "android:createDocument": {
+            String name = extras.getString("_display_name", "untitled"), mime = extras.getString("mime_type", "");
+            File n = new File(f, name);
+            for (int k = 1; n.exists(); k++) {
+                int dot = name.lastIndexOf('.');
+                n = new File(f, dot > 0 ? name.substring(0, dot) + " (" + k + ")" + name.substring(dot) : name + " (" + k + ")");
+            }
+            try {
+                boolean ok = DIR.equals(mime) ? n.mkdirs() : n.createNewFile();
+                if (!ok) return null;
+            } catch (java.io.IOException e) { return null; }
+            out.putParcelable("uri", sibling(u, n));
+            return out;
+        }
+        case "android:deleteDocument": case "android:removeDocument":
+            return deleteAll(f) ? out : null;
+        case "android:renameDocument": {
+            File n = new File(f.getParentFile(), extras.getString("_display_name", f.getName()));
+            if (!f.renameTo(n)) return null;
+            out.putParcelable("uri", sibling(u, n));
+            return out;
+        }
+        }
+        return null;
+    }
+    /** a URI for another file, in the same tree as u when u is in one */
+    private static Uri sibling(Uri u, File f) {
+        java.util.List<String> seg = u.getPathSegments();
+        if (seg.size() >= 2 && "tree".equals(seg.get(0))) return android.provider.DocumentsContract.buildDocumentUriUsingTree(u, f.getAbsolutePath());
+        return uriFor(f);
+    }
+    private static boolean deleteAll(File f) {
+        File[] kids = f.isDirectory() ? f.listFiles() : null;
+        if (kids != null) for (File k : kids) deleteAll(k);
+        return f.delete();
     }
     @Override public ParcelFileDescriptor openFile(Uri u, String mode) throws java.io.FileNotFoundException {
         return ParcelFileDescriptor.open(fileOf(u), ParcelFileDescriptor.parseMode(mode));

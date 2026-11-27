@@ -617,12 +617,22 @@ static uint32_t ov_shader(uint32_t kind, const char *src)
     return sh;
 }
 
+static void ov_init_fs(overlay *o, bool bottom_up, const char *fs);
 static void ov_init_flip(overlay *o, bool bottom_up)
+{
+    static const char *fs = "precision mediump float; uniform sampler2D s; varying vec2 t; void main() { gl_FragColor = texture2D(s, t); }";
+    ov_init_fs(o, bottom_up, fs);
+}
+/* a frame stored in an sRGB texture is read back as linear: encoded again here, so the screen gets the bytes the game wrote */
+static const char *k_fs_encode =
+    "#ifdef GL_FRAGMENT_PRECISION_HIGH\nprecision highp float;\n#else\nprecision mediump float;\n#endif\n"
+    "uniform sampler2D s; varying vec2 t; void main() { vec4 c = texture2D(s, t); vec3 l = clamp(c.rgb, 0.0, 1.0);"
+    " vec3 e = mix(l * 12.92, 1.055 * pow(l, vec3(1.0 / 2.4)) - 0.055, step(vec3(0.0031308), l)); gl_FragColor = vec4(e, c.a); }";
+static void ov_init_fs(overlay *o, bool bottom_up, const char *fs)
 {
     static const char *vs_top = "attribute vec2 p; varying vec2 t; void main() { t = vec2((p.x + 1.0) * 0.5, (1.0 - p.y) * 0.5); gl_Position = vec4(p, 0.0, 1.0); }";
     static const char *vs_bottom = "attribute vec2 p; varying vec2 t; void main() { t = vec2((p.x + 1.0) * 0.5, (1.0 + p.y) * 0.5); gl_Position = vec4(p, 0.0, 1.0); }";
     const char *vs = bottom_up ? vs_bottom : vs_top;
-    static const char *fs = "precision mediump float; uniform sampler2D s; varying vec2 t; void main() { gl_FragColor = texture2D(s, t); }";
     uint32_t (*createProgram)(void) = gl_fn("glCreateProgram");
     void (*attach)(uint32_t, uint32_t) = gl_fn("glAttachShader");
     void (*bindAttrib)(uint32_t, uint32_t, const char *) = gl_fn("glBindAttribLocation");
@@ -704,6 +714,7 @@ static struct {
     EGLDisplay dpy; EGLConfig cfg; EGLContext ui; bool es3, ready;
     /* the frame to show: a shared texture, or pixels (bottom row first) */
     uint32_t tex; uint8_t *px; int pw, ph; int x, y, w, h; uint64_t seq; bool on;
+    void *sync; bool srgb;                  /* a GPU-handed frame: the fence to wait on before drawing it; stored sRGB-encoded */
 } E2 = { PTHREAD_MUTEX_INITIALIZER, PTHREAD_COND_INITIALIZER };
 
 static bool e2_wait_ready(void)
@@ -830,7 +841,7 @@ NAT(EN_swap)
         pthread_mutex_lock(&E2.lk);
         E2.px = realloc(E2.px, (size_t)s->w * s->h * 4);
         memcpy(E2.px, s->px, (size_t)s->w * s->h * 4);
-        E2.pw = s->w; E2.ph = s->h; E2.tex = 0;
+        E2.pw = s->w; E2.ph = s->h; E2.tex = 0; E2.srgb = false;
     } else {
         activeTex(0x84C0);
         getIntegerv(0x8069, &tex);
@@ -848,7 +859,7 @@ NAT(EN_swap)
         finish();
         s->cur ^= 1;
         pthread_mutex_lock(&E2.lk);
-        E2.tex = s->tex[k]; E2.pw = s->w; E2.ph = s->h;
+        E2.tex = s->tex[k]; E2.pw = s->w; E2.ph = s->h; E2.srgb = false;
     }
     E2.x = a[2].i; E2.y = a[3].i; E2.w = a[4].i > 0 ? a[4].i : s->w; E2.h = a[5].i > 0 ? a[5].i : s->h;
     E2.on = true; E2.seq++;
@@ -875,13 +886,18 @@ static dvm_native_fn egl_native_lookup(const char *name, const char *sig)
 }
 
 /* drawing the app's frame on the render thread: a quad at the view's place, the frame's bottom row first */
-static void app_frame_draw(overlay *o, overlay *up, int vw, int vh)
+void tl_egl_frame_wait(void *sync);
+void tl_egl_frame_drop(void *sync);
+static void app_frame_draw(overlay *o, overlay *up, overlay *enc, int vw, int vh)
 {
     pthread_mutex_lock(&E2.lk);
-    bool on = E2.on; uint32_t tex = E2.tex; int x = E2.x, y = E2.y, w = E2.w, h = E2.h;
+    bool on = E2.on, srgb = E2.srgb; uint32_t tex = E2.tex; int x = E2.x, y = E2.y, w = E2.w, h = E2.h;
+    void *sync = E2.sync; E2.sync = NULL;
     if (on && !tex && E2.px) { ov_upload(up, E2.px, E2.pw, E2.ph); }
     pthread_mutex_unlock(&E2.lk);
+    if (sync) tl_egl_frame_wait(sync);
     if (!on) return;
+    if (tex && srgb && enc->prog) o = enc;
     void (*viewport)(int32_t, int32_t, int32_t, int32_t) = gl_fn("glViewport");
     void (*useProgram)(uint32_t) = gl_fn("glUseProgram");
     void (*disable)(uint32_t) = gl_fn("glDisable");
@@ -904,6 +920,20 @@ static void app_frame_draw(overlay *o, overlay *up, int vw, int vh)
 }
 /* For EGL: whether this runtime's compositor holds the screen, and an app's own EGL window's frame for it (NULL: no longer shown) */
 bool tl_javaapp_compositing(void) { pthread_mutex_lock(&E2.lk); bool r = E2.ready; pthread_mutex_unlock(&E2.lk); return r; }
+/* the context an app's own EGL contexts share objects with, so their frames come over as textures */
+EGLContext tl_javaapp_share_context(void) { pthread_mutex_lock(&E2.lk); EGLContext c = E2.ready ? E2.ui : NULL; pthread_mutex_unlock(&E2.lk); return c; }
+/* an app's own EGL window's frame as a texture of that share group, with a fence (EGLSync) to wait on before it is drawn */
+void tl_javaapp_app_texture(unsigned tex, int w, int h, void *sync, bool srgb)
+{
+    pthread_mutex_lock(&E2.lk);
+    void *old = E2.sync;
+    E2.sync = sync; E2.srgb = srgb;
+    E2.tex = tex; E2.pw = w; E2.ph = h;
+    E2.x = 0; E2.y = 0; E2.w = A.cfg.width; E2.h = A.cfg.height;
+    E2.on = true; E2.seq++;
+    pthread_mutex_unlock(&E2.lk);
+    if (old) tl_egl_frame_drop(old);       /* a frame the compositor never drew */
+}
 void tl_javaapp_app_pixels(const void *px, int w, int h)
 {
     pthread_mutex_lock(&E2.lk);
@@ -911,7 +941,7 @@ void tl_javaapp_app_pixels(const void *px, int w, int h)
     size_t n = (size_t)w * h * 4;
     if (E2.pw != w || E2.ph != h || !E2.px) E2.px = realloc(E2.px, n);
     if (E2.px) memcpy(E2.px, px, n);
-    E2.pw = w; E2.ph = h; E2.tex = 0;
+    E2.pw = w; E2.ph = h; E2.tex = 0; E2.srgb = false;
     E2.x = 0; E2.y = 0; E2.w = A.cfg.width; E2.h = A.cfg.height;
     E2.on = true; E2.seq++;
     pthread_mutex_unlock(&E2.lk);
@@ -951,10 +981,11 @@ static void *gl_main(void *arg)
     EGLSurface surf = createWindowSurface(dpy, cfg, tl_nwindow_get(), NULL);
     if (!ui || !surf || !makeCurrent(dpy, surf, surf, ui)) { tl_log_line("javaapp: no GL context"); return NULL; }
     if (swapInterval) swapInterval(dpy, 1);
-    overlay ov = { 0 }, appov = { 0 }, appup = { 0 };
+    overlay ov = { 0 }, appov = { 0 }, appup = { 0 }, appenc = { 0 };
     ov_init(&ov);
     ov_init_flip(&appov, true);
     ov_init_flip(&appup, true);
+    ov_init_fs(&appenc, true, k_fs_encode);
     g_render_thread = pthread_self();
     pthread_mutex_lock(&E2.lk);
     E2.dpy = dpy; E2.cfg = cfg; E2.ui = ui; E2.es3 = es3; E2.ready = true;
@@ -1035,7 +1066,7 @@ static void *gl_main(void *arg)
         if (drew || fresh || app_fresh) {
             makeCurrent(dpy, surf, surf, ui);
             if (!app) { clearColor(0, 0, 0, tl_web_any_visible() && !app_frame_on() ? 0 : 1); clear(0x4000); }     /* web views show through from under the screen */
-            if (!app) app_frame_draw(&appov, &appup, A.cfg.width, A.cfg.height);
+            if (!app) app_frame_draw(&appov, &appup, &appenc, A.cfg.width, A.cfg.height);
             if (tl_ui_has_frame()) ov_draw(&ov, A.cfg.width, A.cfg.height);
             swapBuffers(dpy, surf);
             atomic_fetch_add(&A.frames, 1);
