@@ -147,6 +147,7 @@ reload:
             a_eglGetConfigs(d, NULL, 0, &all);
             a_eglChooseConfig(d, want_es3, NULL, 0, &es3);
             tl_log_line("egl: Zink client APIs \"%s\", %d config(s), %d with ES 3", a_eglQueryString(d, 0x308D /* EGL_CLIENT_APIS */), all, es3);
+            { const char *ex = a_eglQueryString(d, 0x3055 /* EGL_EXTENSIONS */); tl_log_line("egl: Zink gl_colorspace %s", ex && strstr(ex, "EGL_KHR_gl_colorspace") ? "offered" : "NOT offered"); }
         }
         /* a device Zink takes but cannot give OpenGL ES 3 on: games here want 3, so ANGLE serves them instead */
         if (up && !es3) tl_log_line("egl: Zink offers no OpenGL ES 3 config");
@@ -556,12 +557,34 @@ static const uint8_t *read_back(EGLDisplay d, EGLSurface s, EGLint *pw, EGLint *
     *pw = w; *ph = h;
     return buf;
 }
+/* the colour space a game asks of its window (EGL_GL_COLORSPACE), kept on whatever buffer stands in for that window:
+   a game drawing in linear space asks for an sRGB window, and a buffer without it shows the frame unencoded, far too dark */
+static EGLint win_colorspace(const EGLint *at)
+{
+    EGLint cs = 0x308A /* EGL_GL_COLORSPACE_LINEAR */;
+    char line[256]; int n = 0; line[0] = 0;
+    for (int i = 0; at && at[i] != EGL_NONE && i < 64; i += 2) {
+        if (at[i] == 0x309D /* EGL_GL_COLORSPACE */) cs = at[i + 1];
+        if (n < (int)sizeof line - 24) n += snprintf(line + n, sizeof line - n, " %#x=%#x", at[i], at[i + 1]);
+    }
+    tl_log_line("egl: window attribs:%s -> colour space %s", n ? line : " none", cs == 0x3089 ? "sRGB" : "linear");
+    return cs;
+}
+static EGLSurface pbuffer_for_window(EGLDisplay d, EGLConfig cfg, void *win, const EGLint *at)
+{
+    EGLint cs = win_colorspace(at);
+    EGLint pb[] = { EGL_WIDTH, tl_nwindow_width(win), EGL_HEIGHT, tl_nwindow_height(win), 0x309D, cs, EGL_NONE };
+    if (cs == 0x308A) pb[4] = EGL_NONE;
+    EGLSurface s = a_eglCreatePbufferSurface(d, cfg, pb);
+    if (!s && cs != 0x308A) { tl_log_line("egl: sRGB buffer refused (%#x), linear instead", a_eglGetError()); pb[4] = EGL_NONE; s = a_eglCreatePbufferSurface(d, cfg, pb); }
+    return s;
+}
 static EGLSurface w_eglCreateWindowSurface(EGLDisplay d, EGLConfig cfg, void *win, const EGLint *at)
 {
     cfg = cfg_real(cfg);
     if (tl_nwindow_texture(win)) {
         EGLint pb[] = { EGL_WIDTH, tl_nwindow_width(win), EGL_HEIGHT, tl_nwindow_height(win), EGL_NONE };
-        EGLSurface s = a_eglCreatePbufferSurface(d, cfg, pb);
+        EGLSurface s = pbuffer_for_window(d, cfg, win, at);
         if (s) {
             pthread_mutex_lock(&g_tex_lock);
             for (int i = 0; i < MAX_TEX_SURFACES; i++) if (!g_tex_surf[i].s) { g_tex_surf[i].s = s; g_tex_surf[i].win = win; break; }
@@ -572,7 +595,7 @@ static EGLSurface w_eglCreateWindowSurface(EGLDisplay d, EGLConfig cfg, void *wi
     }
     if (tl_javaapp_compositing && tl_javaapp_compositing()) {
         EGLint pb[] = { EGL_WIDTH, tl_nwindow_width(win), EGL_HEIGHT, tl_nwindow_height(win), EGL_NONE };
-        EGLSurface s = a_eglCreatePbufferSurface(d, cfg, pb);
+        EGLSurface s = pbuffer_for_window(d, cfg, win, at);
         if (s) {
             pthread_mutex_lock(&g_tex_lock);
             for (int i = 0; i < MAX_COMP_SURFACES; i++) if (!g_comp_surf[i]) { g_comp_surf[i] = s; break; }
@@ -583,7 +606,7 @@ static EGLSurface w_eglCreateWindowSurface(EGLDisplay d, EGLConfig cfg, void *wi
     }
     if (E.frame_dir[0] || g_offscreen_windows) {
         EGLint pb[] = { EGL_WIDTH, tl_nwindow_width(win), EGL_HEIGHT, tl_nwindow_height(win), EGL_NONE };
-        EGLSurface s = a_eglCreatePbufferSurface(d, cfg, pb);
+        EGLSurface s = pbuffer_for_window(d, cfg, win, at);
         if (!s) {
             /* the config the game chose may draw only to windows: the closest one that also makes buffers */
             EGLint r = 8, g = 8, b = 8, a = 0, dp = 0, st = 0, rt = 0;
@@ -597,14 +620,8 @@ static EGLSurface w_eglCreateWindowSurface(EGLDisplay d, EGLConfig cfg, void *wi
     }
     void *layer = tl_nwindow_native(win);
     if (g_zink) {
-        /* the window's colour space goes to its buffer too: a game drawing in linear space asks for an sRGB window, and without it
-         * the frame reaches the screen unencoded -- everything far too dark */
-        EGLint cs = 0x308A /* EGL_GL_COLORSPACE_LINEAR */;
-        for (int i = 0; at && at[i] != EGL_NONE; i += 2) if (at[i] == 0x309D /* EGL_GL_COLORSPACE */) cs = at[i + 1];
-        EGLint pb[] = { EGL_WIDTH, tl_nwindow_width(win), EGL_HEIGHT, tl_nwindow_height(win), 0x309D, cs, EGL_NONE };
-        EGLSurface s = a_eglCreatePbufferSurface(d, cfg, pb);
-        if (!s && cs != 0x308A) { pb[4] = EGL_NONE; s = a_eglCreatePbufferSurface(d, cfg, pb); }
-        tl_log_line("egl: Zink window colour space %s", cs == 0x3089 ? "sRGB" : "linear");
+        EGLint pb[] = { EGL_WIDTH, tl_nwindow_width(win), EGL_HEIGHT, tl_nwindow_height(win), EGL_NONE };
+        EGLSurface s = pbuffer_for_window(d, cfg, win, at);
         if (s) {
             pthread_mutex_lock(&g_tex_lock);
             for (int i = 0; i < MAX_ZINK_SURFACES; i++) if (!g_zink_surf[i].s) { g_zink_surf[i].s = s; g_zink_surf[i].layer = layer; g_zink_surf[i].win = win; break; }
