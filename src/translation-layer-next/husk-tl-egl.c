@@ -597,8 +597,14 @@ static EGLSurface w_eglCreateWindowSurface(EGLDisplay d, EGLConfig cfg, void *wi
     }
     void *layer = tl_nwindow_native(win);
     if (g_zink) {
-        EGLint pb[] = { EGL_WIDTH, tl_nwindow_width(win), EGL_HEIGHT, tl_nwindow_height(win), EGL_NONE };
+        /* the window's colour space goes to its buffer too: a game drawing in linear space asks for an sRGB window, and without it
+         * the frame reaches the screen unencoded -- everything far too dark */
+        EGLint cs = 0x308A /* EGL_GL_COLORSPACE_LINEAR */;
+        for (int i = 0; at && at[i] != EGL_NONE; i += 2) if (at[i] == 0x309D /* EGL_GL_COLORSPACE */) cs = at[i + 1];
+        EGLint pb[] = { EGL_WIDTH, tl_nwindow_width(win), EGL_HEIGHT, tl_nwindow_height(win), 0x309D, cs, EGL_NONE };
         EGLSurface s = a_eglCreatePbufferSurface(d, cfg, pb);
+        if (!s && cs != 0x308A) { pb[4] = EGL_NONE; s = a_eglCreatePbufferSurface(d, cfg, pb); }
+        tl_log_line("egl: Zink window colour space %s", cs == 0x3089 ? "sRGB" : "linear");
         if (s) {
             pthread_mutex_lock(&g_tex_lock);
             for (int i = 0; i < MAX_ZINK_SURFACES; i++) if (!g_zink_surf[i].s) { g_zink_surf[i].s = s; g_zink_surf[i].layer = layer; g_zink_surf[i].win = win; break; }
