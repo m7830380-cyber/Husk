@@ -132,6 +132,9 @@ reload:
             gles_path = E.gles_path;
         }
         setenv("MESA_LOADER_DRIVER_OVERRIDE", "zink", 1);
+        /* Zink's shaders reach Metal through MoltenVK, which would compile them with fast math: NaN/infinity assumed away, so
+         * pow(0,0), x/0 and normalize(0) give NaN where a GL driver is IEEE (purple or black patches). Read when MoltenVK starts. */
+        setenv("MVK_CONFIG_FAST_MATH_ENABLED", "0", 0);
         if (!getenv("EGL_LOG_LEVEL")) setenv("EGL_LOG_LEVEL", "info", 1);
         if (!getenv("MESA_SHADER_CACHE_DIR")) { const char *t = getenv("TMPDIR"); if (t) { char c[600]; snprintf(c, sizeof(c), "%s/mesa-shader-cache", t); setenv("MESA_SHADER_CACHE_DIR", c, 1); } }
         g_es31_shim = false;   /* whatever an engine claimed before this: Zink's versions are real */
@@ -167,6 +170,7 @@ reload:
             a_eglChooseConfig(d, want_es3, NULL, 0, &es3);
             tl_log_line("egl: Zink client APIs \"%s\", %d config(s), %d with ES 3", a_eglQueryString(d, 0x308D /* EGL_CLIENT_APIS */), all, es3);
             { const char *ex = a_eglQueryString(d, 0x3055 /* EGL_EXTENSIONS */); tl_log_line("egl: Zink gl_colorspace %s", ex && strstr(ex, "EGL_KHR_gl_colorspace") ? "offered" : "NOT offered"); }
+            { const char *fm = getenv("MVK_CONFIG_FAST_MATH_ENABLED"); tl_log_line("egl: Zink shaders compiled with Metal fast math %s (MVK_CONFIG_FAST_MATH_ENABLED=%s)", fm && *fm == '0' ? "off" : "on", fm ? fm : "unset"); }
         }
         /* a device Zink takes but cannot give OpenGL ES 3 on: games here want 3, so ANGLE serves them instead */
         if (up && !es3) tl_log_line("egl: Zink offers no OpenGL ES 3 config");
