@@ -39,6 +39,7 @@ struct tl_jclass {
     tl_jclass *super;
     jobj *mirror;
     bool in_dex;                       /* the APK defines it */
+    bool missing;                      /* only named by a FindClass that failed: later lookups fail too */
     tl_jmeth **meths; int nmeths, capm;
     tl_jfield **fields; int nfields, capf;
     jvalue *statics; int nstatics;

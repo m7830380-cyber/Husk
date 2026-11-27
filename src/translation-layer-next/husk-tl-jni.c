@@ -627,11 +627,14 @@ static jo jni_FindClass(void *env, const char *name)
                   || !strncmp(name, "org/json/", 9) || !strncmp(name, "org/xml/", 8) || !strncmp(name, "org/w3c/", 8);
     tl_jclass *known;
     pthread_mutex_lock(&g_lock); known = find_class_locked(name); pthread_mutex_unlock(&g_lock);
-    if (tl_dvm && !known && !array) {
-        /* the Java runtime is up: a class exists when some DEX on its class paths defines it */
-        tl_jclass *c = tl_jni_class(name);
-        if (c->dvm || framework) return c->mirror;
-        tl_log_line("jni: FindClass(%s) -> NoClassDefFoundError", name);
+    if (tl_dvm && !array && (!known || (known->missing && !known->dvm))) {
+        /* the Java runtime is up: a class exists when some DEX on its class paths defines it. The failed lookup leaves a
+         * declared entry behind, so it is marked: a second FindClass (Unity retries through the class loader) must fail
+         * the same way, not find the placeholder (anti-tamper checks read "class exists" as a mod menu injected) */
+        tl_jclass *c = known ? known : tl_jni_class(name);
+        if (c->dvm || framework) { c->missing = false; return c->mirror; }
+        c->missing = true;
+        if (!known) tl_log_line("jni: FindClass(%s) -> NoClassDefFoundError", name);
         char msg[200]; snprintf(msg, sizeof(msg), "%s", name);
         tl_jni_throw("java/lang/NoClassDefFoundError", msg);
         return NULL;
@@ -1293,5 +1296,6 @@ tl_jclass *tl_jni_find_declared(const char *name)
     tl_jclass *c = find_class_locked(name);
     pthread_mutex_unlock(&g_lock);
     tl_jni_wait_linked(c);
+    if (c && c->missing && !c->dvm) return NULL;      /* the placeholder a failed FindClass left: Class.forName must not find it */
     return c;
 }
