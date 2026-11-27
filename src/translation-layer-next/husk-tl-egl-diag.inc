@@ -66,7 +66,7 @@ static char *g_diag_prog_src[DIAG_PROGS][2];    /* [0] vertex, [1] fragment */
 
 static void diag_shader_source(unsigned sh, const char *src)
 {
-    if (!src || sh >= DIAG_SH || !diag_on() || atomic_load(&g_diag_done)) return;   /* kept for the cube-draw reports too */
+    if (!src || sh >= DIAG_SH || g_diag != 1) return;   /* kept past the captures too: the magenta scan reports sources */
     size_t len = strlen(src);
     pthread_mutex_lock(&g_diag_mu);
     if (g_diag_src_bytes + len < (24u << 20)) {
@@ -77,7 +77,7 @@ static void diag_shader_source(unsigned sh, const char *src)
 }
 static void diag_attach(unsigned prog, unsigned sh)
 {
-    if (prog >= DIAG_PROGS || sh >= DIAG_SH || !diag_on()) return;
+    if (prog >= DIAG_PROGS || sh >= DIAG_SH || g_diag != 1) return;
     pthread_mutex_lock(&g_diag_mu);
     char *s = g_diag_src[sh];
     if (s) g_diag_prog_src[prog][strstr(s, "gl_Position") ? 0 : 1] = s;
@@ -378,6 +378,7 @@ static struct {
     void (*get_i_v)(unsigned, unsigned, int *);
     void (*get_samp_iv)(unsigned, unsigned, int *);
     void (*get_tex_iv)(unsigned, unsigned, int *);
+    void (*get_tex_level_iv)(unsigned, int, unsigned, int *);   /* ES 3.1: may be missing */
     void (*fb_att_iv)(unsigned, unsigned, unsigned, int *);
     void (*rb_iv)(unsigned, unsigned, int *);
     void (*gen_rb)(int, unsigned *), (*bind_rb)(unsigned, unsigned), (*rb_storage)(unsigned, unsigned, int, int);
@@ -422,6 +423,7 @@ static bool diag_load(void)
     DGP(bind_samp, "glBindSampler"); DGP(gen_tex, "glGenTextures"); DGP(tex_storage2d, "glTexStorage2D"); DGP(tex_param_i, "glTexParameteri");
     DGP(get_error, "glGetError"); DGP(color_mask, "glColorMask"); DGP(read_buffer, "glReadBuffer"); DGP(bind_buffer, "glBindBuffer");
 #undef DGP
+    *(void **)&DG.get_tex_level_iv = a_eglGetProcAddress("glGetTexLevelParameteriv");
     DG.ok = miss == 0;
     if (!DG.ok) tl_log_line("gldiag: %d GL entry points missing, diagnostics off", miss);
     return DG.ok;
@@ -436,9 +438,12 @@ static const char *const k_probe_fs[3] = {
     "#version 300 es\nprecision highp float;\nuniform highp samplerCube s;\nuniform vec4 uv[4];\nuniform float L;\nout vec4 o;\n"
     "void main() { int i = int(gl_FragCoord.x); o = textureLod(s, uv[i].xyz, gl_FragCoord.y < 1.0 ? 0.0 : L); }\n",
     "#version 300 es\nprecision highp float;\nuniform highp sampler2DArray s;\nuniform vec4 uv[4];\nuniform float L;\nout vec4 o;\n"
-    "void main() { int i = int(gl_FragCoord.x); o = textureLod(s, vec3(uv[i].xy, 0.0), gl_FragCoord.y < 1.0 ? 0.0 : L); }\n",
+    "void main() { int i = int(gl_FragCoord.x); o = textureLod(s, vec3(uv[i].xy, uv[i].z), gl_FragCoord.y < 1.0 ? 0.0 : L); }\n",
 };
 static struct { bool tried, ok, flt; unsigned prog[3], va, fb, tex; int loc_s[3], loc_uv[3], loc_l[3]; int unit; } P;
+static int g_probe_layer;   /* the layer an array probe reads */
+static bool g_probe_quiet;  /* probe without a line: the result is left in g_probe_mag */
+static int g_probe_mag;
 
 static unsigned probe_shader(unsigned type, const char *src)
 {
@@ -513,7 +518,8 @@ static void diag_probe_at(unsigned target, unsigned tex, unsigned samp, int lod,
     if (!cmp) {
         static const float uv2d[16] = { 0.25f, 0.25f, 0, 0, 0.5f, 0.5f, 0, 0, 0.75f, 0.75f, 0, 0, 0.3f, 0.7f, 0, 0 };
         static const float dirs[16] = { 1, 0, 0, 0, 0, 1, 0, 0, 0, -1, 0, 0, 0, 0, 1, 0 };   /* +X, +Y (up), -Y (down), +Z */
-        DG.use(P.prog[t]); DG.u1i(P.loc_s[t], P.unit); DG.u4fv(P.loc_uv[t], 4, t == 1 ? dirs : uv2d); DG.u1f(P.loc_l[t], (float)lod);
+        float uvl[16]; memcpy(uvl, uv2d, sizeof(uvl)); for (int i = 0; i < 4; i++) uvl[i * 4 + 2] = (float)g_probe_layer;
+        DG.use(P.prog[t]); DG.u1i(P.loc_s[t], P.unit); DG.u4fv(P.loc_uv[t], 4, t == 1 ? dirs : t == 2 ? uvl : uv2d); DG.u1f(P.loc_l[t], (float)lod);
         DG.bind_va(P.va);
         a_glBindFramebuffer(0x8CA9, P.fb); DG.viewport(0, 0, 4, 2); DG.color_mask(1, 1, 1, 1);
         DG.draw_arrays(0x0004, 0, 3);
@@ -541,9 +547,13 @@ static void diag_probe_at(unsigned target, unsigned tex, unsigned samp, int lod,
     if (read) { char *q = strstr(px, "lodN"); if (q) q[3] = lod < 10 ? (char)('0' + lod) : '+'; }
     bool nan = false;
     if (read) for (int i = 0; i < 32; i++) if (out[i] != out[i] || out[i] > 65000.0f || out[i] < -65000.0f) nan = true;
-    if (why) { tl_log_line("gldiag:     %s: tex %u%s; %s", why, tex, nan ? " HAS NaN/inf" : "", read ? px : "(not read)"); return; }
+    int mag = 0;   /* (1,0,1): what ASTC decodes a bad or empty block to, and Unity's error colour */
+    if (read) for (int i = 0; i < 8; i++) mag += out[i * 4] > 0.95f && out[i * 4 + 1] < 0.05f && out[i * 4 + 2] > 0.95f;
+    g_probe_mag = mag;
+    if (g_probe_quiet) return;
+    if (why) { tl_log_line("gldiag:     %s: tex %u%s%s; %s", why, tex, nan ? " HAS NaN/inf" : "", mag ? " MAGENTA" : "", read ? px : "(not read)"); return; }
     char up[300]; tu_describe(tex, up, sizeof(up));
-    tl_log_line("gldiag:     tex %u: base %d max %d min %#x mag %#x immutable %d (%d levels) compare %#x; %s%s", tex, base, maxl, minf, magf,
+    tl_log_line("gldiag:     tex %u%s: base %d max %d min %#x mag %#x immutable %d (%d levels) compare %#x; %s%s", tex, mag ? " MAGENTA" : "", base, maxl, minf, magf,
                 imm, imml, cmp, read ? px : "(depth compare: not read)", up);
 }
 static void diag_probe(unsigned target, unsigned tex, unsigned samp) { diag_probe_at(target, tex, samp, 4, NULL); }
@@ -565,8 +575,13 @@ static void diag_array_mips_done(unsigned tex)
     long draws = t_layer_draws; t_layer_draws = -1;
     if (!diag_load() || atomic_fetch_add(&n, 1) >= 16) return;
     unsigned err = DG.get_error();
-    char why[120]; snprintf(why, sizeof(why), "after glGenerateMipmap(2D_ARRAY), %ld draws since a layer was attached%s", draws, err ? " (GL error)" : "");
-    diag_probe_at(0x8C1A, tex, 0, 4, why);
+    int layers = 1; if (DG.get_tex_level_iv) DG.get_tex_level_iv(0x8C1A, 0, 0x8071 /* TEXTURE_DEPTH */, &layers);
+    if (layers < 1) layers = 1;
+    for (int l = 0; l < layers && l < 8; l++) {
+        char why[140]; snprintf(why, sizeof(why), "after glGenerateMipmap(2D_ARRAY), %ld draws since a layer was attached%s, layer %d of %d", draws, err ? " (GL error)" : "", l, layers);
+        g_probe_layer = l; diag_probe_at(0x8C1A, tex, 0, 4, why);
+    }
+    g_probe_layer = 0;
 }
 /* after a copy into a cube's level: that level read back, and the GL error the copy raised (if any) */
 static void diag_cube_copy_done(unsigned sn, unsigned st, int sl, unsigned dn, int dl, int face, int w, int h, unsigned err, int rfmt, int rtype)
@@ -710,6 +725,56 @@ static void diag_report_prog(unsigned prog, unsigned mode, int count, bool probe
     }
     if (k) tl_log_line("gldiag:   uniforms: %s", line);
     DG.active_tex((unsigned)active);
+}
+
+/* ---- magenta textures: (1,0,1) is what ASTC decodes an empty or bad block to, so a compressed texture whose data never
+ * arrived samples as solid magenta (a surface "replaced by purple"). Each texture the game draws with is read back once, quietly;
+ * one that comes back magenta is logged with the program that samples it, its upload record and that program's sources. */
+#define MS_TEX 65536
+static unsigned char g_ms_seen[MS_TEX / 8];
+static unsigned char g_ms_prog_units[DIAG_PROGS][17];   /* [0]: 0 unread, else 1 + samplers; then (unit << 2 | kind) */
+static int g_ms_scanned, g_ms_found; static bool g_ms_said;
+static void cube_src(unsigned prog);
+static void ms_draw(unsigned mode, int count)
+{
+    if (g_ms_found >= 6 || g_ms_scanned >= 4000 || !diag_load()) return;
+    if (g_ms_scanned == 0 && !g_ms_said) { g_ms_said = true; tl_log_line("gldiag: magenta scan on: each texture drawn with is read back once (TL_GL_DIAG=0: off)"); }
+    int prog = 0; a_glGetIntegerv(0x8B8D, &prog);
+    if (prog <= 0 || prog >= DIAG_PROGS) return;
+    unsigned char *pu = g_ms_prog_units[prog];
+    if (!pu[0]) {
+        int n = 0, m = 0; DG.get_prog_iv((unsigned)prog, 0x8B86, &n);
+        for (int i = 0; i < n && i < 512 && m < 16; i++) {
+            char name[128] = ""; int l = 0, sz = 0; unsigned ty = 0, target = 0;
+            DG.get_active_u((unsigned)prog, (unsigned)i, sizeof(name), &l, &sz, &ty, name);
+            if (!diag_is_sampler(ty, &target) || (target != 0x0DE1 && target != 0x8C1A)) continue;
+            int loc = DG.get_u_loc((unsigned)prog, name), unit = -1;
+            if (loc >= 0) DG.get_u_iv((unsigned)prog, loc, &unit);
+            if (unit >= 0 && unit < 64) pu[1 + m++] = (unsigned char)(unit << 2 | (target == 0x8C1A));
+        }
+        pu[0] = (unsigned char)(1 + m);
+    }
+    if (pu[0] < 2) return;
+    int active = 0; a_glGetIntegerv(0x84E0, &active);
+    for (int j = 1; j < pu[0]; j++) {
+        unsigned unit = pu[j] >> 2, target = (pu[j] & 1) ? 0x8C1A : 0x0DE1;
+        DG.active_tex(0x84C0 + unit);
+        int tex = diag_bound(target), samp = 0;
+        a_glGetIntegerv(0x8919, &samp);
+        DG.active_tex((unsigned)active);
+        if (tex <= 0 || tex >= MS_TEX || (g_ms_seen[tex >> 3] & (1 << (tex & 7)))) continue;
+        g_ms_seen[tex >> 3] |= (unsigned char)(1 << (tex & 7));
+        g_ms_scanned++;
+        g_probe_quiet = true; g_probe_mag = 0; diag_probe_at(target, (unsigned)tex, (unsigned)samp, 4, NULL); g_probe_quiet = false;
+        if (g_probe_mag < 2) continue;
+        g_ms_found++;
+        tl_log_line("gldiag: magenta: program %d samples tex %d (%s, unit %u), which reads back as (1,0,1); that draw:", prog, tex,
+                    target == 0x8C1A ? "array" : "2D", unit);
+        diag_report_prog((unsigned)prog, mode, count, true);
+        diag_write_prog_src((unsigned)prog);
+        if (g_ms_found <= 2) cube_src((unsigned)prog);
+        if (g_ms_found >= 6) break;
+    }
 }
 
 /* ---- frame captures */
@@ -1222,19 +1287,19 @@ static unsigned w_glGetError(void)
 
 static void (*r_glDrawElements)(unsigned, int, unsigned, const void *);
 static void w_glDrawElements(unsigned mode, int count, unsigned type, const void *idx)
-{ if (g_tbo_any) tbo_draw(); t_diag_draws++; atomic_fetch_add_explicit(&g_diag_draws_all, 1, memory_order_relaxed); if (t_layer_draws >= 0) t_layer_draws++; bt_draw(mode, count); CUBE_PRE(mode, count); bool c = cap_here(); if (c) cap_pre(); { bool zf = zb_pre(); r_glDrawElements(mode, count, type, idx); zb_post(zf); } CUBE_POST(); if (c) cap_post(mode, count); else err_check("a draw"); }
+{ if (g_tbo_any) tbo_draw(); t_diag_draws++; atomic_fetch_add_explicit(&g_diag_draws_all, 1, memory_order_relaxed); if (t_layer_draws >= 0) t_layer_draws++; if (g_diag == 1) ms_draw(mode, count); bt_draw(mode, count); CUBE_PRE(mode, count); bool c = cap_here(); if (c) cap_pre(); { bool zf = zb_pre(); r_glDrawElements(mode, count, type, idx); zb_post(zf); } CUBE_POST(); if (c) cap_post(mode, count); else err_check("a draw"); }
 static void (*r_glDrawElementsInstanced)(unsigned, int, unsigned, const void *, int);
 static void w_glDrawElementsInstanced(unsigned mode, int count, unsigned type, const void *idx, int inst)
-{ if (g_tbo_any) tbo_draw(); t_diag_draws++; atomic_fetch_add_explicit(&g_diag_draws_all, 1, memory_order_relaxed); if (t_layer_draws >= 0) t_layer_draws++; bt_draw(mode, count); CUBE_PRE(mode, count); bool c = cap_here(); if (c) cap_pre(); { bool zf = zb_pre(); r_glDrawElementsInstanced(mode, count, type, idx, inst); zb_post(zf); } CUBE_POST(); if (c) cap_post(mode, count); else err_check("a draw"); }
+{ if (g_tbo_any) tbo_draw(); t_diag_draws++; atomic_fetch_add_explicit(&g_diag_draws_all, 1, memory_order_relaxed); if (t_layer_draws >= 0) t_layer_draws++; if (g_diag == 1) ms_draw(mode, count); bt_draw(mode, count); CUBE_PRE(mode, count); bool c = cap_here(); if (c) cap_pre(); { bool zf = zb_pre(); r_glDrawElementsInstanced(mode, count, type, idx, inst); zb_post(zf); } CUBE_POST(); if (c) cap_post(mode, count); else err_check("a draw"); }
 static void (*r_glDrawRangeElements)(unsigned, unsigned, unsigned, int, unsigned, const void *);
 static void w_glDrawRangeElements(unsigned mode, unsigned s, unsigned e, int count, unsigned type, const void *idx)
-{ if (g_tbo_any) tbo_draw(); t_diag_draws++; atomic_fetch_add_explicit(&g_diag_draws_all, 1, memory_order_relaxed); if (t_layer_draws >= 0) t_layer_draws++; bt_draw(mode, count); CUBE_PRE(mode, count); bool c = cap_here(); if (c) cap_pre(); { bool zf = zb_pre(); r_glDrawRangeElements(mode, s, e, count, type, idx); zb_post(zf); } CUBE_POST(); if (c) cap_post(mode, count); else err_check("a draw"); }
+{ if (g_tbo_any) tbo_draw(); t_diag_draws++; atomic_fetch_add_explicit(&g_diag_draws_all, 1, memory_order_relaxed); if (t_layer_draws >= 0) t_layer_draws++; if (g_diag == 1) ms_draw(mode, count); bt_draw(mode, count); CUBE_PRE(mode, count); bool c = cap_here(); if (c) cap_pre(); { bool zf = zb_pre(); r_glDrawRangeElements(mode, s, e, count, type, idx); zb_post(zf); } CUBE_POST(); if (c) cap_post(mode, count); else err_check("a draw"); }
 static void (*r_glDrawArrays)(unsigned, int, int);
 static void w_glDrawArrays(unsigned mode, int first, int count)
-{ if (g_tbo_any) tbo_draw(); t_diag_draws++; atomic_fetch_add_explicit(&g_diag_draws_all, 1, memory_order_relaxed); if (t_layer_draws >= 0) t_layer_draws++; bt_draw(mode, count); CUBE_PRE(mode, count); bool c = cap_here(); if (c) cap_pre(); { bool zf = zb_pre(); r_glDrawArrays(mode, first, count); zb_post(zf); } CUBE_POST(); if (c) cap_post(mode, count); else err_check("a draw"); }
+{ if (g_tbo_any) tbo_draw(); t_diag_draws++; atomic_fetch_add_explicit(&g_diag_draws_all, 1, memory_order_relaxed); if (t_layer_draws >= 0) t_layer_draws++; if (g_diag == 1) ms_draw(mode, count); bt_draw(mode, count); CUBE_PRE(mode, count); bool c = cap_here(); if (c) cap_pre(); { bool zf = zb_pre(); r_glDrawArrays(mode, first, count); zb_post(zf); } CUBE_POST(); if (c) cap_post(mode, count); else err_check("a draw"); }
 static void (*r_glDrawArraysInstanced)(unsigned, int, int, int);
 static void w_glDrawArraysInstanced(unsigned mode, int first, int count, int inst)
-{ if (g_tbo_any) tbo_draw(); t_diag_draws++; atomic_fetch_add_explicit(&g_diag_draws_all, 1, memory_order_relaxed); if (t_layer_draws >= 0) t_layer_draws++; bt_draw(mode, count); CUBE_PRE(mode, count); bool c = cap_here(); if (c) cap_pre(); { bool zf = zb_pre(); r_glDrawArraysInstanced(mode, first, count, inst); zb_post(zf); } CUBE_POST(); if (c) cap_post(mode, count); else err_check("a draw"); }
+{ if (g_tbo_any) tbo_draw(); t_diag_draws++; atomic_fetch_add_explicit(&g_diag_draws_all, 1, memory_order_relaxed); if (t_layer_draws >= 0) t_layer_draws++; if (g_diag == 1) ms_draw(mode, count); bt_draw(mode, count); CUBE_PRE(mode, count); bool c = cap_here(); if (c) cap_pre(); { bool zf = zb_pre(); r_glDrawArraysInstanced(mode, first, count, inst); zb_post(zf); } CUBE_POST(); if (c) cap_post(mode, count); else err_check("a draw"); }
 static void (*r_glClear)(unsigned);
 static void w_glClear(unsigned mask) { r_glClear(mask); cap_dirty(); if (!cap_here()) err_check("glClear"); }
 
