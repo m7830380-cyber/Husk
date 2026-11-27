@@ -1350,9 +1350,18 @@ static int x18_rewrite(tl_lib *L, uint32_t *site_rw, const uint8_t *pc)
         if (G.verbosity >= 2) tl_log_line("ld: %s: unrecognised instruction %08x at +%#llx looks like it uses x18", L->name, insn, (unsigned long long)(pc - L->rx));
         return X18_FAILED;
     }
-    if (g_vx18_off < 0 || L->stub_used + X18_STUB_BYTES > L->stub_cap) return X18_FAILED;
-
-    uint8_t *rx = L->stub_rx + L->stub_used, *rw = L->stub_rw + L->stub_used;
+    if (g_vx18_off < 0) return X18_FAILED;
+    /* The stub pages after the image, or the island pool inside it for a site out of their branch range (a 200 MiB libil2cpp's
+     * code starts 170 MiB before its end: x18 left live there is zeroed by the kernel mid-function) */
+    size_t *pool_used;
+    uint8_t *rx, *rw;
+    if (L->stub_used + X18_STUB_BYTES <= L->stub_cap && in_range_b(pc, L->stub_rx + L->stub_used)
+        && in_range_b(L->stub_rx + L->stub_used + X18_STUB_BYTES, pc)) {
+        rx = L->stub_rx + L->stub_used; rw = L->stub_rw + L->stub_used; pool_used = &L->stub_used;
+    } else if (L->isl_rx && L->isl_used + X18_STUB_BYTES <= L->isl_cap && in_range_b(pc, L->isl_rx + L->isl_used)
+               && in_range_b(L->isl_rx + L->isl_used + X18_STUB_BYTES, pc)) {
+        rx = L->isl_rx + L->isl_used; rw = L->isl_rw + L->isl_used; pool_used = &L->isl_used;
+    } else return X18_FAILED;
     uint32_t c[X18_STUB_BYTES / 4];
     int n = 0;
     const uint8_t *back = pc + 4;
@@ -1471,7 +1480,7 @@ emitted:
     if (n > X18_STUB_BYTES / 4 || !in_range_b(pc, rx)) return X18_FAILED;
     memcpy(rw, c, (size_t)n * 4);
     for (int i = n; i < X18_STUB_BYTES / 4; i++) ((uint32_t *)rw)[i] = 0xD503201Fu;
-    L->stub_used += X18_STUB_BYTES;
+    *pool_used += X18_STUB_BYTES;
     *site_rw = e_b(pc, rx);
     return X18_DONE;
 }
@@ -2913,8 +2922,8 @@ static bool relocate(tl_lib *L)
         if (L->n_ctr) tl_log_line("ld:   %s: %zu reads of CTR_EL0 replaced by a constant", L->name, L->n_ctr);
         if (L->n_svc_far) tl_log_line("ld:   %s: %zu raw system-call sites are out of branch range of the stubs and answer ENOSYS", L->name, L->n_svc_far);
         if (sv) tl_log_line("ld:   %s: %zu raw system-call sites rewritten", L->name, sv);
-        if (L->n_x18 || L->n_x18_failed) tl_log_line("ld:   %s: %zu instructions using x18 rewritten for the virtual register%s", L->name, L->n_x18,
-                                                     L->n_x18_failed ? " (and some that could not be)" : "");
+        if (L->n_x18 || L->n_x18_failed) tl_log_line("ld:   %s: %zu instructions using x18 rewritten for the virtual register, %zu could not be (islands %zu/%zu bytes used)",
+                                                     L->name, L->n_x18, L->n_x18_failed, L->isl_used, L->isl_cap);
         if (L->n_x18_data) tl_log_line("ld:   %s: %zu words that look like x18 instructions left alone: they are constants outside every function", L->name, L->n_x18_data);
     }
     return true;
