@@ -565,6 +565,33 @@ static void *zink_layer_of(EGLSurface s, void **win)
     pthread_mutex_unlock(&g_tex_lock);
     return l;
 }
+/* windows asked for in sRGB whose stand-in buffer could only be linear (Zink refuses sRGB buffers): Husk encodes their frames */
+#define MAX_ENC_SURFACES 16
+static EGLSurface g_enc_surf[MAX_ENC_SURFACES];
+static void enc_mark(EGLSurface s, bool on)
+{
+    pthread_mutex_lock(&g_tex_lock);
+    for (int i = 0; i < MAX_ENC_SURFACES && s; i++) if (g_enc_surf[i] == s) g_enc_surf[i] = NULL;
+    for (int i = 0; i < MAX_ENC_SURFACES && s && on; i++) if (!g_enc_surf[i]) { g_enc_surf[i] = s; break; }
+    pthread_mutex_unlock(&g_tex_lock);
+}
+static bool enc_surface(EGLSurface s)
+{
+    bool r = false;
+    for (int i = 0; i < MAX_ENC_SURFACES && s; i++) if (g_enc_surf[i] == s) r = true;
+    return r;
+}
+/* linear -> sRGB on read-back RGBA bytes, alpha kept */
+static void enc_pixels(uint8_t *px, EGLint w, EGLint h)
+{
+    static uint8_t lut[256]; static bool made;
+    if (!made) {
+        for (int i = 0; i < 256; i++) { double l = i / 255.0, e = l <= 0.0031308 ? l * 12.92 : 1.055 * pow(l, 1 / 2.4) - 0.055; lut[i] = (uint8_t)(e * 255.0 + 0.5); }
+        made = true;
+    }
+    size_t n = (size_t)w * h * 4;
+    for (size_t i = 0; i < n; i += 4) { px[i] = lut[px[i]]; px[i + 1] = lut[px[i + 1]]; px[i + 2] = lut[px[i + 2]]; }
+}
 static bool comp_surface(EGLSurface s)
 {
     bool r = false;
@@ -615,7 +642,11 @@ static EGLSurface pbuffer_for_window(EGLDisplay d, EGLConfig cfg, void *win, con
     EGLint pb[] = { EGL_WIDTH, tl_nwindow_width(win), EGL_HEIGHT, tl_nwindow_height(win), 0x309D, cs, EGL_NONE };
     if (cs == 0x308A) pb[4] = EGL_NONE;
     EGLSurface s = a_eglCreatePbufferSurface(d, cfg, pb);
-    if (!s && cs != 0x308A) { tl_log_line("egl: sRGB buffer refused (%#x), linear instead", a_eglGetError()); pb[4] = EGL_NONE; s = a_eglCreatePbufferSurface(d, cfg, pb); }
+    if (!s && cs != 0x308A) {
+        tl_log_line("egl: sRGB buffer refused (%#x), linear instead; Husk encodes its frames to sRGB", a_eglGetError());
+        pb[4] = EGL_NONE; s = a_eglCreatePbufferSurface(d, cfg, pb);
+        if (s) enc_mark(s, true);
+    }
     return s;
 }
 static EGLSurface w_eglCreateWindowSurface(EGLDisplay d, EGLConfig cfg, void *win, const EGLint *at)
@@ -682,6 +713,7 @@ static EGLBoolean w_eglDestroySurface(EGLDisplay d, EGLSurface s)
     for (int i = 0; i < MAX_COMP_SURFACES && s; i++) if (g_comp_surf[i] == s) { g_comp_surf[i] = NULL; comp = true; }
     for (int i = 0; i < MAX_ZINK_SURFACES && s; i++) if (g_zink_surf[i].s == s) g_zink_surf[i].s = NULL;
     pthread_mutex_unlock(&g_tex_lock);
+    enc_mark(s, false);
     if (comp && tl_javaapp_app_pixels) tl_javaapp_app_pixels(NULL, 0, 0);
     return a_eglDestroySurface(d, s);
 }
@@ -751,6 +783,7 @@ static void tex_swap(EGLDisplay d, EGLSurface s, void *win)
     a_glReadPixels(0, 0, w, h, 0x1908 /* GL_RGBA */, 0x1401 /* GL_UNSIGNED_BYTE */, buf);
     a_glPixelStorei(0x0D05, old_pack);
     a_glBindFramebuffer(0x8CA8, (unsigned)old_fb);
+    if (enc_surface(s)) enc_pixels(buf, w, h);
     tl_nwindow_post(win, buf, w, h, true);
 }
 /* A composited frame copied, on the GPU, into one of two textures the compositor shares, with a fence it waits on before drawing it */
@@ -786,6 +819,7 @@ static bool comp_hand_over(EGLDisplay d, EGLSurface s)
     a_glBindFramebuffer(0x8CA8 /* GL_READ_FRAMEBUFFER */, 0);
     if (attachParam) attachParam(0x8CA8, 0x0405 /* GL_BACK */, 0x8210 /* COLOR_ENCODING */, &enc);
     bool srgb = enc == 0x8C40 /* GL_SRGB */;
+    bool encode = srgb || enc_surface(s);   /* the compositor encodes: an sRGB texture decodes on sampling, a linear one holds linear values */
     activeTex(0x84C0);
     a_glGetIntegerv(0x8069 /* GL_TEXTURE_BINDING_2D */, &old_tex);
     a_glGetIntegerv(0x88EF /* GL_PIXEL_UNPACK_BUFFER_BINDING */, &old_unpack);
@@ -813,8 +847,8 @@ static bool comp_hand_over(EGLDisplay d, EGLSurface s)
     void *sync = createSync ? createSync(d, 0x30F9 /* EGL_SYNC_FENCE_KHR */, NULL) : NULL;
     flush();
     static atomic_int said;
-    if (!atomic_exchange(&said, 1)) tl_log_line("egl: composited frames %dx%d handed over on the GPU (%s window, %s)", w, h, srgb ? "sRGB" : "linear", sync ? "fenced" : "flushed");
-    tl_javaapp_app_texture(t.tex[k], w, h, sync, srgb);
+    if (!atomic_exchange(&said, 1)) tl_log_line("egl: composited frames %dx%d handed over on the GPU (%s window%s, %s)", w, h, srgb ? "sRGB" : "linear", !srgb && encode ? ", encoded by the compositor" : "", sync ? "fenced" : "flushed");
+    tl_javaapp_app_texture(t.tex[k], w, h, sync, encode);
     t.cur ^= 1;
     return true;
 }
@@ -849,6 +883,7 @@ static EGLBoolean w_eglSwapBuffers(EGLDisplay d, EGLSurface s)
         bool gpu = comp_hand_over(d, s);
         if (!gpu) {
             const uint8_t *px = read_back(d, s, &w, &h);
+            if (px && enc_surface(s)) enc_pixels((uint8_t *)px, w, h);
             if (px && tl_javaapp_app_pixels) tl_javaapp_app_pixels(px, w, h);
         }
         if (n <= 3 || n % 600 == 0) tl_log_line("egl: swap #%lu (composited, %s)", n, gpu ? "on the GPU" : "read back");
@@ -873,6 +908,7 @@ static EGLBoolean w_eglSwapBuffers(EGLDisplay d, EGLSurface s)
         /* buffers made smaller after the surface (ANativeWindow_setBuffersGeometry): the game draws that much, from the bottom left */
         EGLint w = zwin ? tl_nwindow_width(zwin) : 0, h = zwin ? tl_nwindow_height(zwin) : 0;
         const uint8_t *px = read_back(d, s, &w, &h);
+        if (px && enc_surface(s)) enc_pixels((uint8_t *)px, w, h);
         if (px) tl_present_rgba(zl, px, w, h);
         return EGL_TRUE;
     }
