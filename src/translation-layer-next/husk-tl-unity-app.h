@@ -118,6 +118,8 @@ void husk_sdl_set_safe_insets(int left, int top, int right, int bottom);
 /* Whether an SDL game's manifest asks for a portrait screen (the others are landscape). */
 int husk_sdl_apk_is_portrait(const char *apk);
 int husk_apk_orientation(const char *apk);
+/* 1 when a Unity game declares activities of its own besides the one it starts with: it runs on the Java runtime. */
+int husk_unity_has_own_activities(const char *apk);
 int husk_apk_is_game(const char *apk);         /* the manifest files it as a game (appCategory / isGame) */      /* 1 portrait, 0 landscape, -1 the manifest does not say */
 /* 1 when the app needs its split APKs (isSplitRequired, requiredSplitTypes, Play's splits.required) */
 int husk_apk_split_required(const char *apk);

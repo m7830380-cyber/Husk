@@ -632,6 +632,55 @@ void husk_native_add_package(const char *apk)
 }
 void husk_sdl_set_safe_insets(int left, int top, int right, int bottom) { tl_sdl_set_safe_insets(left, top, right, bottom); }
 int husk_sdl_apk_is_portrait(const char *apk) { return tl_sdl_manifest_portrait(apk) ? 1 : 0; }
+/*
+ * Whether a Unity game brings Android screens of its own: an <activity> of the app's package that is not the one the launcher starts
+ * (PPGA's GameFolderActivity, a folder picker). Its C# then calls into that Java (SharedStorage.ready, root), which only the Java
+ * runtime runs; the Unity driver answers zero and the game waits for good.
+ */
+int husk_unity_has_own_activities(const char *apk)
+{
+    char package[200];
+    if (!husk_unity_package_name(apk, package, sizeof(package))) return 0;
+    size_t plen = strlen(package);
+    tl_zip z; char err[160];
+    if (!tl_zip_open(&z, apk, err, sizeof(err))) return 0;
+    int found = 0;
+    const tl_zip_entry *e = tl_zip_find(&z, "AndroidManifest.xml");
+    const uint8_t *data; size_t len; bool owned = false;
+    if (e && tl_zip_data(&z, e, 8u << 20, &data, &len, &owned, err, sizeof(err)) && len > 8 && rd16(data) == 0x0003) {
+        const uint8_t *pool = NULL; size_t pool_size = 0;
+        char activity[200] = ""; bool launcher = false;
+        for (size_t off = rd16(data + 2); off + 8 <= len && !found; ) {
+            uint16_t type = rd16(data + off); uint32_t size = rd32(data + off + 4);
+            if (size < 8 || off + size > len) break;
+            if (type == 0x0001) { pool = data + off; pool_size = size; }
+            else if ((type == 0x0102 || type == 0x0103) && pool && size >= 24) {
+                const uint8_t *el = data + off;
+                char name[64] = "";
+                pool_string(pool, pool_size, rd32(el + 20), name, sizeof(name));
+                if (type == 0x0103) {
+                    if (!strcmp(name, "activity") && activity[0] && !launcher && !strstr(activity, "unity3d")
+                        && (activity[0] == '.' || (!strncmp(activity, package, plen) && activity[plen] == '.'))) found = 1;
+                    if (!strcmp(name, "activity")) { activity[0] = 0; launcher = false; }
+                } else {
+                    uint16_t astart = rd16(el + 24), asize = rd16(el + 26), acount = rd16(el + 28);
+                    for (unsigned i = 0; i < acount; i++) {
+                        const uint8_t *at = el + 16 + astart + (size_t)i * asize;
+                        char an[64] = "", av[200] = "";
+                        if (!pool_string(pool, pool_size, rd32(at + 4), an, sizeof(an)) || strcmp(an, "name")) continue;
+                        if (rd32(at + 8) != 0xFFFFFFFFu) pool_string(pool, pool_size, rd32(at + 8), av, sizeof(av));
+                        if (!strcmp(name, "activity")) { snprintf(activity, sizeof(activity), "%s", av); launcher = false; }
+                        else if (!strcmp(name, "category") && !strcmp(av, "android.intent.category.LAUNCHER")) launcher = true;
+                    }
+                }
+            }
+            off += size;
+        }
+    }
+    if (owned) free((void *)data);
+    tl_zip_close(&z);
+    return found;
+}
 int husk_apk_orientation(const char *apk) { return tl_manifest_orientation(apk); }
 int husk_apk_is_game(const char *apk) { return tl_manifest_is_game(apk) ? 1 : 0; }
 bool tl_manifest_split_required(const char *apk);

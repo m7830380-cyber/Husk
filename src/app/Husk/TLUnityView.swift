@@ -1105,8 +1105,20 @@ extension TLApp {
         case .gamemaker: return .gamemaker
         case .java: return .java
         case .cocos: return .cocos
-        default: return .unity
+        default:
+            // A Unity game with Android screens of its own (a folder picker, a patcher) calls into that Java from C#: only the
+            // Java runtime runs it, as Unity 6 games do.
+            if let apk = apks.first, Self.ownActivities(apk) { return .java }
+            return .unity
         }
+    }
+
+    nonisolated(unsafe) private static var ownActivityCache: [String: Bool] = [:]
+    private static func ownActivities(_ apk: String) -> Bool {
+        if let v = ownActivityCache[apk] { return v }
+        let v = husk_unity_has_own_activities(apk) != 0
+        ownActivityCache[apk] = v
+        return v
     }
 
     var nativeDataDir: String {
