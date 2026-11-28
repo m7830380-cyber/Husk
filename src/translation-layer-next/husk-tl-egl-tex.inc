@@ -143,10 +143,30 @@ static void (*r_glTexParameterfv)(unsigned, unsigned, const float *);
 static void w_glTexParameterfv(unsigned t, unsigned p, const float *v) { if (!v || !tf_param(t, p, (int)v[0])) r_glTexParameterfv(t, p, v); }
 static void (*r_glTexStorage2D)(unsigned, int, unsigned, int, int);
 static void diag_tex_storage2d(unsigned target, int levels, unsigned fmt, int w, int h);
-static void w_glTexStorage2D(unsigned t, int levels, unsigned fmt, int w, int h) { r_glTexStorage2D(t, levels, fmt, w, h); tf_storage(t, fmt, 0); diag_tex_storage2d(t, levels, fmt, w, h); }
+/*
+ * Zink over MoltenVK: an RGBA32F colour target cannot be blended on an Apple GPU, and MoltenVK refuses the pipeline of any draw that blends
+ * into one ("Blending is enabled for attachment with format VK_FORMAT_R32G32B32A32_SFLOAT"), so the draw is dropped -- an Unreal scene stays
+ * blank (white) behind its UI. Android GPUs blend it, and games count on that. 2D textures and renderbuffers asked for as RGBA32F are made
+ * RGBA16F, which blends; uploads of GL_FLOAT data into them stay valid. TL_GL_KEEP_RGBA32F=1: off.
+ */
+static unsigned f32_blendable(unsigned fmt)
+{
+    if (fmt != 0x8814 /* GL_RGBA32F */ || !g_zink) return fmt;
+    static int keep = -1;
+    if (keep < 0) { const char *k = getenv("TL_GL_KEEP_RGBA32F"); keep = k && *k == '1'; }
+    if (keep) return fmt;
+    static atomic_int said;
+    if (!atomic_exchange(&said, 1)) tl_log_line("gl: Zink: RGBA32F 2D textures and renderbuffers made RGBA16F, as Apple GPUs cannot blend 32-bit float targets (TL_GL_KEEP_RGBA32F=1: off)");
+    return 0x881A; /* GL_RGBA16F */
+}
+static void w_glTexStorage2D(unsigned t, int levels, unsigned fmt, int w, int h) { fmt = f32_blendable(fmt); r_glTexStorage2D(t, levels, fmt, w, h); tf_storage(t, fmt, 0); diag_tex_storage2d(t, levels, fmt, w, h); }
 static void (*r_glTexImage2D)(unsigned, int, int, int, int, int, unsigned, unsigned, const void *);
 static void w_glTexImage2D(unsigned t, int level, int ifmt, int w, int h, int border, unsigned fmt, unsigned type, const void *px)
-{ r_glTexImage2D(t, level, ifmt, w, h, border, fmt, type, px); if (level == 0) tf_storage(t, (unsigned)ifmt, type); }
+{ ifmt = (int)f32_blendable((unsigned)ifmt); r_glTexImage2D(t, level, ifmt, w, h, border, fmt, type, px); if (level == 0) tf_storage(t, (unsigned)ifmt, type); }
+static void (*r_glRenderbufferStorage)(unsigned, unsigned, int, int);
+static void w_glRenderbufferStorage(unsigned t, unsigned fmt, int w, int h) { r_glRenderbufferStorage(t, f32_blendable(fmt), w, h); }
+static void (*r_glRenderbufferStorageMultisample)(unsigned, int, unsigned, int, int);
+static void w_glRenderbufferStorageMultisample(unsigned t, int n, unsigned fmt, int w, int h) { r_glRenderbufferStorageMultisample(t, n, f32_blendable(fmt), w, h); }
 /* a deleted texture's name is handed out again, for a texture with GL's default filters */
 static void (*r_glDeleteTextures)(int, const unsigned *);
 static void w_glDeleteTextures(int n, const unsigned *names)
