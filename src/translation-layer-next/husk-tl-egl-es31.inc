@@ -436,10 +436,28 @@ static void (*r_glGetIntegerv)(unsigned, int *);
 static void w_glGetIntegerv(unsigned pname, int *data)
 {
     if (tbo_get_integer(pname, data)) return;
+    /* the geometry-shader limits, for the extension told above (geom_extra): a phone's, without asking a driver that has none */
+    if (data && geom_extra()) {
+        int v = -1;
+        switch (pname) {
+        case 0x8DDF: v = 1024; break;   /* MAX_GEOMETRY_UNIFORM_COMPONENTS */
+        case 0x8A2C: v = 12; break;     /* MAX_GEOMETRY_UNIFORM_BLOCKS */
+        case 0x8A32: v = 50176; break;  /* MAX_COMBINED_GEOMETRY_UNIFORM_COMPONENTS */
+        case 0x9123: v = 64; break;     /* MAX_GEOMETRY_INPUT_COMPONENTS */
+        case 0x9124: v = 128; break;    /* MAX_GEOMETRY_OUTPUT_COMPONENTS */
+        case 0x8DE0: v = 256; break;    /* MAX_GEOMETRY_OUTPUT_VERTICES */
+        case 0x8DE1: v = 1024; break;   /* MAX_GEOMETRY_TOTAL_OUTPUT_COMPONENTS */
+        case 0x8E5A: v = 32; break;     /* MAX_GEOMETRY_SHADER_INVOCATIONS */
+        case 0x8C29: v = 16; break;     /* MAX_GEOMETRY_TEXTURE_IMAGE_UNITS */
+        case 0x9312: v = 256; break;    /* MAX_FRAMEBUFFER_LAYERS */
+        case 0x92CF: case 0x92D5: case 0x90CD: case 0x90D7: v = 0; break;   /* geometry atomics, images, storage blocks */
+        }
+        if (v >= 0) { *data = v; return; }
+    }
     if (g_es31_shim && data) *data = 0;   /* a 3.1-only limit is an error on the 3.0 context, which writes nothing */
     r_glGetIntegerv(pname, data);
     if (g_es31_shim && pname == 0x821C /* GL_MINOR_VERSION */ && data && *data == 0) *data = g_es3_minor;
-    if (pname == 0x821D /* GL_NUM_EXTENSIONS */ && data && *data > 0) *data += copyimg_extra();
+    if (pname == 0x821D /* GL_NUM_EXTENSIONS */ && data && *data > 0) *data += ext_extra();
     /* Zink over MoltenVK says a uniform block may be ~1.4 GB (Metal's buffer limit). No phone says more than 64 KB, and an engine sizing
        or checking its constant buffers against that number (in int arithmetic) can turn shaders away: told 64 KB, as on Android GPUs. */
     if (g_zink && data && *data > 65536 && pname == 0x8A30 /* MAX_UNIFORM_BLOCK_SIZE */ && !zink_full_caps()) {
