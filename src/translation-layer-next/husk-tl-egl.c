@@ -1167,6 +1167,16 @@ static const char *const k_hidden_ext[] = { "GL_EXT_disjoint_timer_query", "GL_E
 static bool ext_hidden(const char *name, size_t n)
 {
     for (int i = 0; k_hidden_ext[i]; i++) if (strlen(k_hidden_ext[i]) == n && !strncmp(k_hidden_ext[i], name, n)) return true;
+    /* Zink: a program Unity links while KHR_parallel_shader_compile says it is still compiling is drawn with Unity's error
+       shader (magenta) instead; without the extension Unity waits for each link. TL_ZINK_PARALLEL_COMPILE=1 keeps it. */
+    if (g_zink && n == 30 && !strncmp(name, "GL_KHR_parallel_shader_compile", n)) {
+        const char *k = getenv("TL_ZINK_PARALLEL_COMPILE");
+        if (!(k && *k == '1')) {
+            static atomic_int said;
+            if (!atomic_exchange(&said, 1)) tl_log_line("gl: Zink: GL_KHR_parallel_shader_compile hidden, so programs are ready when first drawn (TL_ZINK_PARALLEL_COMPILE=1: keep it)");
+            return true;
+        }
+    }
     /* TL_GL_HIDE=GL_a,GL_b: more to leave out, for finding which an engine's choice depends on (which texture format it picks, say). */
     const char *extra = getenv("TL_GL_HIDE");
     while (extra && *extra) {

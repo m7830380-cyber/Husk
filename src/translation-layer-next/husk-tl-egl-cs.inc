@@ -67,6 +67,13 @@ static void w_glGetShaderiv(unsigned sh, unsigned pname, int *v)
 static void (*r_glGetProgramiv)(unsigned, unsigned, int *);
 static void w_glGetProgramiv(unsigned prog, unsigned pname, int *v)
 {
+    if (v && pname == 0x91B1 /* GL_COMPLETION_STATUS_KHR */ && !cs_fake(prog)) {
+        /* asked whether a link is done: finish it (LINK_STATUS waits) and say yes, so nothing is drawn as not-yet-ready */
+        int ls = 0; r_glGetProgramiv(prog, 0x8B82, &ls);
+        static atomic_int said;
+        if (diag_on() && atomic_fetch_add(&said, 1) < 8) tl_log_line("gldiag: glGetProgramiv(prog %u, COMPLETION_STATUS) asked; link status %d", prog, ls);
+        *v = 1; return;
+    }
     if (!v || !cs_fake(prog)) { r_glGetProgramiv(prog, pname, v); return; }
     switch (pname) {
     case 0x8B82: /* GL_LINK_STATUS */ case 0x8B83: /* GL_VALIDATE_STATUS */ *v = 1; return;
