@@ -290,11 +290,13 @@ static void tu_describe(unsigned tex, char *out, size_t n)
     pthread_mutex_unlock(&g_tu_mu);
 }
 
+static void lr_note_storage(unsigned target, unsigned fmt, unsigned type, int w, int h, int d, bool sized);
 static void (*r_glTexStorage3D)(unsigned, int, unsigned, int, int, int);
 static void w_glTexStorage3D(unsigned target, int levels, unsigned fmt, int w, int h, int d)
 {
     r_glTexStorage3D(target, levels, fmt, w, h, d);
     tf_storage(target, fmt, 0);
+    lr_note_storage(target, fmt, 0, w, h, d, true);
     if (!diag_on()) return;
     int n = atomic_fetch_add(&g_diag_arr_storage, 1);
     if (n < 40) tl_log_line("gldiag: glTexStorage3D(%s, tex %d, %d levels, fmt %#x, %dx%dx%d)",
@@ -305,6 +307,7 @@ static void w_glTexImage3D(unsigned target, int level, int ifmt, int w, int h, i
 {
     r_glTexImage3D(target, level, ifmt, w, h, d, border, fmt, (unsigned)type, px);
     if (!level) tf_storage(target, (unsigned)ifmt, (unsigned)type);
+    if (!level) lr_note_storage(target, (unsigned)ifmt, (unsigned)type, w, h, d, ifmt != (int)fmt);
     if (!diag_on() || level) return;
     int n = atomic_fetch_add(&g_diag_arr_storage, 1);
     if (n < 40) tl_log_line("gldiag: glTexImage3D(%s, tex %d, fmt %#x, %dx%dx%d, data %s)",
@@ -313,9 +316,124 @@ static void w_glTexImage3D(unsigned target, int level, int ifmt, int w, int h, i
 /* draws by this thread since it last attached a texture layer to a framebuffer: whether anything rendered into an array before its mips */
 static __thread long t_layer_draws = -1;
 static void (*r_glFramebufferTextureLayer)(unsigned, unsigned, unsigned, int, int);
+
+/* ---- Zink over MoltenVK: a draw into layer N > 0 of an array (or slice of a 3D texture) does not land -- the layer keeps what it
+ * held (Unity's terrain arrays stayed magenta past layer 0). Such an attachment is drawn into a plain 2D texture of the same format
+ * instead, copied into the layer (vkCmdCopyImage, which reaches every layer) when the framebuffer is left, re-attached or the array
+ * is mipmapped. TL_ZINK_LAYER_COPY=0: off. */
+#define LR_TEX 1024
+static struct { unsigned name, target, fmt, type; int w, h, d; bool sized; } g_lr_tex[LR_TEX];
+static pthread_mutex_t g_lr_mu = PTHREAD_MUTEX_INITIALIZER;
+static void lr_note_storage(unsigned target, unsigned fmt, unsigned type, int w, int h, int d, bool sized)
+{
+    if (!g_zink || (target != 0x8C1A && target != 0x806F) || !a_glGetIntegerv) return;
+    int name = 0; a_glGetIntegerv(target == 0x8C1A ? 0x8C1D : 0x806A, &name);
+    if (name <= 0) return;
+    pthread_mutex_lock(&g_lr_mu);
+    int i = (unsigned)name % LR_TEX;
+    g_lr_tex[i].name = (unsigned)name; g_lr_tex[i].target = target; g_lr_tex[i].fmt = fmt; g_lr_tex[i].type = type;
+    g_lr_tex[i].w = w; g_lr_tex[i].h = h; g_lr_tex[i].d = d; g_lr_tex[i].sized = sized;
+    pthread_mutex_unlock(&g_lr_mu);
+}
+#define LR_PEND 8
+typedef struct { unsigned fbo, att, scratch, tex, target, fmt; int level, layer, w, h; bool dirty; } lr_pend_t;
+static __thread lr_pend_t t_lr[LR_PEND];
+static __thread int t_lr_n;
+static struct {
+    int ok;   /* 0 unknown, 1 ready, -1 off */
+    void (*gen)(int, unsigned *), (*del)(int, const unsigned *), (*bind)(unsigned, unsigned);
+    void (*st2d)(unsigned, int, unsigned, int, int), (*im2d)(unsigned, int, int, int, int, int, unsigned, unsigned, const void *);
+    void (*fb2d)(unsigned, unsigned, unsigned, unsigned, int);
+    void (*copy)(unsigned, unsigned, int, int, int, int, unsigned, unsigned, int, int, int, int, int, int, int);
+} LR;
+static bool lr_ready(void)
+{
+    if (LR.ok) return LR.ok > 0;
+    const char *e = getenv("TL_ZINK_LAYER_COPY");
+    LR.ok = -1;
+    if (!g_zink || (e && e[0] == '0') || !a_eglGetProcAddress) return false;
+    *(void **)&LR.gen = a_eglGetProcAddress("glGenTextures"); *(void **)&LR.del = a_eglGetProcAddress("glDeleteTextures");
+    *(void **)&LR.bind = a_eglGetProcAddress("glBindTexture"); *(void **)&LR.st2d = a_eglGetProcAddress("glTexStorage2D");
+    *(void **)&LR.im2d = a_eglGetProcAddress("glTexImage2D"); *(void **)&LR.fb2d = a_eglGetProcAddress("glFramebufferTexture2D");
+    *(void **)&LR.copy = a_eglGetProcAddress("glCopyImageSubData");
+    if (!LR.copy) *(void **)&LR.copy = a_eglGetProcAddress("glCopyImageSubDataEXT");
+    if (LR.gen && LR.del && LR.bind && LR.st2d && LR.im2d && LR.fb2d && LR.copy) LR.ok = 1;
+    tl_log_line("gl: Zink array-layer draws %s", LR.ok > 0 ? "go to a 2D texture copied into the layer (TL_ZINK_LAYER_COPY=0: off)" : "left as they are (no copy_image)");
+    return LR.ok > 0;
+}
+static void lr_flush(lr_pend_t *p)
+{
+    if (!p->dirty || !p->scratch) return;
+    LR.copy(p->scratch, 0x0DE1, 0, 0, 0, 0, p->tex, p->target, p->level, 0, 0, p->layer, p->w, p->h, 1);
+    p->dirty = false;
+}
+static void lr_flush_fbo(unsigned fbo)
+{
+    for (int i = 0; i < t_lr_n; i++) if (t_lr[i].fbo == fbo) lr_flush(&t_lr[i]);
+}
+static void lr_flush_tex(unsigned tex)
+{
+    for (int i = 0; i < t_lr_n; i++) if (!tex || t_lr[i].tex == tex) lr_flush(&t_lr[i]);
+}
+static int lr_fbo_of(unsigned fbt)
+{
+    int fb = 0;
+    if (a_glGetIntegerv) a_glGetIntegerv(fbt == 0x8CA8 ? 0x8CAA : 0x8CA6, &fb);
+    return fb;
+}
+/* true when the attachment was redirected (the caller does not attach the layer itself) */
+static bool lr_attach(unsigned fbt, unsigned att, unsigned tex, int level, int layer)
+{
+    if (!t_lr_n && (!tex || layer <= 0)) return false;
+    if (!g_zink || !lr_ready()) return false;
+    unsigned fbo = (unsigned)lr_fbo_of(fbt);
+    lr_pend_t *p = NULL;
+    for (int i = 0; i < t_lr_n; i++) if (t_lr[i].fbo == fbo && t_lr[i].att == att) { p = &t_lr[i]; break; }
+    if (p) { lr_flush(p); p->tex = 0; }
+    if (!tex || layer <= 0 || fbt == 0x8CA8 || !fbo || att < 0x8CE0 || att > 0x8CEF) return false;
+    unsigned target = 0, fmt = 0, type = 0; int w = 0, h = 0, d = 0; bool sized = true;
+    pthread_mutex_lock(&g_lr_mu);
+    int k = tex % LR_TEX;
+    if (g_lr_tex[k].name == tex) { target = g_lr_tex[k].target; fmt = g_lr_tex[k].fmt; type = g_lr_tex[k].type; w = g_lr_tex[k].w; h = g_lr_tex[k].h; d = g_lr_tex[k].d; sized = g_lr_tex[k].sized; }
+    pthread_mutex_unlock(&g_lr_mu);
+    if (!target || layer >= d) return false;
+    w >>= level; h >>= level; if (w < 1) w = 1; if (h < 1) h = 1;
+    if (!p) {
+        if (t_lr_n == LR_PEND) { lr_flush(&t_lr[0]); if (t_lr[0].scratch) LR.del(1, &t_lr[0].scratch); memmove(t_lr, t_lr + 1, sizeof(t_lr[0]) * (LR_PEND - 1)); t_lr_n--; }
+        p = &t_lr[t_lr_n++]; memset(p, 0, sizeof(*p)); p->fbo = fbo; p->att = att;
+    }
+    if (!p->scratch || p->w != w || p->h != h || p->fmt != fmt) {
+        if (p->scratch) LR.del(1, &p->scratch);
+        int old = 0; a_glGetIntegerv(0x8069, &old);
+        LR.gen(1, &p->scratch); LR.bind(0x0DE1, p->scratch);
+        if (sized) LR.st2d(0x0DE1, 1, fmt, w, h);
+        else { LR.im2d(0x0DE1, 0, (int)fmt, w, h, 0, fmt, type, NULL); }
+        LR.bind(0x0DE1, (unsigned)old);
+        p->w = w; p->h = h; p->fmt = fmt;
+    }
+    p->tex = tex; p->target = target; p->level = level; p->layer = layer;
+    /* what the layer holds now, so draws that blend or load see it */
+    LR.copy(tex, target, level, 0, 0, layer, p->scratch, 0x0DE1, 0, 0, 0, 0, w, h, 1);
+    LR.fb2d(fbt, att, 0x0DE1, p->scratch, 0);
+    p->dirty = true;
+    static atomic_int said;
+    if (atomic_fetch_add(&said, 1) < 3) tl_log_line("gl: Zink: layer %d of tex %u (level %d, %dx%d) drawn through 2D texture %u", layer, tex, level, w, h, p->scratch);
+    return true;
+}
+static void (*r_glBindFramebuffer)(unsigned, unsigned);
+static void w_glBindFramebuffer(unsigned target, unsigned fb)
+{
+    if (t_lr_n && target != 0x8CA8) {
+        unsigned cur = (unsigned)lr_fbo_of(target);
+        if (cur != fb) lr_flush_fbo(cur);
+        for (int i = 0; i < t_lr_n; i++) if (t_lr[i].fbo == fb && t_lr[i].tex) t_lr[i].dirty = true;
+    }
+    r_glBindFramebuffer(target, fb);
+}
+
 static void w_glFramebufferTextureLayer(unsigned fbt, unsigned att, unsigned tex, int level, int layer)
 {
-    r_glFramebufferTextureLayer(fbt, att, tex, level, layer);
+    if (!lr_attach(fbt, att, tex, level, layer)) r_glFramebufferTextureLayer(fbt, att, tex, level, layer);
     if (tex && t_layer_draws < 0) t_layer_draws = 0;
     if (diag_on() && tex) {
         int n = atomic_fetch_add(&g_diag_arr_layer, 1);
@@ -329,6 +447,7 @@ static atomic_int g_diag_mips, g_diag_mips_arr, g_diag_mips_2d;
 static void (*r_glGenerateMipmap)(unsigned);
 static void w_glGenerateMipmap(unsigned target)
 {
+    if (t_lr_n && (target == 0x8C1A || target == 0x806F)) lr_flush_tex((unsigned)diag_bound(target));
     r_glGenerateMipmap(target);
     if (!diag_on()) return;
     err_check("glGenerateMipmap");
