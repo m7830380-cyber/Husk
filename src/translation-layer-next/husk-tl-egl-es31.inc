@@ -440,6 +440,13 @@ static void w_glGetIntegerv(unsigned pname, int *data)
     r_glGetIntegerv(pname, data);
     if (g_es31_shim && pname == 0x821C /* GL_MINOR_VERSION */ && data && *data == 0) *data = g_es3_minor;
     if (pname == 0x821D /* GL_NUM_EXTENSIONS */ && data && *data > 0) *data += copyimg_extra();
+    /* Zink over MoltenVK says a uniform block may be ~1.4 GB (Metal's buffer limit). No phone says more than 64 KB, and an engine sizing
+       or checking its constant buffers against that number (in int arithmetic) can turn shaders away: told 64 KB, as on Android GPUs. */
+    if (g_zink && data && *data > 65536 && pname == 0x8A30 /* MAX_UNIFORM_BLOCK_SIZE */ && !zink_full_caps()) {
+        static atomic_int said;
+        if (!atomic_exchange(&said, 1)) tl_log_line("gl: Zink: GL_MAX_UNIFORM_BLOCK_SIZE %d told as 65536, as Android GPUs say (TL_ZINK_FULL_CAPS=1: keep it)", *data);
+        *data = 65536;
+    }
     /* the limits a game reads, once each: an engine turns shader features (and whole shaders) off from these */
     if (diag_on() && data) {
         static unsigned seen[160]; static atomic_int nseen; static pthread_mutex_t mu = PTHREAD_MUTEX_INITIALIZER;

@@ -1163,10 +1163,21 @@ UMAT_NS(2x3) UMAT_NS(3x2) UMAT_NS(2x4) UMAT_NS(4x2) UMAT_NS(3x4) UMAT_NS(4x3)
  * its queries never report a result on Metal, and an engine that times its GPU work (bgfx, so Minecraft) waits for the
  * result forever. Taken out of the extension lists, the engine never asks.
  */
+/* TL_ZINK_FULL_CAPS=1: Zink as Mesa describes it, nothing trimmed to what an Android GPU (or ANGLE) would say. */
+static bool zink_full_caps(void) { const char *k = getenv("TL_ZINK_FULL_CAPS"); return k && *k == '1'; }
+/* What Zink offers over MoltenVK that no ANGLE-run game ever saw, and that changes which shader variants an engine picks: tessellation
+   (emulated by MoltenVK) and multiview (stereo). Unity drew some passes with its error shader under them; ANGLE never offered them. */
+static const char *const k_zink_hidden_ext[] = { "GL_EXT_tessellation_shader", "GL_OES_tessellation_shader", "GL_EXT_tessellation_point_size",
+    "GL_OES_tessellation_point_size", "GL_OVR_multiview", "GL_OVR_multiview2", "GL_OVR_multiview_multisampled_render_to_texture", NULL };
 static const char *const k_hidden_ext[] = { "GL_EXT_disjoint_timer_query", "GL_EXT_disjoint_timer_query_webgl2", NULL };
 static bool ext_hidden(const char *name, size_t n)
 {
     for (int i = 0; k_hidden_ext[i]; i++) if (strlen(k_hidden_ext[i]) == n && !strncmp(k_hidden_ext[i], name, n)) return true;
+    if (g_zink && !zink_full_caps()) for (int i = 0; k_zink_hidden_ext[i]; i++) if (strlen(k_zink_hidden_ext[i]) == n && !strncmp(k_zink_hidden_ext[i], name, n)) {
+        static atomic_int said;
+        if (!atomic_exchange(&said, 1)) tl_log_line("gl: Zink: tessellation and multiview extensions hidden, as under ANGLE (TL_ZINK_FULL_CAPS=1: keep them)");
+        return true;
+    }
     /* Zink: a program Unity links while KHR_parallel_shader_compile says it is still compiling is drawn with Unity's error
        shader (magenta) instead; without the extension Unity waits for each link. TL_ZINK_PARALLEL_COMPILE=1 keeps it. */
     if (g_zink && n == 30 && !strncmp(name, "GL_KHR_parallel_shader_compile", n)) {
