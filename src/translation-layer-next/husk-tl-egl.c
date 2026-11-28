@@ -985,24 +985,6 @@ static bool copyimg_native(void)
 static const char *const k_copyimg_ext[] = { "GL_EXT_copy_image", "GL_OES_copy_image" };
 #define COPYIMG_EXT_COUNT ((int)(sizeof(k_copyimg_ext) / sizeof(k_copyimg_ext[0])))
 static int copyimg_extra(void) { return copyimg_native() ? 0 : COPYIMG_EXT_COUNT; }
-/* Zink over MoltenVK has no geometry shaders (Metal has none), so its ES 3.2 context is refused and EXT_geometry_shader is not offered.
-   Unity counts "#pragma target 4.0" (and "#pragma require geometry") as needing them and draws such a shader with its error shader
-   (magenta), even when it has no geometry stage -- most do not, and every Android GPU has geometry shaders, so games ship them so.
-   Told the extension is there, Unity takes those shaders; one with a real geometry stage fails to compile, and drew nothing before
-   either. TL_ZINK_GEOMETRY=0: not told. */
-static const char *const k_geom_ext[] = { "GL_EXT_geometry_shader", "GL_OES_geometry_shader" };
-static int geom_extra(void)
-{
-    if (!g_zink) return 0;
-    const char *k = getenv("TL_ZINK_GEOMETRY");
-    if (k && *k == '0') return 0;
-    static atomic_int said;
-    if (!atomic_exchange(&said, 1)) tl_log_line("gl: Zink: GL_EXT_geometry_shader told, so shaders built for target 4.0 are not drawn magenta (TL_ZINK_GEOMETRY=0: not told)");
-    return 2;
-}
-/* the extensions told beyond the driver's own, after its list */
-static int ext_extra(void) { return copyimg_extra() + geom_extra(); }
-static const char *ext_extra_name(int i) { int c = copyimg_extra(); return i < c ? k_copyimg_ext[i] : k_geom_ext[i - c]; }
 
 static struct {
     bool ok;
@@ -1239,7 +1221,7 @@ static const unsigned char *w_glGetString(unsigned name)
     if (source != s) {
         free(filtered);
         size_t len = strlen((const char *)s);
-        filtered = malloc(len + 320);
+        filtered = malloc(len + 192);
         size_t k = 0;
         for (const char *p = (const char *)s; *p;) {
             const char *e = strchr(p, ' ');
@@ -1252,7 +1234,7 @@ static const unsigned char *w_glGetString(unsigned name)
            extension, and only resolves it when the extension is listed (a jump to address 0 otherwise). */
         if ((g_es31_shim || g_es31_native) && !strstr((const char *)s, "GL_EXT_texture_buffer")) { k += (size_t)snprintf(filtered + k, 62, "%sGL_EXT_texture_buffer", k ? " " : ""); }
         /* copy_image, done by copyimg_emulate where ANGLE does not */
-        for (int i = 0, x = ext_extra(); i < x; i++) if (!strstr((const char *)s, ext_extra_name(i))) k += (size_t)snprintf(filtered + k, 62, "%s%s", k ? " " : "", ext_extra_name(i));
+        if (copyimg_extra()) for (int i = 0; i < COPYIMG_EXT_COUNT; i++) k += (size_t)snprintf(filtered + k, 62, "%s%s", k ? " " : "", k_copyimg_ext[i]);
         filtered[k] = 0;
         source = s;
         if (diag_on()) for (size_t o = 0; o < k; o += 360) tl_log_line("gldiag: GL_EXTENSIONS[%zu]: %.360s", o, filtered + o);
@@ -1264,10 +1246,10 @@ static const unsigned char *w_glGetString(unsigned name)
 static const unsigned char *(*r_glGetStringi)(unsigned, unsigned);
 static const unsigned char *w_glGetStringi(unsigned name, unsigned index)
 {
-    if (name == 0x1F03 && ext_extra() && a_glGetIntegerv) {
+    if (name == 0x1F03 && copyimg_extra() && a_glGetIntegerv) {
         int n = 0;
         a_glGetIntegerv(0x821D /* GL_NUM_EXTENSIONS */, &n);
-        if (n > 0 && index >= (unsigned)n && index < (unsigned)n + (unsigned)ext_extra()) return (const unsigned char *)ext_extra_name((int)(index - (unsigned)n));
+        if (n > 0 && index >= (unsigned)n && index < (unsigned)n + COPYIMG_EXT_COUNT) return (const unsigned char *)k_copyimg_ext[index - (unsigned)n];
     }
     const unsigned char *s = r_glGetStringi ? r_glGetStringi(name, index) : NULL;
     if (name == 0x1F03 && index == 0 && r_glGetStringi && diag_on()) {
