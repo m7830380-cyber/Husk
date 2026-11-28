@@ -2701,6 +2701,40 @@ static void skip_boringssl_selfcheck(tl_lib *L)
 }
 
 /*
+ * Unity's Graphics.Blit from a 2D texture into slice 1 or more of a texture array asks for its built-in "Hidden/VR/BlitFromTex2DToTexArraySlice"
+ * (slice 0 takes Hidden/BlitCopy). That shader is only put in a build that has XR, so in every other game the blit is drawn with the
+ * error shader: those slices come out magenta (GoreBox's terrain arrays, so its dirt roads). On GL the engine binds the slice as the
+ * render target (glFramebufferTextureLayer) for either shader, so Hidden/BlitCopy draws it right. Unity finds its blit shaders by name
+ * from a table of string pointers: the entry for that shader is pointed at "Hidden/BlitCopy". TL_UNITY_SLICE_BLIT=0: left alone.
+ */
+static const uint8_t *find_cstr(const tl_lib *L, const char *str)
+{
+    size_t n = strlen(str) + 1, span = L->npages * PAGE;
+    for (size_t off = 1; off + n <= span;) {
+        const uint8_t *p = memmem(L->rw + off, span - off, str, n);   /* read through the writable view; the answer is in rx space */
+        if (!p) return NULL;
+        if (p[-1] == 0) return L->rx + (p - L->rw);
+        off = (size_t)(p - L->rw) + 1;
+    }
+    return NULL;
+}
+static void unity_slice_blit(tl_lib *L)
+{
+    if (L->build || !strstr(L->name, "libunity.so")) return;
+    const char *k = getenv("TL_UNITY_SLICE_BLIT");
+    if (k && *k == '0') return;
+    const uint8_t *vr = find_cstr(L, "Hidden/VR/BlitFromTex2DToTexArraySlice"), *copy = find_cstr(L, "Hidden/BlitCopy");
+    if (!vr || !copy) return;
+    size_t n = 0;
+    for (size_t off = 0; off + 8 <= L->npages * PAGE; off += 8) {
+        uint8_t *w = waddr(L, off);
+        uint64_t v; memcpy(&v, w, 8);
+        if (v == (uint64_t)(uintptr_t)vr) { uint64_t c = (uint64_t)(uintptr_t)copy; memcpy(w, &c, 8); n++; }
+    }
+    tl_log_line("ld: %s: Unity's 2D-to-array-slice blit uses Hidden/BlitCopy (%zu table entr%s; TL_UNITY_SLICE_BLIT=0: off)", L->name, n, n == 1 ? "y" : "ies");
+}
+
+/*
  * Every rewrite of the library's code, done once its relocation table is no longer needed: the island pool in the dead tail of the
  * relocation table, then patch_image over the code ranges. The same function patches an image in the JIT region at load time and an
  * image being made into a dylib ahead of time (tl_ld_aot_build), which is why it only writes through the writable view and every stub
@@ -2725,6 +2759,7 @@ static void patch_library(tl_lib *L, size_t *t, size_t *a, size_t *ad, size_t *s
     mono_aot_code_only(L);
     patch_image(L, t, a, ad, sv);
     skip_boringssl_selfcheck(L);
+    unity_slice_blit(L);
 }
 
 /*
