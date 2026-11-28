@@ -5,6 +5,8 @@
 1. A fragment shader output whose type does not match its colour attachment (a float written to an integer target, which GL
    leaves undefined) makes Metal refuse the whole pipeline. The attachment is left out of that pipeline instead, so the draw
    still happens and only that undefined write is dropped. Blending, which GL ignores on integer targets, is turned off there.
+   So is blending into a format the GPU cannot blend (RGBA32F on Apple GPUs): Metal refuses such a pipeline, and the draw was
+   dropped -- an Unreal scene stayed blank behind its UI. Android GPUs blend 32-bit float, so games do it; unblended beats unseen.
 2. Zink names SPIR-V variables after the GL ones; SPIRV-Cross keeps the names in the MSL it writes, and one that is an MSL type
    (a uniform called "sampler") breaks the shader's compile. The names are debugging aids only, so none are written.
 """
@@ -71,7 +73,12 @@ patch(Z + "zink_pipeline.c",
       "            husk_formats[i] = VK_FORMAT_UNDEFINED;\n"
       "            formats_changed = true;\n"
       "         }\n"
-      "         if (blend_state.pAttachments && (want != 1 || husk_formats[i] == VK_FORMAT_UNDEFINED)) {\n"
+      "         VkFormatProperties husk_fp = {0};\n"
+      "         bool husk_blends = blend_state.pAttachments && i < blend_state.attachmentCount && husk_blend[i].blendEnable;\n"
+      "         if (want == 1 && husk_formats[i] != VK_FORMAT_UNDEFINED && husk_blends)\n"
+      "            VKSCR(GetPhysicalDeviceFormatProperties)(screen->pdev, fmt, &husk_fp);\n"
+      "         bool husk_noblend = husk_blends && husk_fp.optimalTilingFeatures && !(husk_fp.optimalTilingFeatures & VK_FORMAT_FEATURE_COLOR_ATTACHMENT_BLEND_BIT);\n"
+      "         if (blend_state.pAttachments && (want != 1 || husk_formats[i] == VK_FORMAT_UNDEFINED || husk_noblend)) {\n"
       "            husk_blend[i].blendEnable = VK_FALSE;\n"
       "            if (husk_formats[i] == VK_FORMAT_UNDEFINED)\n"
       "               husk_blend[i].colorWriteMask = 0;\n"
