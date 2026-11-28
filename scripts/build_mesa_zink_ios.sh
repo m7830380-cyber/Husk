@@ -81,6 +81,7 @@ perl -0ne 'exit(/OES_texture_buffer =[^;]*ARB_texture_buffer_object_rgb32;/ ? 1 
 perl -0pi -e 's/(template <zink_dynamic_state DYNAMIC_STATE, bool BATCH_CHANGED>\nstatic bool\nupdate_gfx_pipeline)/static thread_local bool husk_pipeline_failed;\n\n$1/; s/(      ctx->shobj_draw = false;\n   \}) else \{/$1 else if (!ctx->curr_program->base.uses_shobj) {\n      husk_pipeline_failed = true;\n   } else {/; s/(   bool pipeline_changed = update_gfx_pipeline<DYNAMIC_STATE, BATCH_CHANGED>\(ctx, bs, mode\);\n)/$1   if (husk_pipeline_failed) {\n      husk_pipeline_failed = false;\n      return;\n   }\n/' src/gallium/drivers/zink/zink_draw.cpp
 [ $(grep -c husk_pipeline_failed src/gallium/drivers/zink/zink_draw.cpp) = 4 ] || { echo "zink_draw.cpp pipeline patch failed"; exit 1; }
 python3 "$HUSK_ROOT/scripts/patch_mesa_zink_outputs.py" || exit 1
+python3 "$HUSK_ROOT/scripts/patch_mesa_zink_async.py" || exit 1
 rm -rf build-ios
 meson setup build-ios --cross-file "$CROSS" \
     -Dbuildtype=release -Db_ndebug=true \

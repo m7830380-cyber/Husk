@@ -12,6 +12,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/mman.h>
+#include <time.h>
 #include <unistd.h>
 #ifdef __APPLE__
 #include <mach-o/loader.h>
@@ -57,6 +58,15 @@ static struct {
  * runs surfaceless here -- iOS has no window system it knows -- so a game's window is an off-screen buffer whose frames are put on
  * the window's Metal layer at each swap (tl_present_rgba). */
 static bool g_zink;
+/* when the game last presented a frame (CLOCK_MONOTONIC ns): Husk's Mesa reads it, through HUSK_ZINK_SWAP_CLOCK, to build new
+ * pipelines in the background while frames are being shown, and at once while the game loads (scripts/patch_mesa_zink_async.py) */
+static _Atomic int64_t g_zink_swap_ns;
+static void zink_swap_clock_tick(void)
+{
+    struct timespec t;
+    clock_gettime(CLOCK_MONOTONIC, &t);
+    atomic_store_explicit(&g_zink_swap_ns, (int64_t)t.tv_sec * 1000000000LL + t.tv_nsec, memory_order_relaxed);
+}
 static bool g_es31_shim;           /* the 3.0 shim (husk-tl-egl-es31.inc) */
 void tl_present_rgba(void *layer, const void *rgba, int w, int h);   /* husk-tl-present.m */
 
@@ -132,6 +142,7 @@ reload:
             gles_path = E.gles_path;
         }
         setenv("MESA_LOADER_DRIVER_OVERRIDE", "zink", 1);
+        { char clk[32]; snprintf(clk, sizeof(clk), "%llx", (unsigned long long)(uintptr_t)&g_zink_swap_ns); setenv("HUSK_ZINK_SWAP_CLOCK", clk, 1); }
         /* Zink's shaders reach Metal through MoltenVK, which would compile them with fast math: NaN/infinity assumed away, so
          * pow(0,0), x/0 and normalize(0) give NaN where a GL driver is IEEE (purple or black patches). Read when MoltenVK starts. */
         setenv("MVK_CONFIG_FAST_MATH_ENABLED", "0", 0);
@@ -878,6 +889,7 @@ void tl_egl_frame_drop(void *sync)
 static void diag_swap(unsigned long n);   /* husk-tl-egl-diag.inc */
 static EGLBoolean w_eglSwapBuffers(EGLDisplay d, EGLSurface s)
 {
+    if (g_zink) zink_swap_clock_tick();
     void *texwin = tex_window_of(s);
     if (texwin) { tex_swap(d, s, texwin); return EGL_TRUE; }
     unsigned long n = atomic_fetch_add(&E.presented, 1) + 1;

@@ -367,15 +367,18 @@ static bool upload(HuskUEPlayer *p, CVPixelBufferRef pb, unsigned tex)
 /* getVideoLastFrame(int destTexture): the frame of the moment into the texture; false when there is no new one */
 static void MP_getVideoLastFrame(tl_jcall *c)
 {
-    HuskUEPlayer *p = P(c);
     c->ret = vz(false);
-    if (!p || !p.output || !p.videoOn) return;
-    CMTime t = [p.output itemTimeForMachAbsoluteTime:(int64_t)mach_absolute_time()];
-    if (![p.output hasNewPixelBufferForItemTime:t]) return;
-    CVPixelBufferRef pb = [p.output copyPixelBufferForItemTime:t itemTimeForDisplay:NULL];
-    if (!pb) return;
-    c->ret = vz(upload(p, pb, (unsigned)c->args[0].i));
-    CVPixelBufferRelease(pb);
+    /* called every frame on the game's render thread, which has no autorelease pool of its own to drain */
+    @autoreleasepool {
+        HuskUEPlayer *p = P(c);
+        if (!p || !p.output || !p.videoOn) return;
+        CMTime t = [p.output itemTimeForMachAbsoluteTime:(int64_t)mach_absolute_time()];
+        if (![p.output hasNewPixelBufferForItemTime:t]) return;
+        CVPixelBufferRef pb = [p.output copyPixelBufferForItemTime:t itemTimeForDisplay:NULL];
+        if (!pb) return;
+        c->ret = vz(upload(p, pb, (unsigned)c->args[0].i));
+        CVPixelBufferRelease(pb);
+    }
 }
 
 /* updateVideoFrame(int externalTexture): the SurfaceTexture path, never chosen here (no GL_OES_EGL_image_external): no frame */
