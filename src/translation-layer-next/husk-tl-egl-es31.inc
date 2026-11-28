@@ -432,6 +432,12 @@ static void w_glLinkProgram(unsigned prog)
     if (used) useprog((unsigned)cur);
 }
 
+/* ES 3.1's own limits: compute, shader storage, images and atomic counters */
+static bool zink_es31_only_limit(unsigned p)
+{
+    return (p >= 0x91BB && p <= 0x91BD) || (p >= 0x8262 && p <= 0x8266) || p == 0x90EB || (p >= 0x90D6 && p <= 0x90DE) ||
+           p == 0x8F38 || p == 0x8F39 || (p >= 0x90CA && p <= 0x90CF) || (p >= 0x92CC && p <= 0x92DC);
+}
 static void (*r_glGetIntegerv)(unsigned, int *);
 static void w_glGetIntegerv(unsigned pname, int *data)
 {
@@ -446,6 +452,13 @@ static void w_glGetIntegerv(unsigned pname, int *data)
         static atomic_int said;
         if (!atomic_exchange(&said, 1)) tl_log_line("gl: Zink: GL_MAX_UNIFORM_BLOCK_SIZE %d told as 65536, as Android GPUs say (TL_ZINK_FULL_CAPS=1: keep it)", *data);
         *data = 65536;
+    }
+    /* Under ANGLE the shim says 3.1 but every compute, storage-buffer, image and atomic-counter limit reads 0, and Unity builds its
+       shader choices from that. Zink says the same, so a game sees the device it was seen to work on (TL_ZINK_FULL_CAPS=1: real limits). */
+    if (g_zink && data && *data && zink_es31_only_limit(pname) && !zink_full_caps()) {
+        static atomic_int said;
+        if (!atomic_exchange(&said, 1)) tl_log_line("gl: Zink: compute, storage, image and atomic limits told as 0, as under ANGLE (first: 0x%x = %d; TL_ZINK_FULL_CAPS=1: keep them)", pname, *data);
+        *data = 0;
     }
     /* the limits a game reads, once each: an engine turns shader features (and whole shaders) off from these */
     if (diag_on() && data) {
@@ -674,4 +687,9 @@ static void w_glGetProgramResourceiv(unsigned prog, unsigned iface, unsigned ind
 }
 /* 3.1's indexed limits (compute work-group counts and sizes) are errors on the 3.0 context, which writes nothing: they read as zero. */
 static void (*r_glGetIntegeri_v)(unsigned, unsigned, int *);
-static void w_glGetIntegeri_v(unsigned p, unsigned i, int *d) { if (g_es31_shim && d) *d = 0; r_glGetIntegeri_v(p, i, d); }
+static void w_glGetIntegeri_v(unsigned p, unsigned i, int *d)
+{
+    if (g_es31_shim && d) *d = 0;
+    r_glGetIntegeri_v(p, i, d);
+    if (g_zink && d && (p == 0x91BE || p == 0x91BF) && !zink_full_caps()) *d = 0;   /* work-group counts and sizes, as under ANGLE */
+}
