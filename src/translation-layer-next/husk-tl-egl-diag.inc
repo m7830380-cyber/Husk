@@ -317,6 +317,7 @@ static void w_glTexImage3D(unsigned target, int level, int ifmt, int w, int h, i
 static __thread long t_layer_draws = -1;
 static __thread unsigned t_ld_tex; static __thread int t_ld_layer;   /* the layer last attached, for lr_diag */
 static void lr_diag(const char *what, unsigned mode, int count);
+static void cube_src(unsigned prog);
 static void (*r_glFramebufferTextureLayer)(unsigned, unsigned, unsigned, int, int);
 
 /* ---- Zink over MoltenVK: a draw into layer N > 0 of an array (or slice of a 3D texture) does not land -- the layer keeps what it
@@ -873,6 +874,7 @@ static void lr_diag(const char *what, unsigned mode, int count)
     for (int i = 0; i < nseen; i++) if (seen[i] == (unsigned)prog) return;
     if (nseen < 8) seen[nseen++] = (unsigned)prog;
     diag_report_prog((unsigned)prog, mode, count, true);
+    cube_src((unsigned)prog);   /* in the log itself: what the engine drew into the layer */
     if (nseen <= 3) diag_write_prog_src((unsigned)prog);
 }
 

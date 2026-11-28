@@ -440,6 +440,17 @@ static void w_glGetIntegerv(unsigned pname, int *data)
     r_glGetIntegerv(pname, data);
     if (g_es31_shim && pname == 0x821C /* GL_MINOR_VERSION */ && data && *data == 0) *data = g_es3_minor;
     if (pname == 0x821D /* GL_NUM_EXTENSIONS */ && data && *data > 0) *data += copyimg_extra();
+    /* the limits a game reads, once each: an engine turns shader features (and whole shaders) off from these */
+    if (diag_on() && data) {
+        static unsigned seen[160]; static atomic_int nseen; static pthread_mutex_t mu = PTHREAD_MUTEX_INITIALIZER;
+        bool fresh = true;
+        pthread_mutex_lock(&mu);
+        int n = atomic_load(&nseen);
+        for (int i = 0; i < n; i++) if (seen[i] == pname) { fresh = false; break; }
+        if (fresh && n < 160) { seen[n] = pname; atomic_store(&nseen, n + 1); } else fresh = false;
+        pthread_mutex_unlock(&mu);
+        if (fresh) tl_log_line("gldiag: caps: glGetIntegerv(%#x) = %d", pname, *data);
+    }
 }
 
 /* The storage-buffer target (a block of the game's data) is a uniform buffer here; a buffer the game made for it is grown to what the
