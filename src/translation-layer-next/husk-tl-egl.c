@@ -1386,7 +1386,7 @@ static const struct { const char *name; void *wrap; void **real; } k_adapt[] = {
     ADAPT(glUniformMatrix2x3fv), ADAPT(glUniformMatrix3x2fv), ADAPT(glUniformMatrix2x4fv), ADAPT(glUniformMatrix4x2fv),
     ADAPT(glUniformMatrix3x4fv), ADAPT(glUniformMatrix4x3fv),
     ADAPT(glProgramBinary), { "glProgramBinaryOES", (void *)w_glProgramBinary, (void **)&r_glProgramBinary }, ADAPT(glGetProgramBinary), { "glGetProgramBinaryOES", (void *)w_glGetProgramBinary, (void **)&r_glGetProgramBinary },
-    ADAPT(glTexStorage3D), ADAPT(glTexImage3D), ADAPT(glTexStorage2D), ADAPT(glTexSubImage2D), ADAPT(glCompressedTexSubImage2D), ADAPT(glCompressedTexImage2D), ADAPT(glTexImage2D), ADAPT(glDeleteTextures),
+    ADAPT(glTexStorage3D), ADAPT(glTexImage3D), ADAPT(glTexStorage2D), ADAPT(glTexSubImage2D), ADAPT(glCompressedTexSubImage2D), ADAPT(glCompressedTexImage2D), ADAPT(glTexImage2D), ADAPT(glDeleteTextures), ADAPT(glBeginQuery), ADAPT(glGetQueryObjectuiv), { "glBeginQueryEXT", (void *)w_glBeginQuery, (void **)&r_glBeginQuery }, { "glGetQueryObjectuivEXT", (void *)w_glGetQueryObjectuiv, (void **)&r_glGetQueryObjectuiv },
     ADAPT(glTexParameteri), ADAPT(glTexParameterf), ADAPT(glTexParameteriv), ADAPT(glTexParameterfv), ADAPT(glGetError), ADAPT(glFramebufferTextureLayer), ADAPT(glBindFramebuffer),
     ADAPT(glBlendFunc), ADAPT(glEnable), ADAPT(glDisable), ADAPT(glUseProgram), ADAPT(glBlendEquation), ADAPT(glBlendEquationSeparate), ADAPT(glBlendFuncSeparate), ADAPT(glBlendFunci), ADAPT(glBlendFuncSeparatei),
     { "glBlendFunciEXT", (void *)w_glBlendFunci, (void **)&r_glBlendFunci }, { "glBlendFunciOES", (void *)w_glBlendFunci, (void **)&r_glBlendFunci },

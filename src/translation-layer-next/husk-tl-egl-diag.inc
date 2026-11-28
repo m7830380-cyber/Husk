@@ -1454,6 +1454,18 @@ static void w_glDrawArraysInstanced(unsigned mode, int first, int count, int ins
 static void (*r_glClear)(unsigned);
 static void w_glClear(unsigned mask) { r_glClear(mask); if (t_layer_draws >= 0 && t_ld_tex) lr_diag("glClear", mask, 0); cap_dirty(); if (!cap_here()) err_check("glClear"); }
 
+/* Occlusion queries: an engine that culls by them draws nothing when every answer says "hidden" (0), or never says it is ready */
+static atomic_int g_q_begun, g_q_avail_yes, g_q_avail_no, g_q_zero, g_q_nonzero;
+static void (*r_glBeginQuery)(unsigned, unsigned);
+static void w_glBeginQuery(unsigned t, unsigned id) { atomic_fetch_add(&g_q_begun, 1); r_glBeginQuery(t, id); }
+static void (*r_glGetQueryObjectuiv)(unsigned, unsigned, unsigned *);
+static void w_glGetQueryObjectuiv(unsigned id, unsigned pname, unsigned *v)
+{
+    r_glGetQueryObjectuiv(id, pname, v);
+    if (!v) return;
+    if (pname == 0x8867 /* RESULT_AVAILABLE */) atomic_fetch_add(*v ? &g_q_avail_yes : &g_q_avail_no, 1);
+    else if (pname == 0x8866 /* RESULT */) atomic_fetch_add(*v ? &g_q_nonzero : &g_q_zero, 1);
+}
 /* at each swap: a capture starts with the frame after a listed one's predecessor, and ends at that frame's swap */
 static void diag_summary(unsigned long n)
 {
@@ -1463,6 +1475,8 @@ static void diag_summary(unsigned long n)
     tl_log_line("gldiag: by swap #%lu: blend calls: BlendFunc %d, BlendFuncSeparate %d, indexed %d + %d; with both factors ZERO %d", n,
                 atomic_load(&g_diag_blend_calls[0]), atomic_load(&g_diag_blend_calls[1]), atomic_load(&g_diag_blend_calls[2]),
                 atomic_load(&g_diag_blend_calls[3]), atomic_load(&g_diag_blend_zero));
+    tl_log_line("gldiag: by swap #%lu: queries begun %d; asked ready: yes %d, no %d; results: 0 (hidden) %d, non-zero %d", n,
+                atomic_load(&g_q_begun), atomic_load(&g_q_avail_yes), atomic_load(&g_q_avail_no), atomic_load(&g_q_zero), atomic_load(&g_q_nonzero));
 }
 static void diag_swap(unsigned long n)
 {
