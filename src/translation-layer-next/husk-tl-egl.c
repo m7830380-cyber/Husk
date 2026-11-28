@@ -1178,6 +1178,17 @@ static bool ext_hidden(const char *name, size_t n)
         if (!atomic_exchange(&said, 1)) tl_log_line("gl: Zink: tessellation and multiview extensions hidden, as under ANGLE (TL_ZINK_FULL_CAPS=1: keep them)");
         return true;
     }
+    /* Zink over MoltenVK: EXT_multisampled_render_to_texture is emulated (Vulkan has no such attachment there), and an Unreal scene drawn
+       into one never reaches its texture -- the frame behind the UI stays blank. Hidden, an engine renders into a plain target
+       or its own MSAA renderbuffer. TL_ZINK_MSRTT=1 keeps it. */
+    if (g_zink && ((n == 37 && !strncmp(name, "GL_EXT_multisampled_render_to_texture", n)) || (n == 38 && !strncmp(name, "GL_EXT_multisampled_render_to_texture2", n)))) {
+        const char *k = getenv("TL_ZINK_MSRTT");
+        if (!(k && *k == '1')) {
+            static atomic_int said;
+            if (!atomic_exchange(&said, 1)) tl_log_line("gl: Zink: GL_EXT_multisampled_render_to_texture hidden (TL_ZINK_MSRTT=1: keep it)");
+            return true;
+        }
+    }
     /* Zink: a program Unity links while KHR_parallel_shader_compile says it is still compiling is drawn with Unity's error
        shader (magenta) instead; without the extension Unity waits for each link. TL_ZINK_PARALLEL_COMPILE=1 keeps it. */
     if (g_zink && n == 30 && !strncmp(name, "GL_KHR_parallel_shader_compile", n)) {
@@ -1576,7 +1587,7 @@ static void *egl_resolve(const char *name)
     static int trace = -1;
     if (trace < 0) trace = getenv("TL_GL_TRACE") ? 1 : 0;
     static atomic_int resolved_said;
-    if (diag_on() && atomic_load(&resolved_said) < 40 && (strstr(name, "Blend") || strstr(name, "Enablei") || strstr(name, "ColorMaski")) && atomic_fetch_add(&resolved_said, 1) < 40) tl_log_line("gldiag: the game resolved %s", name);
+    if (diag_on() && atomic_load(&resolved_said) < 40 && (strstr(name, "Blend") || strstr(name, "Multisample") || strstr(name, "Enablei") || strstr(name, "ColorMaski")) && atomic_fetch_add(&resolved_said, 1) < 40) tl_log_line("gldiag: the game resolved %s", name);
     for (size_t i = 0; i < sizeof(k_adapt) / sizeof(k_adapt[0]); i++) {
         if (!strcmp(k_adapt[i].name, name)) { *k_adapt[i].real = real; return trace ? glt_wrap(name, k_adapt[i].wrap) : k_adapt[i].wrap; }
     }
