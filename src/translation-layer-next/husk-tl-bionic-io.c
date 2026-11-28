@@ -374,6 +374,14 @@ static const vfile *vfile_find(const char *path)
     for (int i = 0; i < g_nvfiles; i++) if (!strcmp(base, g_vfiles[i].name)) return &g_vfiles[i];
     return NULL;
 }
+/* Where a virtual file's bytes are: the host file and the stretch of it. */
+bool tl_vfile_lookup(const char *path, char *host, size_t n, uint64_t *off, uint64_t *size)
+{
+    const vfile *v = vfile_find(path);
+    if (!v) return false;
+    snprintf(host, n, "%s", v->host); *off = v->off; *size = v->size;
+    return true;
+}
 static bool vfd_is(int fd) { return fd >= 0 && fd < 4096 && g_vfd[fd].on; }
 
 static void ftrace_open_jar(const char *path, int fd)

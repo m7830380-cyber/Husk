@@ -195,6 +195,7 @@
 		E71E7F636CCD7BBC696B4619 /* GoogleSignInSheet.swift in Sources */ = {isa = PBXBuildFile; fileRef = 92BB8B6B5EA2FAE7198451C0 /* GoogleSignInSheet.swift */; };
 		E8497752FD99F81C20A94AF9 /* ImportView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6B377713385E7AA354D112E6 /* ImportView.swift */; };
 		E89F2DBA752CE5EB77AF9B4A /* husk-tl-dvm-web.m in Sources */ = {isa = PBXBuildFile; fileRef = B08C946B21AA94C98AF6D394 /* husk-tl-dvm-web.m */; };
+		751460EC02232A3DA263D1B8 /* husk-tl-jni-ue4media.m in Sources */ = {isa = PBXBuildFile; fileRef = F3F9D67349CB5378AE4008AD /* husk-tl-jni-ue4media.m */; };
 		E8E067635E072083A772DADE /* HuskJITHelper.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1C1FC868194AB42F653D94F9 /* HuskJITHelper.swift */; };
 		E8F0828C2C030D26E891E528 /* HuskDownloadActivity.swift in Sources */ = {isa = PBXBuildFile; fileRef = 25DB1D606431C481B06C7337 /* HuskDownloadActivity.swift */; };
 		EA48FA05D5B2D1C216C8D67E /* husk-tl-jni-http.c in Sources */ = {isa = PBXBuildFile; fileRef = 411E4F9A6C6D4F737E8611B9 /* husk-tl-jni-http.c */; };
@@ -459,6 +460,7 @@
 		AE14E4B61CC873501D7EAE6E /* SettingsTab.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SettingsTab.swift; sourceTree = "<group>"; };
 		AF921E3E1F855C07C3E5D2F0 /* husk-jit-arena.c */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.c; path = "husk-jit-arena.c"; sourceTree = "<group>"; };
 		B08C946B21AA94C98AF6D394 /* husk-tl-dvm-web.m */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.objc; path = "husk-tl-dvm-web.m"; sourceTree = "<group>"; };
+		F3F9D67349CB5378AE4008AD /* husk-tl-jni-ue4media.m */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.objc; path = "husk-tl-jni-ue4media.m"; sourceTree = "<group>"; };
 		B1791A63C016A301CFCCFB41 /* JITLess.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = JITLess.swift; sourceTree = "<group>"; };
 		B318C3E235A47EA295C46433 /* husk-tl-nativeactivity.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = "husk-tl-nativeactivity.h"; sourceTree = "<group>"; };
 		B74F9AA42414905593B347BA /* husk-jit.js */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.javascript; path = "husk-jit.js"; sourceTree = "<group>"; };
@@ -770,6 +772,7 @@
 				98CA30D667315D8B8BBBA19C /* husk-tl-dvm-sensors.m */,
 				DC6A345F190285ADF810B168 /* husk-tl-dvm-sqlite.c */,
 				B08C946B21AA94C98AF6D394 /* husk-tl-dvm-web.m */,
+				F3F9D67349CB5378AE4008AD /* husk-tl-jni-ue4media.m */,
 				642A69428A8151E1B1F75CBB /* husk-tl-dvm.c */,
 				D75738ACF768F1D3A21A19C7 /* husk-tl-dvm.h */,
 				CE99D9E12CB5823C669D9CBC /* husk-tl-egl-es31.inc */,
@@ -1282,6 +1285,7 @@
 				A593A625D4A8E73F69E71D23 /* husk-tl-dvm-sensors.m in Sources */,
 				A6EEA5B31AF4AC4AA056F674 /* husk-tl-dvm-sqlite.c in Sources */,
 				E89F2DBA752CE5EB77AF9B4A /* husk-tl-dvm-web.m in Sources */,
+				751460EC02232A3DA263D1B8 /* husk-tl-jni-ue4media.m in Sources */,
 				0571BFDC9E02848C62133B4E /* husk-tl-dvm.c in Sources */,
 				13E70642DCB1EB118EB6B9CF /* husk-tl-egl.c in Sources */,
 				9883B80CE2F3C84E5D6E0A8F /* husk-tl-elf.c in Sources */,

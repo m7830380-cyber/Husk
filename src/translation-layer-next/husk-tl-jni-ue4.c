@@ -258,6 +258,18 @@ void tl_ue4_hle_install(const char *pkg, const char *apk, const char *data, cons
     tl_jni_declare("com/epicgames/ue4/GameApplication", "android/app/Application");
     tl_jni_declare("java/lang/Boolean", "java/lang/Object");
     tl_jni_register_hle(k_hle);
+    /* GameActivity.onCreate sets ANDROID_BUILD_VERSION (Build.VERSION.SDK_INT) and FAndroidMisc::GetAndroidBuildVersion reads it: at 0 the
+     * engine takes the device for one older than Android 4 and makes no video player at all (AndroidMedia wants above 13). */
+    jvalue sdk; sdk.j = 0; sdk.i = 34;
+    tl_jni_set_static(CLS, "ANDROID_BUILD_VERSION", "I", sdk);
+    /* Its movies: MediaPlayer14 over AVFoundation. The frames reach the engine as plain textures; with GL_OES_EGL_image_external the
+     * engine would want an external texture fed by a SurfaceTexture instead, which nothing here feeds, so it is not shown that extension. */
+    void tl_ue4_media_install(void);
+    tl_ue4_media_install();
+    const char *hide = getenv("TL_GL_HIDE");
+    char list[1024];
+    snprintf(list, sizeof(list), "%s%sGL_OES_EGL_image_external,GL_OES_EGL_image_external_essl3", hide && *hide ? hide : "", hide && *hide ? "," : "");
+    if (!getenv("TL_UE4_KEEP_EXTERNAL_IMAGE")) setenv("TL_GL_HIDE", list, 1);
     /* The enum constants EOS reads off EOSOverlay.BrowserStatus: with no class initialiser to run they would be null, which it takes as a broken SDK. */
     static const char *const status[] = { "BEGIN_LOAD", "CLOSED", "CRASHED", "END_LOAD", "LOAD_ERROR" };
     for (size_t i = 0; i < sizeof(status) / sizeof(status[0]); i++) {
