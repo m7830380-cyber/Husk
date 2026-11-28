@@ -129,10 +129,12 @@ static void *native_of(const char *name, const char *sig, const char *mangled)
  * Make a function of the loaded engine return a fixed value: `mov w0, #value; ret` over its first two instructions, written through the writable view of
  * the image. For trying things -- here, to ask an engine that has decided to use a graphics API we do not have to use the other one -- not for shipping.
  */
+bool tl_a32_is_fn(const void *p);
 static bool patch_return(tl_lib *lib, const char *symbol, unsigned value)
 {
     uint32_t *rx = (uint32_t *)tl_ld_sym(lib, symbol);
     if (!rx) { tl_log_line("ue4: no symbol %s to patch", symbol); return false; }
+    if (tl_a32_is_fn(rx)) return false;          /* 32-bit ARM code: an arm64 patch would be written through a guest address */
     uint32_t *rw = (uint32_t *)((uint8_t *)rx + tl_xmem_delta());
     rw[0] = 0x52800000u | (value << 5);          /* mov w0, #value */
     rw[1] = 0xD65F03C0u;                           /* ret */
@@ -355,6 +357,7 @@ bool tl_na_start(const tl_ga_config *cfg)
         load_library(libs[i]);
         if (tl_jni_pending()) { tl_log_line("ue4: loading lib%s.so failed", libs[i]); return false; }
     }
+    if (!engine_is_64bit("libUE4.so")) return false;
     if (!N.vulkan) {
         tl_lib *ue = tl_ld_find_lib("libUE4.so");
         if (ue) { patch_return(ue, "_ZN12FAndroidMisc15ShouldUseVulkanEv", 0); patch_return(ue, "_ZN12FAndroidMisc22ShouldUseDesktopVulkanEv", 0); }
@@ -366,7 +369,6 @@ bool tl_na_start(const tl_ga_config *cfg)
         if (ue) { patch_return(ue, "_ZN12FAndroidMisc15ShouldUseVulkanEv", 1); patch_return(ue, "_ZN12FAndroidMisc17IsVulkanAvailableEv", 1); }
     }
     tl_log_line("ue4: libraries loaded");
-    if (!engine_is_64bit("libUE4.so")) return false;
     setenv("TL_PAD_DPAD", "keys", 0);          /* the D-pad as DPAD_* keys, which the engine maps like a stick's arrows */
     static const tl_pad_sink sink = { na_pad_key, na_pad_motion };
     tl_pad_set_sink(&sink);
