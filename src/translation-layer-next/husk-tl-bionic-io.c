@@ -313,6 +313,20 @@ const char *tl_path_resolve(const char *path, char *buf, size_t n)
             return buf;
         }
         snprintf(buf, n, "%s/sdcard%s", tl_data_dir(), rest);
+        /* Android/data and Android/obb live in the app's private copy even when /sdcard/Android itself is the shared folder, so a
+         * game that makes /sdcard/Android/data/... one folder at a time (Mono's Directory.CreateDirectory) finds /sdcard/Android
+         * already there and then fails with ENOENT: the private parents are made once, up front. */
+        if (!strncmp(rest, "/Android/data", 13) || !strncmp(rest, "/Android/obb", 12)) {
+            static char made[1024];
+            if (strcmp(made, tl_data_dir())) {
+                char d[1024];
+                snprintf(d, sizeof(d), "%s/sdcard", tl_data_dir()); mkdir(d, 0777);
+                snprintf(d, sizeof(d), "%s/sdcard/Android", tl_data_dir()); mkdir(d, 0777);
+                snprintf(d, sizeof(d), "%s/sdcard/Android/data", tl_data_dir()); mkdir(d, 0777);
+                snprintf(d, sizeof(d), "%s/sdcard/Android/obb", tl_data_dir()); mkdir(d, 0777);
+                snprintf(made, sizeof(made), "%s", tl_data_dir());
+            }
+        }
         /* An expansion file (Android/obb/<package>/main.<version>.<package>.obb) not in the app's data: the one Husk's store
          * downloaded with the app, kept beside its APKs in obb/ */
         if (!strncmp(rest, "/Android/obb/", 13)) {
